@@ -11,6 +11,8 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 /**
@@ -59,9 +61,9 @@ class EncryptedPairedSenderStore @Inject constructor(
 
     private val cache = MutableStateFlow<List<PairedSender>>(loadAll())
     override val pairedSenders: StateFlow<List<PairedSender>> = cache.asStateFlow()
+    private val mutex = Mutex()
 
-    @Synchronized
-    override suspend fun add(pairedSender: PairedSender) {
+    override suspend fun add(pairedSender: PairedSender) = mutex.withLock {
         prefs.edit()
             .putString(recordKey(pairedSender.pairingId), encodeRecord(pairedSender))
             .apply()
@@ -69,8 +71,7 @@ class EncryptedPairedSenderStore @Inject constructor(
         cache.value = loadAll()
     }
 
-    @Synchronized
-    override suspend fun remove(pairingId: String) {
+    override suspend fun remove(pairingId: String) = mutex.withLock {
         prefs.edit().remove(recordKey(pairingId)).apply()
         updateIndex { ids -> ids - pairingId }
         cache.value = loadAll()

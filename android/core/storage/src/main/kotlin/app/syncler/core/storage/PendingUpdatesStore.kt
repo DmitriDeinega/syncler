@@ -10,6 +10,8 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 /**
@@ -52,16 +54,15 @@ class EncryptedPendingUpdatesStore @Inject constructor(
 
     private val cache = MutableStateFlow<List<PluginUpdateAvailable>>(loadAll())
     override val updates: StateFlow<List<PluginUpdateAvailable>> = cache.asStateFlow()
+    private val mutex = Mutex()
 
-    @Synchronized
-    override suspend fun addOrReplace(update: PluginUpdateAvailable) {
+    override suspend fun addOrReplace(update: PluginUpdateAvailable) = mutex.withLock {
         prefs.edit().putString(recordKey(update.pluginId), encode(update)).apply()
         updateIndex { ids -> ids + update.pluginId }
         cache.value = loadAll()
     }
 
-    @Synchronized
-    override suspend fun remove(pluginId: String) {
+    override suspend fun remove(pluginId: String) = mutex.withLock {
         prefs.edit().remove(recordKey(pluginId)).apply()
         updateIndex { ids -> ids - pluginId }
         cache.value = loadAll()
@@ -70,7 +71,6 @@ class EncryptedPendingUpdatesStore @Inject constructor(
     override suspend fun byPluginId(pluginId: String): PluginUpdateAvailable? =
         cache.value.firstOrNull { it.pluginId == pluginId }
 
-    @Synchronized
     override suspend fun deferUpdate(pluginId: String, untilMs: Long) {
         val existing = cache.value.firstOrNull { it.pluginId == pluginId } ?: return
         // Monotonic: never roll a reminder backwards. If a caller supplies

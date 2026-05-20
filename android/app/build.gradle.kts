@@ -17,7 +17,7 @@ android {
         versionCode = 1
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "SERVER_BASE_URL", "\"http://10.0.2.2:8000/\"")
+        buildConfigField("String", "SERVER_BASE_URL", "\"http://192.168.1.4:8001/\"")
 
         // Environment label. Override at build time:
         //   ./gradlew :app:assembleDebug -Psyncler.environment=PROD
@@ -36,6 +36,21 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            // BouncyCastle ships a JPMS manifest that collides with JSpecify
+            // and other transitive deps. These META-INF files are not
+            // needed at runtime.
+            excludes += setOf(
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/INDEX.LIST",
+            )
+        }
     }
 }
 

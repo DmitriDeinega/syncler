@@ -2,10 +2,12 @@ package app.syncler.core.storage
 
 import android.content.Context
 import androidx.room.Database
+import androidx.room.Entity
+import androidx.room.PrimaryKey
 import androidx.room.Room
 import androidx.room.RoomDatabase
-import app.syncler.core.crypto.toBase64
 import app.syncler.core.crypto.base64ToBytes
+import app.syncler.core.crypto.toBase64
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -15,7 +17,19 @@ import java.security.SecureRandom
 import javax.inject.Singleton
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
-@Database(entities = [], version = 1, exportSchema = true)
+/**
+ * Placeholder entity so Room is happy. V1 stores everything via
+ * EncryptedSharedPreferences (PairedSenderStore, PendingUpdatesStore,
+ * EncryptedUserState). Real schema lands when M1.5/V1.5 wires structured
+ * local data — e.g. cached inbox messages, plugin install state.
+ */
+@Entity(tableName = "kv_placeholder")
+data class KvPlaceholder(
+    @PrimaryKey val id: Long,
+    val payload: String,
+)
+
+@Database(entities = [KvPlaceholder::class], version = 1, exportSchema = true)
 abstract class LocalDb : RoomDatabase()
 
 @Module

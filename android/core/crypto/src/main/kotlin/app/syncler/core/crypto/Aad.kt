@@ -72,7 +72,7 @@ private fun String.jsonEscape(): String = buildString {
             '\\' -> append("\\\\")
             '"' -> append("\\\"")
             '\b' -> append("\\b")
-            '' -> append("\\f")
+            '' -> append("\\f")
             '\n' -> append("\\n")
             '\r' -> append("\\r")
             '\t' -> append("\\t")
