@@ -6,7 +6,7 @@ import base64
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto.signatures import verify_message_envelope
@@ -144,7 +144,7 @@ async def latest(
 async def revoke(
     payload: PluginRevokeRequest,
     db: AsyncSession = Depends(get_db),
-) -> None:
+) -> Response:
     """Sender-authenticated plugin row revoke.
 
     M8.1 fix: the previous public revoke endpoint allowed anyone with a
@@ -175,3 +175,4 @@ async def revoke(
         await revoke_plugin_row(db, payload.plugin_row_id)
     except PluginNotFoundError as exc:
         raise HTTPException(status_code=404, detail="plugin not found") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
