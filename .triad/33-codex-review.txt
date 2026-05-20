@@ -1,0 +1,16 @@
+**Findings**
+
+[P1] Lottery action flow in the spec does not work with the current runtime.  
+[docs/lottery-integration-spec.md](D:/Projects/syncler/docs/lottery-integration-spec.md:92) tells the plugin to call `platform.message.respond('played', ...)`, then expects `onAction` to POST to the lottery backend at [line 100](D:/Projects/syncler/docs/lottery-integration-spec.md:100). But the Android bridge currently just validates `actionId` and returns `{}` in [MessageBridge.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/capabilities/MessageBridge.kt:11); it does not dispatch `onAction`, forward the payload, or inject `device_id`. A Claude instance following this doc will build an integration where tapping “Played” never reaches `/api/played`.
+
+[P1] The lottery plugin signing instructions produce a signature Android will reject.  
+The doc points to `node .../tools/sign-bundle.js --bundle ...` at [docs/lottery-integration-spec.md](D:/Projects/syncler/docs/lottery-integration-spec.md:126), but the actual tool expects positional args and is TypeScript, not that JS/flag shape: [sign-bundle.ts](D:/Projects/syncler/sdk-plugin/tools/sign-bundle.ts:14). More importantly, the tool signs the raw bundle at [line 23](D:/Projects/syncler/sdk-plugin/tools/sign-bundle.ts:23), while Android verifies `canonicalManifestWithoutSignature || bundleHash` at [PluginSignatureVerifier.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginSignatureVerifier.kt:31). The doc then publishes that signature at [docs/lottery-integration-spec.md](D:/Projects/syncler/docs/lottery-integration-spec.md:159), so the published plugin can’t pass device-side signature verification.
+
+[P2] SDK/server signing bytes match only if UUID strings are already server-canonical.  
+`send_to` signs `self.sender_id`, `user_uuid`, and `plugin_id` exactly as caller strings at [client.py](D:/Projects/syncler/sdk-python/syncler/client.py:229), while the server rebuilds the envelope from Pydantic UUIDs using `str(payload.sender_id/user_id/plugin_id)` at [messages.py](D:/Projects/syncler/server/app/routers/messages.py:67). Same issue exists for plugin publish: SDK signs `self.sender_id` at [client.py](D:/Projects/syncler/sdk-python/syncler/client.py:283), server signs against `str(payload.sender_id)` at [plugins.py](D:/Projects/syncler/server/app/routers/plugins.py:48). Uppercase/braced/URN UUIDs are valid inputs server-side but normalize before verification, causing `401 invalid signature`. Canonicalize UUID inputs in the SDK before signing and sending.
+
+**Notes**
+
+For canonical lowercase UUIDs and SDK-generated UTC `expires_at`, message AAD/envelope shape appears aligned: same 5 AAD fields, same 7 envelope fields, sorted compact JSON, `min_plugin_version` as `""` for signing. Plugin publish envelope also matches under canonical UUID strings.
+
+I did not run tests; this was a read-only review.

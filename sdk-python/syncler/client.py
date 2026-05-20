@@ -12,6 +12,17 @@ from typing import Any
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+
+def _canon_uuid(value: str) -> str:
+    """Normalize a UUID string to lowercase no-brace canonical form.
+
+    The server stores UUIDs as ``str(uuid.UUID(payload.xxx))`` which always
+    lowercases and strips braces. The SDK signs over caller-supplied
+    strings, so uppercase or braced inputs would silently mismatch
+    (401 invalid signature). Normalize at the boundary.
+    """
+    return str(uuid.UUID(str(value)))
+
 from syncler.crypto import (
     assemble_envelope,
     b64,
@@ -97,6 +108,11 @@ class Client:
 
     # ---------------------------- Sender lifecycle -------------------------
 
+    def _canonical_sender_id(self) -> str:
+        if self.sender_id is None:
+            raise SynclerError("sender_id not set")
+        return _canon_uuid(self.sender_id)
+
     def register_if_needed(self, *, contact: str | None = None) -> str:
         """Register the sender public key once. Returns sender_id.
 
@@ -138,7 +154,7 @@ class Client:
         """
         self._require_sender_id()
         body = {
-            "sender_id": self.sender_id,
+            "sender_id": self._canonical_sender_id(),
             "ttl_seconds": ttl_seconds,
             "metadata": metadata or {},
         }
@@ -198,6 +214,9 @@ class Client:
         min_plugin_version: str = "",
         ttl_seconds: int = 7 * 24 * 3600,
     ) -> SendResult:
+        # Canonicalize UUIDs so signature bytes match server reconstruction.
+        user_uuid = _canon_uuid(user_uuid)
+        plugin_id = _canon_uuid(plugin_id)
         """Encrypt the payload, sign the envelope, POST to /messages/send.
 
         ``plugin_id`` is the row-UUID of a specific published version (from
@@ -215,7 +234,7 @@ class Client:
             pairing_key=self.pairing_key,
             plaintext=plaintext,
             aad=_aad(
-                sender_id=self.sender_id,
+                sender_id=self._canonical_sender_id(),
                 user_id=user_uuid,
                 plugin_id=plugin_id,
                 min_plugin_version=min_plugin_version,
@@ -226,7 +245,7 @@ class Client:
         nonce_b64 = b64(nonce)
 
         envelope = assemble_envelope(
-            sender_id=self.sender_id,
+            sender_id=self._canonical_sender_id(),
             user_id=user_uuid,
             plugin_id=plugin_id,
             min_plugin_version=min_plugin_version,
@@ -237,7 +256,7 @@ class Client:
         signature = self.private_key.sign(envelope)
 
         body = {
-            "sender_id": self.sender_id,
+            "sender_id": self._canonical_sender_id(),
             "user_id": user_uuid,
             "plugin_id": plugin_id,
             "encrypted_body": encrypted_body_b64,
@@ -280,7 +299,7 @@ class Client:
         """
         self._require_sender_id()
         body = {
-            "sender_id": self.sender_id,
+            "sender_id": self._canonical_sender_id(),
             "plugin_identifier": plugin_identifier,
             "version": version,
             "manifest_hash": b64(manifest_hash),

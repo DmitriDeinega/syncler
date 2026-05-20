@@ -81,6 +81,10 @@ export class LotteryPlugin extends BasePlugin {
     const rows = payload.numbers
       .map(set => `<li>${set.join('-')}</li>`)
       .join('');
+    // V1 recommended pattern: button handler calls `platform.network.fetch`
+    // directly. The `platform.message.respond` + `onAction` round-trip is
+    // reserved for V1.5 (it lets the platform sync action state across
+    // devices). For V1, post directly to your declared endpoint.
     return `
       <div style="font-family:sans-serif;padding:16px">
         <h2>Lottery ${payload.draw_date}</h2>
@@ -88,26 +92,20 @@ export class LotteryPlugin extends BasePlugin {
         <button id="played" style="font-size:18px;padding:12px">Played</button>
       </div>
       <script>
+        const batchId = ${JSON.stringify(payload.batch_id)};
         document.getElementById('played').onclick = async () => {
-          await platform.message.respond('played', {
-            batch_id: ${JSON.stringify(payload.batch_id)},
+          await platform.network.fetch('https://lottery.app/api/played', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              batch_id: batchId,
+              played_at: new Date().toISOString(),
+            }),
           });
+          document.getElementById('played').textContent = 'Sent ✓';
         };
       </script>
     `;
-  }
-
-  async onAction(actionName: string, payload: { batch_id: string }) {
-    if (actionName !== 'played') return;
-    await platform.network.fetch('https://lottery.app/api/played', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        batch_id: payload.batch_id,
-        played_at: new Date().toISOString(),
-        // device_id is added by the Syncler runtime — see SDK reference §4
-      }),
-    });
   }
 }
 ```
@@ -122,13 +120,15 @@ npm install @syncler/plugin-sdk
 # Build (esbuild produces a single ESM bundle)
 npm run build  # → dist/plugin.bundle.js
 
-# Sign it. You need an Ed25519 private key for your sender.
-node node_modules/@syncler/plugin-sdk/tools/sign-bundle.js \
-  --bundle dist/plugin.bundle.js \
-  --private-key ~/.syncler/keys/lottery.pem \
-  --manifest manifest.json \
-  --output manifest.signed.json
+# Sign it (positional args, tsx is required for the TS tool):
+npx tsx node_modules/@syncler/plugin-sdk/tools/sign-bundle.ts \
+  dist/plugin.bundle.js \
+  ~/.syncler/keys/lottery.pem \
+  manifest.json \
+  manifest.signed.json
 ```
+
+The tool signs the canonical-manifest-with-bundleHash-bytes (the exact bytes the Android host verifies against — see `docs/crypto-spec.md` §5). `manifest.signed.json` will contain populated `bundleHash` + `signature` fields.
 
 `manifest.signed.json` now contains `bundleHash` + `signature` populated. Host the bundle file at a stable HTTPS URL (CDN, S3, GitHub raw).
 
