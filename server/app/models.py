@@ -62,6 +62,18 @@ class Pairing(Base):
     # No hard UNIQUE(user_id, sender_id) — re-pair after revoke must work.
     # Migration 0003 replaces the M1.3 constraint with a partial unique
     # index on (user_id, sender_id) WHERE revoked_at IS NULL.
+    # The ORM-side Index below mirrors that so Base.metadata.create_all()
+    # (used by tests/conftest.py) gets the same enforcement without Alembic.
+    __table_args__ = (
+        Index(
+            "uq_pairings_active_user_sender",
+            "user_id",
+            "sender_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     user_id: Mapped[UUID] = mapped_column(

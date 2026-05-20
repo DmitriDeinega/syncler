@@ -62,15 +62,22 @@ class PairingRepository @Inject constructor(
             ),
         )
         // Defense-in-depth: confirm the server's complete-response identity
-        // matches the preview the user manually confirmed. If a man-in-the-
-        // middle (or backend bug) swapped senders between preview and
-        // complete, abort + revoke.
+        // matches the preview the user manually confirmed across ALL identity
+        // fields (sender_id + public_key + fingerprint + name + name_hash).
+        // A backend bug or mid-stream swap that mutated even just the name
+        // would slip through a partial check.
         if (response.senderId != preview.senderId ||
             response.senderPublicKey != preview.senderPublicKey ||
-            response.senderPublicKeyFingerprint != preview.senderPublicKeyFingerprint
+            response.senderPublicKeyFingerprint != preview.senderPublicKeyFingerprint ||
+            response.senderName != preview.senderName ||
+            response.senderNameHash != preview.senderNameHash
         ) {
             Timber.tag(TAG).e("preview/complete identity mismatch — revoking and aborting")
-            runCatching { api.revokePairing(response.pairingId) }
+            val revoked = runCatching { api.revokePairing(response.pairingId) }
+            revoked.onFailure { Timber.tag(TAG).e(it, "failed to revoke after mismatch — manual cleanup required") }
+            if (revoked.isSuccess && revoked.getOrNull()?.isSuccessful == false) {
+                Timber.tag(TAG).e("revoke returned non-2xx after mismatch — manual cleanup required")
+            }
             throw IllegalStateException("preview/complete identity mismatch")
         }
 

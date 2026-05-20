@@ -114,6 +114,7 @@ async def initiate(
 @router.get("/preview", response_model=PairingPreviewResponse)
 async def preview(
     token: str,
+    _: None = Depends(rate_limit("message_send_ip")),  # IP-based DoS hygiene
     db: AsyncSession = Depends(get_db),
 ) -> PairingPreviewResponse:
     """Non-consuming sender-identity lookup. Lets the device show fingerprint
