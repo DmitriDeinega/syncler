@@ -1,0 +1,23 @@
+=== REACTION ===
+I agree with the reframe: Q2/Q4 define the build, Q3/Q5 define the architecture constraint. The sharper version is: V1 must support arbitrary senders through a stable public API, but it only needs to prove two card workflows end-to-end. I read “everything” less as a literal feature list and more as “don’t build a toy that we knowingly have to throw away.”
+
+=== BATCH 2 QUESTIONS ===
+1. For V1, can the Syncler server read trading reports and lottery numbers, yes or no? If yes, you get easier search/debugging; if no, you need E2E encryption and lose some server-side convenience.
+
+2. Are trading reports sensitive enough that you would be uncomfortable storing them unencrypted in your database? Answer separately for trading bot reports, lottery number batches, and future photo/KYC uploads.
+
+3. For the trading bot and lottery app specifically, what card type requires a renderer plugin instead of declarative components plus optional sandboxed HTML? If the answer is “none,” plugin infrastructure is out of the 80-hour demo.
+
+4. What exact card schema does the lottery app need: title, number list, draw date, “played” button, notes, attachments, status? Name the fields now so the SDK and integration doc can stay small.
+
+5. When you tap “played,” what response should the lottery app receive: `{ card_id, action: "played" }`, the selected numbers, timestamp, user note, device info, or something else?
+
+6. How should the lottery app receive that response in V1: webhook URL, polling API, WebSocket, or “store response and let the sender fetch later”? Pick one primary path.
+
+7. What happens if you tap “played” while offline: does the phone queue the response, show pending state, allow editing, or block the tap until online?
+
+8. If the trading bot sends 50 reports while you are asleep or traveling, should Syncler show 50 separate cards, collapse them into a digest, rate-limit the sender, or let the sender decide grouping?
+
+9. How does your AWS trading bot authenticate in V1: one API key in an environment variable, per-sender key with scoped permissions, signed requests, or OAuth-style pairing? Pick the simplest thing you would actually deploy.
+
+10. What is the minimal Python SDK API that would make both integrations feel obvious: `send_card()`, `send_report()`, `ask_button()`, `wait_for_response()`, `upload_file()`? List only the calls needed for trading reports and lottery “played.”

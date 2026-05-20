@@ -1,0 +1,1454 @@
+﻿node.exe : Reading prompt from stdin...
+At C:\Users\Dima\AppData\Roaming\npm\codex.ps1:22 char:14
++ ...    $input | & "node$exe"  "$basedir/node_modules/@openai/codex/bin/co ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Reading prompt from stdin...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019e42a5-5f6d-7873-b63e-be709614530e
+--------
+user
+# Round 8 ??? Codex arbitrates the planning phase
+
+You are the lead for the planning phase. Claude drafted the plan; Gemini attacked it. Your job: produce the final V1 
+build plan that the team will execute against.
+
+## Process
+
+1. Read Claude's draft (below).
+2. Read Gemini's attack (below).
+3. For each of Gemini's specific attacks (1-10) and "missed entirely" items, render a verdict: `accept`, 
+`accept-with-modification`, or `reject-with-reason`.
+4. Produce the **final plan** ??? Claude's draft updated to incorporate accepted changes. Replace stale sections (hour 
+estimates, cut order, security details) with revised text. Keep the structure but make it correct.
+5. Final answer: are we ready to start building? If not, what's the smallest blocker?
+
+## What "final" means
+- This is the document we will hand to a build-execution Claude Code in the next phase.
+- Hour estimates must be defensible ??? if Gemini was right that M4 is 45h not 28h, the plan says 45h.
+- The cut order must protect product value, not just save hours.
+- Crypto specifics (Argon2id parameters, nonce strategy, HKDF info, key separation) must be concrete and named, not 
+hand-waved.
+- Missing pieces Gemini flagged (revocation, retention, rate limiting, conflict resolution, plugin update UX) must be 
+addressed ??? either added to V1 plan with hours, or explicitly deferred with justification.
+
+## Output format
+
+```
+=== VERDICTS ===
+1. <accept | accept-with-modification: ... | reject: ...>
+2. ...
+[For all 10 attacks + missed-entirely items]
+
+=== FINAL PLAN ===
+# Syncler V1 ??? Build Plan (Final, arbitrated by Codex)
+
+[Full final plan, replacing Claude's draft. Same structure: ??0 exec summary, ??1 architecture, ??2 key hierarchy, ??3 
+server, ??4 Android, ??5 plugin SDK, ??6 server SDK, ??7 milestones, ??8 cut order, ??9 risks, ??10 disposition, ??11 
+ready-state. Update everything that needs updating. Keep what survived Gemini's attack unchanged.]
+
+=== READY TO BUILD? ===
+<yes | no ??? if no, the smallest concrete blocker>
+```
+
+Be decisive. The next phase is execution; the plan must be a contract, not a sketch.
+
+---
+
+## Claude's draft
+
+[FULL DRAFT FOLLOWS]
+
+
+## Claude's draft (verbatim)
+
+# Syncler V1 ??? Build Plan (Claude's draft, for Gemini to attack)
+
+Working name: **Syncler** (from project directory). Final naming = V1.5 task.
+
+Drafter: Claude. Attacker: Gemini. Arbiter: Codex (lead, planning phase).
+
+## 0. Executive summary
+
+V1 is a multi-device, end-to-end encrypted, plugin-host platform. External programs push structured messages to a 
+user's Android phone(s); each sender ships its own JavaScript plugin that defines its own data, UI, and actions; the 
+platform is content-blind. Pairing brokered through the server. User account = email + password under the Bitwarden 
+zero-knowledge model.
+
+**V1 stack:** Python (FastAPI) server + Kotlin (Jetpack Compose) Android app + JS plugin SDK. Supabase + Fly.io free 
+tier for V1, AWS RDS+Lambda transition pre-ship.
+
+**Estimated build:** ~140 hours of platform work. Overshoots the 80h fantasy by 60h. Cut order in ??8 brings it to 
+~100h if forced.
+
+**Hour-80 demo (per user Q4):** trading bot + lottery plugin both functioning end-to-end, lottery plugin written from 
+a 6-page spec doc handed to a separate Claude Code instance (the dogfood DX test). Multi-device sync demoed across two 
+Android phones.
+
+## 1. Architecture
+
+### Actors
+- **User** ??? identified by UUID, owns 1+ devices.
+- **Device** ??? Android phone running the Syncler app; carries decrypted master key in memory after login.
+- **Sender** ??? any external program (trading bot, lottery app); holds a sender keypair.
+- **Plugin** ??? JS module distributed by the sender, sandboxed in WebView, runs on each user device.
+- **Server** ??? FastAPI + Postgres; stores opaque ciphertexts and metadata; FCM push fan-out.
+
+### Trust model
+- Zero-knowledge for content. Server never sees password, master key, or message bodies.
+- Server sees metadata: account exists, plugin X installed by user U, sender S paired with user U, message exists with 
+envelope `(sender, recipient, timestamp, min_plugin_version)`.
+- Each plugin install requires explicit user permission grant **per device**.
+
+### Data flow (sender ??? user device)
+1. Sender's backend calls `client.send_to(user_uuid, encrypted_payload)`.
+2. Server records envelope; fans out FCM to all of user's devices.
+3. Each device wakes; routes to correct plugin's WebView; plugin's `onMessage()` runs.
+4. Plugin decrypts payload (per-sender pairing key derived from master key + sender_id).
+5. Plugin calls `platform.showNotification({title, body})`.
+6. User taps notification ??? opens card view ??? plugin's `render(data)` paints UI.
+7. User taps action ??? plugin POSTs to declared endpoint at sender's API.
+
+## 2. Key hierarchy
+
+```
+password
+  ????????? Argon2id(salt=user_uuid, params=high-cost)
+        ????????? auth_key  ??? SHA256 ??? server stores hash (login verification)
+        ????????? master_key_wrap_key (in-memory only)
+              ????????? decrypts encrypted_master_key (server-stored blob)
+
+master_key (256-bit, client-generated at signup)
+  ????????? encrypts user state (plugin installs, pairings) ??? stored encrypted on server
+  ????????? HKDF(master_key, sender_id) ??? pairing_key (per-sender E2E)
+
+pairing_key
+  ????????? AES-GCM(message body) ??? between sender and user devices
+```
+
+**Why the indirection:** rotating password (user changes it) re-wraps the master key with new wrap key. Master key 
+itself stays. All encrypted data remains decryptable. Direct password???master_key would force re-encryption of 
+everything on every password change.
+
+## 3. Server
+
+### Stack
+- **Python 3.12 + FastAPI** ??? async, auto-OpenAPI, fits Python SDK story
+- **PostgreSQL 16** ??? Supabase free tier (V1), AWS RDS (ship)
+- **Blob storage** ??? Supabase Storage (V1), S3 (ship) ??? encrypted blobs only
+- **Push** ??? Firebase Cloud Messaging
+- **Hosting** ??? Fly.io free tier (V1), AWS Lambda + API Gateway (ship)
+
+### API surface
+- `POST /v1/auth/signup` ??? email, auth_key_hash, encrypted_master_key
+- `POST /v1/auth/login` ??? returns session + encrypted_master_key
+- `POST /v1/auth/devices/enroll` ??? register device pubkey + FCM token
+- `POST /v1/pairing/initiate` ??? sender publishes pairing request
+- `POST /v1/pairing/complete` ??? device scans QR, broker exchange
+- `POST /v1/messages/send` ??? sender posts encrypted envelope
+- `GET /v1/messages/inbox` ??? device polls/subscribes
+- `POST /v1/messages/{id}/dismiss` ??? device reports dismiss (Gap 1)
+- `GET /v1/plugins/{plugin_id}/manifest`
+- `POST /v1/plugins/install` ??? device records install in encrypted user state
+
+### Tables
+- `users(id, email, auth_key_hash, encrypted_master_key, created_at)`
+- `devices(id, user_id, public_key, fcm_token, last_seen)`
+- `senders(id, public_key, name, contact, created_at)`
+- `pairings(id, user_id, sender_id, encrypted_state, created_at)`
+- `messages(id, sender_id, user_id, encrypted_body_pointer, min_plugin_version, sent_at)`
+- `delivery_status(message_id, device_id, delivered_at, dismissed_at)`
+- `plugins(id, manifest_hash, signed_bundle_url, version, sender_id, capabilities, endpoints)`
+
+## 4. Android app
+
+### Stack
+- **Kotlin + Jetpack Compose**
+- **AndroidX WebView** ??? one isolated instance per active plugin
+- **AndroidX Security + Tink** for crypto
+- **EncryptedSharedPreferences + SQLCipher** for local storage
+- **Firebase SDK** for FCM
+- **Foreground Service** for plugin background execution on message receipt
+- **Target SDK 34**
+
+### Modules
+- `:app` ??? entry, navigation
+- `:core:auth` ??? login, signup, key management
+- `:core:crypto` ??? Argon2id, HKDF, AES-GCM
+- `:core:network` ??? API client, WebSocket
+- `:core:storage` ??? local encrypted DB
+- `:feature:inbox` ??? message feed UI
+- `:feature:plugin-host` ??? WebView management, JS bridge, sandboxing
+- `:feature:pairing` ??? QR scan, broker exchange
+- `:feature:settings` ??? devices, plugins, permissions
+
+### JS bridge (exposed to plugins)
+```
+platform.showNotification({title, body, importance?})
+platform.storage.get(key) / set(key, value)
+platform.network.fetch(url, options)         // restricted to declared endpoints
+platform.camera.capture()
+platform.gallery.pick()
+platform.file.pick({mimeTypes})
+platform.location.current({accuracy})
+platform.message.respond(actionId, payload)
+platform.message.dismissBehavior(enum)
+```
+
+## 5. Plugin SDK (JavaScript) ??? example
+
+```javascript
+import { BasePlugin, DismissBehavior } from '@syncler/plugin-sdk';
+
+export class LotteryPlugin extends BasePlugin {
+  static manifest = {
+    id: 'com.lottery.app',
+    name: 'Lottery',
+    version: '1.0.0',
+    declaredCapabilities: ['network'],
+    declaredEndpoints: ['https://lottery.app/api/*'],
+    dismissBehavior: DismissBehavior.DISMISS_ALL,
+  };
+
+  async onMessage(payload) {
+    const { numbers, draw_date } = payload;
+    return platform.showNotification({
+      title: 'Lottery numbers ready',
+      body: `${numbers.length} sets for ${draw_date}`,
+    });
+  }
+
+  render(data) { /* HTML/CSS/JS inside isolated WebView */ }
+
+  async onAction(actionName, payload) {
+    if (actionName === 'played') {
+      await platform.network.fetch('https://lottery.app/api/played', {
+        method: 'POST',
+        body: JSON.stringify({ card_id: payload.card_id, numbers: payload.numbers }),
+      });
+    }
+  }
+}
+```
+
+## 6. Server SDK (Python)
+
+```python
+from syncler import Client
+
+client = Client(
+    sender_id='com.lottery.app',
+    signing_key_path='~/.syncler/keys/lottery_private.pem',
+)
+
+client.send_to(
+    user_uuid='<recipient>',
+    payload={'numbers': [[1,2,3],[4,5,6]], 'draw_date': '2026-06-01'},
+    min_plugin_version='1.0.0',
+)
+```
+
+Surface: `Client(...)`, `client.send_to(...)`, `client.wait_for_action(message_id, timeout)`, 
+`client.list_paired_users()`, `client.create_pairing_qr()`, `client.complete_pairing(token)`.
+
+## 7. Milestones
+
+| # | Milestone | Hours | Risk |
+|---|---|---:|---|
+| M1 | Server scaffold: FastAPI, DB schema, auth, JWT sessions | 18 | low |
+| M2 | Crypto layer: Argon2id, key hierarchy, AES-GCM, HKDF | 12 | medium |
+| M3 | Android shell: Compose UI, login/signup, secure local storage, device enrollment | 15 | low |
+| M4 | Plugin SDK + WebView host: BasePlugin, JS bridge, sandboxing, per-plugin isolation | 28 | **high** |
+| M5 | Push + delivery: FCM data messages, encrypted payload pipeline, background service | 18 | **high** (Android 
+battery restrictions) |
+| M6 | Pairing broker: QR, scan flow, key exchange, sender pubkey registration | 14 | medium |
+| M7 | Multi-device sync: Gap 1 (dismiss enum), Gap 3 (min_plugin_version), user state sync | 10 | medium |
+| M8 | Trading bot integration + lottery spec doc (6 pages cap) | 8 | low |
+| M9 | Lottery plugin integration (dogfood DX test) | 4 | depends on spec quality |
+| M10 | Bug fixing + polish | 13 | ??? |
+| **Total** | | **140** | overshoots 80h by 60h |
+
+## 8. Cut order if budget breaks (target = 100h)
+
+1. **M10 polish** drop to triage only ??? ???8h
+2. **M9 dogfood test** defer to post-V1 ??? ???4h
+3. **M7 dismiss sync** ship V1 with local-only dismiss ??? ???5h
+4. **M5 background execution** ship with static-text notifications, dynamic in V1.5 ??? ???8h
+5. **M3 device enrollment** ship single-device V1, multi-device V1.5 ??? ???8h (reverses G1 commitment ??? only if 
+user re-decides)
+
+Cuts 1???3 = 100h target hit. Cut 4 acceptable. Cut 5 is nuclear and reverses a committed decision.
+
+## 9. Risks (ordered by severity)
+
+1. **FCM data messages + Foreground Service for encrypted dynamic notifications.** Android battery-optimization 
+restrictions on newer Android versions (12+) may delay or block background execution. Mitigation: extensive testing on 
+Pixel + Samsung devices early; fallback to static-text notifications if blocked.
+2. **WebView per-plugin isolation.** Android WebView is shared; isolating storage, cookies, and JS contexts per plugin 
+requires careful handling. Risk: side-channel attacks if isolation incomplete. Mitigation: separate WebView instance 
+per plugin, distinct user-agent and storage paths, disable JS-to-host bypass.
+3. **Key hierarchy correctness.** Crypto bugs are silent. Mitigation: use Tink (Google) on Android and `cryptography` 
+(Python); write tests against Wycheproof test vectors; no custom crypto.
+4. **Multi-device key sync race.** New device login before previous device finished writing user state. Mitigation: 
+explicit pull-on-login with version vector on encrypted state blob.
+5. **Spec doc DX test.** 6-page cap may be too tight or too loose. Mitigation: write the doc, integration-test with 
+the lottery's Claude Code, iterate on the doc until integration succeeds. The doc length is itself the unit of 
+measurement.
+6. **Plugin update propagation.** Q23 said prompt-to-update per device. If user updates Phone 1 but not Phone 2, 
+new-format messages on Phone 2 hit Gap 3 placeholder. Accepted UX cost.
+
+## 10. Decisions I made that Gemini should attack
+
+- **FastAPI** vs alternatives (Django, Flask, Express on Node)
+- **Postgres** vs SQLite (V1 single-tenant cheap path) or DynamoDB
+- **Supabase + Fly.io free tier** for V1 vs user's "AWS free tier" answer ??? I'm proposing Supabase for V1 
+specifically because it covers DB + Auth + Storage with less plumbing; AWS pre-ship per user
+- **Tink** on Android, `cryptography` on Python ??? vs libsodium / PyNaCl
+- **Plugin bundling**: signed single .js bundle with manifest header ??? vs zip + manifest.json + entry.js
+- **WebView per plugin** vs single shared WebView with iframe sandboxing
+- **M4 at 28h** ??? this might be 35???45h honestly
+- **Spec doc cap at 6 pages** ??? arbitrary; defensible only if it actually works
+- **Hour estimates overall** ??? every M could be ??30%
+- **Cut order assumes M5 can be cut to static notifications** ??? if Q18 (code-based dynamic) is non-negotiable, M5 
+can't be cut
+
+## 11. Disposition of remaining backlog questions
+
+- **Spec-doc page cap (Q13):** 6 pages picked.
+- **Scheduled sending:** sender's job, not platform's (per G2 philosophy).
+- **Naming:** Syncler placeholder, V1.5 final.
+- **Marketplace review rules:** V1.5 problem.
+
+## Ready for Gemini attack
+
+Specific pressure points wanted: (a) hour estimates especially M4/M5, (b) the cut order, (c) FCM + Foreground Service 
+feasibility on modern Android, (d) WebView per-plugin isolation, (e) key hierarchy correctness, (f) Supabase-vs-AWS 
+for V1.
+
+
+---
+
+## Gemini's attack (verbatim)
+
+node.exe : Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended 
+for a better visual experience.
+At C:\Users\Dima\AppData\Roaming\npm\gemini.ps1:22 char:14
++ ...    $input | & "node$exe"  "$basedir/node_modules/@google/gemini-cli/b ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Warning: 256-co...ual experience.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Ripgrep is not available. Falling back to GrepTool.
+=== ATTACK SUMMARY ===
+The plan's architecture and cryptographic foundations are sound, correctly identifying the core patterns for a 
+zero-knowledge system. However, the plan is critically weak in its assessment of the effort and complexity required 
+for Android implementation, specifically for plugin sandboxing (M4) and reliable background processing (M5). Its 
+proposed hour estimates are dangerously optimistic, and the budget cut-order sacrifices core product functionality 
+instead of peripheral features.
+
+=== SPECIFIC ATTACKS ===
+1. **M5 Hour Estimate (18h) is Grossly Underestimated.**
+   evidence: M5 requires building a `ForegroundService` triggered by FCM messages. Modern Android (12+) heavily 
+restricts background execution. While high-priority FCMs are a documented exception, they are rate-limited and subject 
+to aggressive, inconsistent battery management by OEMs (Samsung, OnePlus, etc.). Debugging these OEM-specific issues 
+is a known, massive time sink. 18 hours is insufficient for building and hardening this for even two major device 
+manufacturers.
+   severity: high
+   proposal: Re-estimate M5 to 30-40 hours. Add a specific sub-task for "Compatibility testing and hardening on 
+non-Pixel devices."
+
+2. **M4 Hour Estimate (28h) is Unrealistic.**
+   evidence: M4 bundles the JS SDK definition, the native JS bridge implementation, documentation, and the entire 
+plugin sandboxing system. As noted in the plan, robust sandboxing is a high-risk task. A realistic estimate for 
+designing, building, and testing a secure `WebView` host environment alone exceeds 28 hours.
+   severity: high
+   proposal: Re-estimate M4 to at least 45 hours. Split M4 into two distinct milestones: `M4a (JS SDK & Bridge)` and 
+`M4b (Secure WebView Host Implementation)`.
+
+3. **WebView Isolation Strategy is Insufficient and Insecure.**
+   evidence: The plan's mitigation is a "separate WebView instance per plugin." By default, all `WebView` instances in 
+an Android app run in the same process and can share the same underlying data directories. A compromised rendering 
+engine in one plugin could lead to data leakage or host-app compromise. True isolation requires using separate OS 
+processes for `WebView` instances via the `android:process` manifest attribute, which the plan omits.
+   severity: critical
+   proposal: The plan must be updated to mandate that each plugin's `WebView` runs in a dedicated, sandboxed process. 
+Acknowledge this significantly increases the complexity and cost of M4.
+
+4. **AES-GCM Nonce Management is Critically Absent.**
+   evidence: The plan specifies AES-GCM but says nothing about how nonces (IVs) are generated or managed. Reusing a 
+nonce with the same key in AES-GCM completely destroys its confidentiality guarantees. This is a catastrophic 
+cryptographic implementation error waiting to happen.
+   severity: critical
+   proposal: Mandate a nonce strategy. The sender must generate a unique 96-bit random nonce for every message and 
+prepend it to the ciphertext. The client must expect this format.
+
+5. **Cut-Order Prioritizes Hours Over Value.**
+   evidence: Cut #4 proposes saving 8 hours by changing dynamic, plugin-rendered notifications to "static-text 
+notifications." This completely guts the core value proposition of the plugin model, which is to let senders control 
+the content and presentation. This cut turns the platform from a rich content host into a generic, low-value push 
+forwarder, invalidating the complexity of the entire plugin system.
+   severity: high
+   proposal: Remove Cut #4 from the list. If cuts are needed, they should target non-essential `platform` capabilities 
+in the JS bridge (e.g., defer `platform.camera` or `platform.location` to V1.5) or other peripheral features, not the 
+primary notification entry point.
+
+6. **Plugin Signature Verification is Hand-Waved.**
+   evidence: The plan calls for a "signed single .js bundle" but omits the verification mechanism. Android's `WebView` 
+cannot natively verify a custom signature on a JS file. The native app must download the bundle, perform cryptographic 
+verification against the sender's public key, and only then load it into the `WebView` from memory or a secure local 
+file. This critical security step is unstated and uncosted.
+   severity: high
+   proposal: Add an explicit "Plugin Signature Verification" step to the data flow and a corresponding task to M4, 
+increasing its hour estimate.
+
+7. **Argon2id Parameters are Dangerously Undefined.**
+   evidence: The plan specifies `params=high-cost` for Argon2id. This is meaningless without specific numbers. The 
+security of all user data at rest depends on concrete, well-chosen parameters for memory cost (m), iterations (t), and 
+parallelism (p). Leaving this undefined is negligent.
+   severity: high
+   proposal: Specify the exact Argon2id parameters to be used. Start with current OWASP recommendations (e.g., 
+Argon2id with m=19 MiB, t=2, p=1) and record them in the plan.
+
+8. **Supabase/Fly.io Choice Creates Uncosted Migration Risk.**
+   evidence: The plan justifies using Supabase/Fly.io for V1 to "reduce plumbing," with a plan to migrate to AWS 
+pre-ship. This migration (of data, user accounts, storage, etc.) is a non-trivial engineering task that is not 
+estimated in the 140-hour budget. The time spent learning two cloud ecosystems and executing the migration could be 
+avoided by starting with the AWS free tier from day one, as the user originally suggested.
+   severity: medium
+   proposal: Choose one path. Either commit to Supabase/Fly.io and justify it as the long-term solution, or start with 
+AWS services to eliminate the future migration cost and risk.
+
+9. **Key Derivation Lacks Domain Separation.**
+   evidence: `HKDF(master_key, sender_id)` is used to create pairing keys. This is functional but not robust. Best 
+practice dictates using the "info" parameter in HKDF to create domain separation, preventing the same key material 
+from being used for different purposes accidentally in the future.
+   severity: medium
+   proposal: Change the derivation to `HKDF(master_key, info="syncler-v1-pairing-key:" + sender_id)`. This provides 
+context and prevents future derivation collisions.
+
+10. **The "Dogfood DX Test" is Theatrical.**
+    evidence: The test's success or failure is attributed to "spec quality," making it unfalsifiable. A test that 
+cannot fail cleanly is not a test; it's a demonstration. It doesn't produce a load-bearing signal about the quality of 
+the SDK, only about the combination of the spec, the SDK, and the agent building from it.
+    severity: low
+    proposal: Reframe the test's goal from a binary pass/fail to *generating a list of specific developer experience 
+issues*. The deliverable is not a working plugin, but a report of what was confusing, difficult, or poorly documented 
+in the SDK.
+
+=== MISSED ENTIRELY ===
+- **Plugin/Sender Revocation:** The plan has no mechanism to handle a compromised sender key or a malicious plugin. 
+There needs to be a way for a user to revoke a pairing or for the server to block a known-bad plugin.
+- **State Sync Conflict Resolution:** The plan mentions "version vector" for state sync but provides no detail on 
+conflict resolution. If a user installs plugin A on one device and plugin B on another while both are offline, what is 
+the state when they both sync? Last-Write-Wins is lossy; a proper merge strategy is needed.
+- **Data Retention and Pruning:** The plan does not define how long messages and delivery receipts are stored. This 
+has privacy and cost implications that need to be specified.
+- **API Rate Limiting:** The server API is vulnerable to various abuse patterns (login brute-forcing, message 
+spamming). The plan should include rate limiting as a basic security measure.
+- **Plugin Update Flow:** The plan uses `min_plugin_version` to block old plugins but doesn't define the user 
+experience for prompting and managing updates. Is it blocking? Can it be deferred?
+
+=== STAYS IN PLAN ===
+- **Core Key Hierarchy:** The `password -> wrap_key -> master_key` indirection is the correct model for allowing 
+password changes without re-encrypting the user's entire dataset.
+- **FastAPI Server Choice:** For a focused, API-driven backend, FastAPI is an excellent choice that prioritizes 
+performance and developer velocity (via auto-docs).
+- **Python Server SDK:** Aligning the Server SDK with the backend language is logical and caters to a large developer 
+audience.
+- **The "Gap 2" Punt to Plugins:** Forcing plugin authors to handle action idempotency is a reasonable simplification 
+for V1. The platform's core responsibility is message delivery, not action semantics.
+- **Per-Device Enrollment:** Despite potential UX friction, requiring explicit enrollment for each device is the 
+correct security posture and a cornerstone of the trust model.
+
+
+
+codex
+I’ll arbitrate this as a planning document only. I’m going to keep the surviving structure, make the estimates and 
+security details concrete, and treat anything unresolved as either a V1 task with hours or an explicit deferral.
+codex
+=== VERDICTS ===
+
+1. accept-with-modification: M5 becomes 36h, with explicit Pixel + Samsung hardening. OnePlus is optional stretch, not 
+V1 acceptance.
+2. accept: M4 is split into M4a and M4b, total 50h.
+3. accept-with-modification: dedicated plugin WebView process is required where Android allows it, plus storage 
+partitioning and verified loading. “One process per installed plugin” is too expensive and awkward on Android, so V1 
+uses a bounded isolated plugin-host process with strict single-plugin activation and no shared storage.
+4. accept: AES-GCM nonce strategy is mandatory and specified.
+5. accept: static notifications are removed as a value-preserving cut. Dynamic plugin-authored notification content 
+stays core V1.
+6. accept: native plugin signature verification is added and costed.
+7. accept: Argon2id parameters are specified.
+8. accept-with-modification: V1 starts on AWS free-tier-compatible services. No Supabase/Fly migration.
+9. accept: HKDF domain separation is specified.
+10. accept-with-modification: dogfood becomes a DX findings deliverable plus best-effort working plugin, not a binary 
+pass/fail gate.
+
+Missed entirely:
+
+- Plugin/Sender Revocation: accept. Added to V1.
+- State Sync Conflict Resolution: accept. Added to V1.
+- Data Retention and Pruning: accept. Added to V1.
+- API Rate Limiting: accept. Added to V1.
+- Plugin Update Flow: accept. Added to V1.
+
+=== FINAL PLAN ===
+
+# Syncler V1 - Build Plan (Final, arbitrated by Codex)
+
+Working name: **Syncler**. Final naming is deferred to V1.5.
+
+V1 is a multi-device, end-to-end encrypted, plugin-host platform. External programs push structured messages to a 
+user’s Android phone or phones. Each sender ships a signed JavaScript plugin defining its data, UI, notifications, and 
+actions. The platform brokers identity, delivery, pairing, revocation, update checks, and encrypted state sync while 
+remaining content-blind.
+
+## 0. Executive Summary
+
+**V1 stack:** Python FastAPI server, PostgreSQL, AWS free-tier-compatible deployment path, Kotlin Jetpack Compose 
+Android app, Android WebView plugin host, JavaScript plugin SDK, Python sender SDK.
+
+**Final estimate:** 216 engineering hours.
+
+The earlier 140h estimate was too optimistic. The corrected estimate accounts for Android background execution, secure 
+plugin hosting, signature verification, concrete crypto, rate limiting, retention, revocation, conflict resolution, 
+and plugin update UX.
+
+**V1 demo target:** trading bot and lottery plugin both function end-to-end. The lottery plugin is still used as the 
+developer-experience dogfood test, but the deliverable is a DX issue report plus integration result, not a theatrical 
+pass/fail claim.
+
+## 1. Architecture
+
+### Actors
+
+- **User:** identified by UUID, owns one or more enrolled devices.
+- **Device:** Android phone running Syncler; holds decrypted master key in memory after login.
+- **Sender:** external program or backend; owns sender keypair.
+- **Plugin:** signed JavaScript bundle distributed by sender; runs inside Syncler’s plugin host.
+- **Server:** FastAPI + Postgres; stores opaque ciphertext, metadata, manifests, delivery state, revocation state, and 
+FCM fan-out records.
+
+### Trust Model
+
+The server never sees password, master key, pairing keys, message plaintext, plugin private data, or decrypted user 
+state.
+
+The server does see metadata: account existence, device count, plugin IDs installed, sender pairings, message envelope 
+fields, delivery timestamps, version requirements, revocation flags, and retention expiry.
+
+Each plugin install requires explicit user permission grant per device.
+
+### Data Flow
+
+1. Sender SDK encrypts payload using the per-user pairing key.
+2. Sender signs the message envelope.
+3. Sender calls `POST /v1/messages/send`.
+4. Server validates sender auth, rate limits, pairing status, plugin status, and revocation status.
+5. Server stores encrypted body and delivery metadata.
+6. Server sends FCM data message to enrolled devices.
+7. Android app fetches message envelope and ciphertext.
+8. App verifies envelope signature and plugin availability.
+9. App routes payload to the verified plugin bundle in the plugin host.
+10. Plugin decrypts payload through platform crypto APIs or receives plaintext only after native validation, depending 
+on final implementation boundary.
+11. Plugin returns notification descriptor.
+12. Native app displays notification.
+13. User opens card view; plugin renders message UI.
+14. User taps action; plugin calls allowed endpoint through `platform.network.fetch`.
+15. Sender SDK can wait for or poll action response.
+
+## 2. Key Hierarchy
+
+### Password and Account Keys
+
+```
+password
+  -> Argon2id(password, salt=user_uuid || auth_salt, m=19 MiB, t=2, p=1)
+      -> 64 bytes output
+          -> auth_key = first 32 bytes
+          -> master_key_wrap_key = second 32 bytes
+```
+
+Server stores:
+
+```
+auth_key_hash = SHA-256(auth_key)
+encrypted_master_key
+argon2_params_version
+auth_salt
+```
+
+The password is never sent to the server.
+
+### Master Key
+
+```
+master_key = 256-bit random value generated client-side at signup
+encrypted_master_key = AES-256-GCM(master_key_wrap_key, master_key)
+```
+
+Password change re-derives the wrap key and re-wraps `master_key`. It does not re-encrypt all user data.
+
+### HKDF Domain Separation
+
+All derived keys use HKDF-SHA256 with explicit `info`.
+
+```
+pairing_key = HKDF(
+  ikm = master_key,
+  salt = sender_id_bytes,
+  info = "syncler-v1-pairing-key:" || sender_id,
+  length = 32
+)
+```
+
+Additional future keys must use distinct `info` strings.
+
+### AES-GCM Nonce Strategy
+
+All AES-GCM encryption uses 96-bit nonces.
+
+For message payloads:
+
+```
+nonce = 12 cryptographically random bytes generated by sender per message
+ciphertext = AES-256-GCM(pairing_key, nonce, plaintext, aad)
+wire_format = nonce || ciphertext || tag
+```
+
+AAD includes:
+
+```
+message_id
+sender_id
+user_id
+plugin_id
+min_plugin_version
+created_at
+schema_version
+```
+
+Nonce reuse with the same key is a release-blocking bug. Tests must verify nonce length, wire format, and AAD failure 
+behavior.
+
+### Key Separation
+
+Separate keys are used for:
+
+- authentication verifier
+- master key wrapping
+- pairing encryption
+- plugin bundle signing
+- sender API authentication
+- message envelope signatures
+
+No signing key is reused for encryption.
+
+## 3. Server
+
+### Stack
+
+- **Python 3.12 + FastAPI**
+- **PostgreSQL 16**
+- **AWS-first V1 path:** RDS/Postgres-compatible local dev, S3-compatible encrypted blob storage, ECS/Fargate or 
+Lambda/API Gateway deployment decision during execution
+- **Push:** Firebase Cloud Messaging
+- **Auth:** server-issued JWT session tokens after zero-knowledge password verifier check
+
+Supabase/Fly is removed from V1 to avoid uncosted migration work.
+
+### API Surface
+
+- `POST /v1/auth/signup`
+- `POST /v1/auth/login`
+- `POST /v1/auth/devices/enroll`
+- `POST /v1/auth/devices/revoke`
+- `POST /v1/senders/register`
+- `POST /v1/senders/revoke`
+- `POST /v1/pairing/initiate`
+- `POST /v1/pairing/complete`
+- `POST /v1/pairing/revoke`
+- `POST /v1/messages/send`
+- `GET /v1/messages/inbox`
+- `POST /v1/messages/{id}/dismiss`
+- `POST /v1/messages/{id}/action`
+- `GET /v1/plugins/{plugin_id}/manifest`
+- `POST /v1/plugins/install`
+- `POST /v1/plugins/update`
+- `POST /v1/plugins/revoke`
+- `GET /v1/state`
+- `PUT /v1/state`
+
+### Tables
+
+- `users(id, email, auth_key_hash, encrypted_master_key, auth_salt, argon2_params_version, created_at)`
+- `devices(id, user_id, public_key, fcm_token, revoked_at, last_seen, created_at)`
+- `senders(id, public_key, name, contact, revoked_at, created_at)`
+- `pairings(id, user_id, sender_id, encrypted_state, revoked_at, created_at)`
+- `plugins(id, sender_id, version, manifest_hash, bundle_hash, signature, signed_bundle_url, capabilities, endpoints, 
+revoked_at, created_at)`
+- `messages(id, sender_id, user_id, plugin_id, encrypted_body_pointer, min_plugin_version, expires_at, sent_at)`
+- `delivery_status(message_id, device_id, delivered_at, dismissed_at, actioned_at)`
+- `encrypted_user_state(user_id, state_version, encrypted_blob, updated_at)`
+- `rate_limit_events(id, actor_type, actor_id, route, window_start, count)`
+
+### Retention
+
+V1 defaults:
+
+- Undismissed messages: 30 days.
+- Dismissed messages: 7 days.
+- Delivery receipts: 30 days.
+- Pairing audit metadata: 180 days.
+- Revoked sender/plugin records: retained indefinitely as blocklist metadata, without message bodies.
+
+A scheduled pruning job is required before V1 completion.
+
+### Rate Limiting
+
+V1 includes route-level rate limits:
+
+- Login attempts per email and IP.
+- Signup attempts per IP.
+- Pairing initiation per sender.
+- Message sends per sender and per user.
+- Plugin manifest fetches per device.
+- Action callbacks per pairing.
+
+Exact thresholds can be tuned during implementation, but the middleware and tests are V1 requirements.
+
+## 4. Android App
+
+### Stack
+
+- Kotlin
+- Jetpack Compose
+- AndroidX WebView
+- AndroidX Security
+- Tink where appropriate
+- SQLCipher or encrypted Room equivalent
+- Firebase SDK
+- WorkManager plus Foreground Service where allowed
+- Target SDK current stable at build time
+
+### Modules
+
+- `:app`
+- `:core:auth`
+- `:core:crypto`
+- `:core:network`
+- `:core:storage`
+- `:core:push`
+- `:feature:inbox`
+- `:feature:plugin-host`
+- `:feature:pairing`
+- `:feature:settings`
+
+### Plugin Host Requirements
+
+V1 plugin hosting requires:
+
+- Native signature verification before loading a bundle.
+- Bundle hash match against manifest.
+- Sender public key verification.
+- Capability enforcement in the native bridge.
+- Endpoint allowlist enforcement for network calls.
+- No arbitrary JavaScript interface exposure.
+- File URL access disabled unless explicitly needed and reviewed.
+- Cookie and storage isolation per plugin.
+- Bounded isolated plugin-host process strategy.
+- One active plugin execution context per message handling operation.
+- Plugin crash containment and timeout handling.
+- Audit logs for denied bridge calls.
+
+### JS Bridge
+
+V1 required:
+
+```javascript
+platform.showNotification({ title, body, importance })
+platform.storage.get(key)
+platform.storage.set(key, value)
+platform.network.fetch(url, options)
+platform.message.respond(actionId, payload)
+platform.message.dismissBehavior(value)
+```
+
+Deferred to V1.5 unless needed by the two demo plugins:
+
+```javascript
+platform.camera.capture()
+platform.gallery.pick()
+platform.file.pick({ mimeTypes })
+platform.location.current({ accuracy })
+```
+
+## 5. Plugin SDK
+
+### Bundle Format
+
+V1 uses a signed bundle plus manifest.
+
+Required manifest fields:
+
+```javascript
+{
+  id,
+  name,
+  version,
+  senderId,
+  bundleHash,
+  signature,
+  declaredCapabilities,
+  declaredEndpoints,
+  dismissBehavior,
+  minPlatformVersion
+}
+```
+
+Signature verification:
+
+```
+signature = Ed25519_sign(sender_private_key, canonical_manifest_without_signature || bundleHash)
+```
+
+Android verifies signature using sender public key from trusted pairing/server metadata before loading the plugin.
+
+### Example
+
+```javascript
+import { BasePlugin, DismissBehavior } from '@syncler/plugin-sdk';
+
+export class LotteryPlugin extends BasePlugin {
+  static manifest = {
+    id: 'com.lottery.app',
+    name: 'Lottery',
+    version: '1.0.0',
+    senderId: 'com.lottery.sender',
+    declaredCapabilities: ['network'],
+    declaredEndpoints: ['https://lottery.app/api/*'],
+    dismissBehavior: DismissBehavior.DISMISS_ALL,
+  };
+
+  async onMessage(payload) {
+    const { numbers, draw_date } = payload;
+    return platform.showNotification({
+      title: 'Lottery numbers ready',
+      body: `${numbers.length} sets for ${draw_date}`,
+      importance: 'default',
+    });
+  }
+
+  render(data) {}
+
+  async onAction(actionName, payload) {
+    if (actionName === 'played') {
+      await platform.network.fetch('https://lottery.app/api/played', {
+        method: 'POST',
+        body: JSON.stringify({
+          card_id: payload.card_id,
+          numbers: payload.numbers,
+        }),
+      });
+    }
+  }
+}
+```
+
+## 6. Server SDK
+
+```python
+from syncler import Client
+
+client = Client(
+    sender_id="com.lottery.sender",
+    signing_key_path="~/.syncler/keys/lottery_ed25519.pem",
+)
+
+client.send_to(
+    user_uuid="<recipient>",
+    plugin_id="com.lottery.app",
+    payload={"numbers": [[1, 2, 3], [4, 5, 6]], "draw_date": "2026-06-01"},
+    min_plugin_version="1.0.0",
+)
+```
+
+Required V1 surface:
+
+- `Client(...)`
+- `client.send_to(...)`
+- `client.wait_for_action(message_id, timeout)`
+- `client.list_paired_users()`
+- `client.create_pairing_qr()`
+- `client.complete_pairing(token)`
+- `client.revoke_pairing(user_uuid)`
+- `client.publish_plugin(manifest, bundle_path)`
+
+## 7. Milestones
+
+| # | Milestone | Hours | Risk |
+|---|---|---:|---|
+| M1 | Server scaffold: FastAPI, DB schema, auth, JWT, rate limiting, retention jobs | 22 | medium |
+| M2 | Crypto layer: Argon2id, key hierarchy, HKDF domain separation, AES-GCM nonce/AAD, tests | 16 | high |
+| M3 | Android shell: Compose UI, login/signup, secure local storage, device enrollment | 18 | medium |
+| M4a | Plugin SDK and JS bridge: BasePlugin, bridge API, capability checks, docs | 20 | high |
+| M4b | Secure WebView host: verified bundle loading, process/storage isolation, sandbox tests | 30 | critical |
+| M5 | Push and delivery: FCM, background handling, dynamic notifications, Pixel + Samsung hardening | 36 | critical |
+| M6 | Pairing and revocation: QR flow, sender registration, pair/unpair, sender/plugin blocklist | 18 | high |
+| M7 | Multi-device sync: encrypted state schema, merge strategy, dismiss sync, min version handling | 18 | high |
+| M8 | Plugin update UX: prompt, defer, block-on-min-version, per-device update state | 8 | medium |
+| M9 | Trading bot integration and lottery spec document | 8 | medium |
+| M10 | Lottery dogfood DX test: integration attempt plus DX findings report | 6 | medium |
+| M11 | Bug fixing, security review, polish, release hardening | 16 | high |
+| **Total** |  | **216** |  |
+
+## 8. Cut Order If Budget Breaks
+
+A credible secure V1 is not a 100h build. The old cut order protected hours instead of product value and is replaced.
+
+Value-preserving cuts, in order:
+
+1. Defer camera, gallery, file picker, and location bridge APIs to V1.5. Saves 10-12h.
+2. Reduce lottery dogfood from external-agent attempt to internal integration plus DX notes. Saves 4h.
+3. Ship only one demo integration, preferably lottery because it tests plugin DX better. Saves 6-8h.
+4. Limit OEM hardening to Pixel + Samsung only. Saves 6-8h but increases delivery risk.
+5. Defer `wait_for_action` long-poll ergonomics in Python SDK; keep action POST storage. Saves 4h.
+6. Defer advanced settings screens for revocation/update management, but keep backend capability and minimal UI. Saves 
+6h.
+
+Cuts that are not allowed for V1 without redefining the product:
+
+- No static-only notification fallback as the planned V1 path.
+- No unsigned plugin loading.
+- No hand-waved nonce/key derivation.
+- No single-device-only V1 if multi-device remains a stated demo requirement.
+- No server-blindness compromise.
+- No removal of revocation primitives.
+
+## 9. Risks
+
+1. **Android background delivery:** FCM and foreground service behavior varies by Android version and OEM. Mitigation: 
+build M5 early, test on Pixel and Samsung, keep polling fallback for opened app.
+2. **WebView plugin security:** WebView isolation is not equivalent to OS-level app sandboxing. Mitigation: verified 
+bundles, minimized bridge, process/storage isolation, strict allowlists, timeouts, crash containment.
+3. **Crypto implementation mistakes:** Silent failure risk is high. Mitigation: Tink/standard libraries, explicit 
+nonce format, AAD tests, HKDF labels, code review.
+4. **State sync conflicts:** Offline devices can mutate encrypted state independently. Mitigation: use mergeable state 
+by entity ID for plugins, pairings, dismissals, and device records. Avoid lossy last-write-wins except for scalar 
+preferences.
+5. **Plugin update UX:** `min_plugin_version` can block old devices. Mitigation: explicit update prompt, defer option 
+when safe, blocking screen when message requires newer plugin.
+6. **Revocation propagation:** Devices may be offline when sender/plugin revocation occurs. Mitigation: check 
+revocation on inbox fetch, plugin launch, and message action.
+7. **AWS deployment scope creep:** AWS can consume build time. Mitigation: keep infrastructure minimal and scriptable; 
+no multi-region or enterprise deployment in V1.
+
+## 10. Disposition of Remaining Backlog Questions
+
+- **Spec-doc page cap:** 6 pages remains the target, but quality is measured by DX findings, not by page count alone.
+- **Scheduled sending:** sender responsibility, not platform V1.
+- **Naming:** Syncler placeholder; final naming V1.5.
+- **Marketplace review rules:** V1.5, except server-side plugin revocation/blocklist exists in V1.
+- **Revocation:** V1 required.
+- **Retention:** V1 required with defaults listed above.
+- **Rate limiting:** V1 required.
+- **Conflict resolution:** V1 required for encrypted user state.
+- **Plugin update UX:** V1 required.
+- **Cloud provider:** AWS-first V1. Supabase/Fly removed.
+
+## 11. Ready-State
+
+Ready for build execution after accepting the 216h V1 estimate and AWS-first deployment path.
+
+The smallest blocker is not technical. It is scope confirmation: either accept this as the secure V1 contract, or 
+explicitly reduce V1 product requirements. The most defensible reduced scope is to defer nonessential bridge 
+capabilities and one demo integration, not to weaken crypto, plugin verification, revocation, or dynamic plugin-driven 
+notifications.
+
+=== READY TO BUILD? ===
+
+yes, provided the team accepts the revised 216h scope. The smallest blocker is confirming that budget/time reality 
+before execution starts.
+tokens used
+20,953
+=== VERDICTS ===
+
+1. accept-with-modification: M5 becomes 36h, with explicit Pixel + Samsung hardening. OnePlus is optional stretch, not V1 acceptance.
+2. accept: M4 is split into M4a and M4b, total 50h.
+3. accept-with-modification: dedicated plugin WebView process is required where Android allows it, plus storage partitioning and verified loading. “One process per installed plugin” is too expensive and awkward on Android, so V1 uses a bounded isolated plugin-host process with strict single-plugin activation and no shared storage.
+4. accept: AES-GCM nonce strategy is mandatory and specified.
+5. accept: static notifications are removed as a value-preserving cut. Dynamic plugin-authored notification content stays core V1.
+6. accept: native plugin signature verification is added and costed.
+7. accept: Argon2id parameters are specified.
+8. accept-with-modification: V1 starts on AWS free-tier-compatible services. No Supabase/Fly migration.
+9. accept: HKDF domain separation is specified.
+10. accept-with-modification: dogfood becomes a DX findings deliverable plus best-effort working plugin, not a binary pass/fail gate.
+
+Missed entirely:
+
+- Plugin/Sender Revocation: accept. Added to V1.
+- State Sync Conflict Resolution: accept. Added to V1.
+- Data Retention and Pruning: accept. Added to V1.
+- API Rate Limiting: accept. Added to V1.
+- Plugin Update Flow: accept. Added to V1.
+
+=== FINAL PLAN ===
+
+# Syncler V1 - Build Plan (Final, arbitrated by Codex)
+
+Working name: **Syncler**. Final naming is deferred to V1.5.
+
+V1 is a multi-device, end-to-end encrypted, plugin-host platform. External programs push structured messages to a user’s Android phone or phones. Each sender ships a signed JavaScript plugin defining its data, UI, notifications, and actions. The platform brokers identity, delivery, pairing, revocation, update checks, and encrypted state sync while remaining content-blind.
+
+## 0. Executive Summary
+
+**V1 stack:** Python FastAPI server, PostgreSQL, AWS free-tier-compatible deployment path, Kotlin Jetpack Compose Android app, Android WebView plugin host, JavaScript plugin SDK, Python sender SDK.
+
+**Final estimate:** 216 engineering hours.
+
+The earlier 140h estimate was too optimistic. The corrected estimate accounts for Android background execution, secure plugin hosting, signature verification, concrete crypto, rate limiting, retention, revocation, conflict resolution, and plugin update UX.
+
+**V1 demo target:** trading bot and lottery plugin both function end-to-end. The lottery plugin is still used as the developer-experience dogfood test, but the deliverable is a DX issue report plus integration result, not a theatrical pass/fail claim.
+
+## 1. Architecture
+
+### Actors
+
+- **User:** identified by UUID, owns one or more enrolled devices.
+- **Device:** Android phone running Syncler; holds decrypted master key in memory after login.
+- **Sender:** external program or backend; owns sender keypair.
+- **Plugin:** signed JavaScript bundle distributed by sender; runs inside Syncler’s plugin host.
+- **Server:** FastAPI + Postgres; stores opaque ciphertext, metadata, manifests, delivery state, revocation state, and FCM fan-out records.
+
+### Trust Model
+
+The server never sees password, master key, pairing keys, message plaintext, plugin private data, or decrypted user state.
+
+The server does see metadata: account existence, device count, plugin IDs installed, sender pairings, message envelope fields, delivery timestamps, version requirements, revocation flags, and retention expiry.
+
+Each plugin install requires explicit user permission grant per device.
+
+### Data Flow
+
+1. Sender SDK encrypts payload using the per-user pairing key.
+2. Sender signs the message envelope.
+3. Sender calls `POST /v1/messages/send`.
+4. Server validates sender auth, rate limits, pairing status, plugin status, and revocation status.
+5. Server stores encrypted body and delivery metadata.
+6. Server sends FCM data message to enrolled devices.
+7. Android app fetches message envelope and ciphertext.
+8. App verifies envelope signature and plugin availability.
+9. App routes payload to the verified plugin bundle in the plugin host.
+10. Plugin decrypts payload through platform crypto APIs or receives plaintext only after native validation, depending on final implementation boundary.
+11. Plugin returns notification descriptor.
+12. Native app displays notification.
+13. User opens card view; plugin renders message UI.
+14. User taps action; plugin calls allowed endpoint through `platform.network.fetch`.
+15. Sender SDK can wait for or poll action response.
+
+## 2. Key Hierarchy
+
+### Password and Account Keys
+
+```
+password
+  -> Argon2id(password, salt=user_uuid || auth_salt, m=19 MiB, t=2, p=1)
+      -> 64 bytes output
+          -> auth_key = first 32 bytes
+          -> master_key_wrap_key = second 32 bytes
+```
+
+Server stores:
+
+```
+auth_key_hash = SHA-256(auth_key)
+encrypted_master_key
+argon2_params_version
+auth_salt
+```
+
+The password is never sent to the server.
+
+### Master Key
+
+```
+master_key = 256-bit random value generated client-side at signup
+encrypted_master_key = AES-256-GCM(master_key_wrap_key, master_key)
+```
+
+Password change re-derives the wrap key and re-wraps `master_key`. It does not re-encrypt all user data.
+
+### HKDF Domain Separation
+
+All derived keys use HKDF-SHA256 with explicit `info`.
+
+```
+pairing_key = HKDF(
+  ikm = master_key,
+  salt = sender_id_bytes,
+  info = "syncler-v1-pairing-key:" || sender_id,
+  length = 32
+)
+```
+
+Additional future keys must use distinct `info` strings.
+
+### AES-GCM Nonce Strategy
+
+All AES-GCM encryption uses 96-bit nonces.
+
+For message payloads:
+
+```
+nonce = 12 cryptographically random bytes generated by sender per message
+ciphertext = AES-256-GCM(pairing_key, nonce, plaintext, aad)
+wire_format = nonce || ciphertext || tag
+```
+
+AAD includes:
+
+```
+message_id
+sender_id
+user_id
+plugin_id
+min_plugin_version
+created_at
+schema_version
+```
+
+Nonce reuse with the same key is a release-blocking bug. Tests must verify nonce length, wire format, and AAD failure behavior.
+
+### Key Separation
+
+Separate keys are used for:
+
+- authentication verifier
+- master key wrapping
+- pairing encryption
+- plugin bundle signing
+- sender API authentication
+- message envelope signatures
+
+No signing key is reused for encryption.
+
+## 3. Server
+
+### Stack
+
+- **Python 3.12 + FastAPI**
+- **PostgreSQL 16**
+- **AWS-first V1 path:** RDS/Postgres-compatible local dev, S3-compatible encrypted blob storage, ECS/Fargate or Lambda/API Gateway deployment decision during execution
+- **Push:** Firebase Cloud Messaging
+- **Auth:** server-issued JWT session tokens after zero-knowledge password verifier check
+
+Supabase/Fly is removed from V1 to avoid uncosted migration work.
+
+### API Surface
+
+- `POST /v1/auth/signup`
+- `POST /v1/auth/login`
+- `POST /v1/auth/devices/enroll`
+- `POST /v1/auth/devices/revoke`
+- `POST /v1/senders/register`
+- `POST /v1/senders/revoke`
+- `POST /v1/pairing/initiate`
+- `POST /v1/pairing/complete`
+- `POST /v1/pairing/revoke`
+- `POST /v1/messages/send`
+- `GET /v1/messages/inbox`
+- `POST /v1/messages/{id}/dismiss`
+- `POST /v1/messages/{id}/action`
+- `GET /v1/plugins/{plugin_id}/manifest`
+- `POST /v1/plugins/install`
+- `POST /v1/plugins/update`
+- `POST /v1/plugins/revoke`
+- `GET /v1/state`
+- `PUT /v1/state`
+
+### Tables
+
+- `users(id, email, auth_key_hash, encrypted_master_key, auth_salt, argon2_params_version, created_at)`
+- `devices(id, user_id, public_key, fcm_token, revoked_at, last_seen, created_at)`
+- `senders(id, public_key, name, contact, revoked_at, created_at)`
+- `pairings(id, user_id, sender_id, encrypted_state, revoked_at, created_at)`
+- `plugins(id, sender_id, version, manifest_hash, bundle_hash, signature, signed_bundle_url, capabilities, endpoints, revoked_at, created_at)`
+- `messages(id, sender_id, user_id, plugin_id, encrypted_body_pointer, min_plugin_version, expires_at, sent_at)`
+- `delivery_status(message_id, device_id, delivered_at, dismissed_at, actioned_at)`
+- `encrypted_user_state(user_id, state_version, encrypted_blob, updated_at)`
+- `rate_limit_events(id, actor_type, actor_id, route, window_start, count)`
+
+### Retention
+
+V1 defaults:
+
+- Undismissed messages: 30 days.
+- Dismissed messages: 7 days.
+- Delivery receipts: 30 days.
+- Pairing audit metadata: 180 days.
+- Revoked sender/plugin records: retained indefinitely as blocklist metadata, without message bodies.
+
+A scheduled pruning job is required before V1 completion.
+
+### Rate Limiting
+
+V1 includes route-level rate limits:
+
+- Login attempts per email and IP.
+- Signup attempts per IP.
+- Pairing initiation per sender.
+- Message sends per sender and per user.
+- Plugin manifest fetches per device.
+- Action callbacks per pairing.
+
+Exact thresholds can be tuned during implementation, but the middleware and tests are V1 requirements.
+
+## 4. Android App
+
+### Stack
+
+- Kotlin
+- Jetpack Compose
+- AndroidX WebView
+- AndroidX Security
+- Tink where appropriate
+- SQLCipher or encrypted Room equivalent
+- Firebase SDK
+- WorkManager plus Foreground Service where allowed
+- Target SDK current stable at build time
+
+### Modules
+
+- `:app`
+- `:core:auth`
+- `:core:crypto`
+- `:core:network`
+- `:core:storage`
+- `:core:push`
+- `:feature:inbox`
+- `:feature:plugin-host`
+- `:feature:pairing`
+- `:feature:settings`
+
+### Plugin Host Requirements
+
+V1 plugin hosting requires:
+
+- Native signature verification before loading a bundle.
+- Bundle hash match against manifest.
+- Sender public key verification.
+- Capability enforcement in the native bridge.
+- Endpoint allowlist enforcement for network calls.
+- No arbitrary JavaScript interface exposure.
+- File URL access disabled unless explicitly needed and reviewed.
+- Cookie and storage isolation per plugin.
+- Bounded isolated plugin-host process strategy.
+- One active plugin execution context per message handling operation.
+- Plugin crash containment and timeout handling.
+- Audit logs for denied bridge calls.
+
+### JS Bridge
+
+V1 required:
+
+```javascript
+platform.showNotification({ title, body, importance })
+platform.storage.get(key)
+platform.storage.set(key, value)
+platform.network.fetch(url, options)
+platform.message.respond(actionId, payload)
+platform.message.dismissBehavior(value)
+```
+
+Deferred to V1.5 unless needed by the two demo plugins:
+
+```javascript
+platform.camera.capture()
+platform.gallery.pick()
+platform.file.pick({ mimeTypes })
+platform.location.current({ accuracy })
+```
+
+## 5. Plugin SDK
+
+### Bundle Format
+
+V1 uses a signed bundle plus manifest.
+
+Required manifest fields:
+
+```javascript
+{
+  id,
+  name,
+  version,
+  senderId,
+  bundleHash,
+  signature,
+  declaredCapabilities,
+  declaredEndpoints,
+  dismissBehavior,
+  minPlatformVersion
+}
+```
+
+Signature verification:
+
+```
+signature = Ed25519_sign(sender_private_key, canonical_manifest_without_signature || bundleHash)
+```
+
+Android verifies signature using sender public key from trusted pairing/server metadata before loading the plugin.
+
+### Example
+
+```javascript
+import { BasePlugin, DismissBehavior } from '@syncler/plugin-sdk';
+
+export class LotteryPlugin extends BasePlugin {
+  static manifest = {
+    id: 'com.lottery.app',
+    name: 'Lottery',
+    version: '1.0.0',
+    senderId: 'com.lottery.sender',
+    declaredCapabilities: ['network'],
+    declaredEndpoints: ['https://lottery.app/api/*'],
+    dismissBehavior: DismissBehavior.DISMISS_ALL,
+  };
+
+  async onMessage(payload) {
+    const { numbers, draw_date } = payload;
+    return platform.showNotification({
+      title: 'Lottery numbers ready',
+      body: `${numbers.length} sets for ${draw_date}`,
+      importance: 'default',
+    });
+  }
+
+  render(data) {}
+
+  async onAction(actionName, payload) {
+    if (actionName === 'played') {
+      await platform.network.fetch('https://lottery.app/api/played', {
+        method: 'POST',
+        body: JSON.stringify({
+          card_id: payload.card_id,
+          numbers: payload.numbers,
+        }),
+      });
+    }
+  }
+}
+```
+
+## 6. Server SDK
+
+```python
+from syncler import Client
+
+client = Client(
+    sender_id="com.lottery.sender",
+    signing_key_path="~/.syncler/keys/lottery_ed25519.pem",
+)
+
+client.send_to(
+    user_uuid="<recipient>",
+    plugin_id="com.lottery.app",
+    payload={"numbers": [[1, 2, 3], [4, 5, 6]], "draw_date": "2026-06-01"},
+    min_plugin_version="1.0.0",
+)
+```
+
+Required V1 surface:
+
+- `Client(...)`
+- `client.send_to(...)`
+- `client.wait_for_action(message_id, timeout)`
+- `client.list_paired_users()`
+- `client.create_pairing_qr()`
+- `client.complete_pairing(token)`
+- `client.revoke_pairing(user_uuid)`
+- `client.publish_plugin(manifest, bundle_path)`
+
+## 7. Milestones
+
+| # | Milestone | Hours | Risk |
+|---|---|---:|---|
+| M1 | Server scaffold: FastAPI, DB schema, auth, JWT, rate limiting, retention jobs | 22 | medium |
+| M2 | Crypto layer: Argon2id, key hierarchy, HKDF domain separation, AES-GCM nonce/AAD, tests | 16 | high |
+| M3 | Android shell: Compose UI, login/signup, secure local storage, device enrollment | 18 | medium |
+| M4a | Plugin SDK and JS bridge: BasePlugin, bridge API, capability checks, docs | 20 | high |
+| M4b | Secure WebView host: verified bundle loading, process/storage isolation, sandbox tests | 30 | critical |
+| M5 | Push and delivery: FCM, background handling, dynamic notifications, Pixel + Samsung hardening | 36 | critical |
+| M6 | Pairing and revocation: QR flow, sender registration, pair/unpair, sender/plugin blocklist | 18 | high |
+| M7 | Multi-device sync: encrypted state schema, merge strategy, dismiss sync, min version handling | 18 | high |
+| M8 | Plugin update UX: prompt, defer, block-on-min-version, per-device update state | 8 | medium |
+| M9 | Trading bot integration and lottery spec document | 8 | medium |
+| M10 | Lottery dogfood DX test: integration attempt plus DX findings report | 6 | medium |
+| M11 | Bug fixing, security review, polish, release hardening | 16 | high |
+| **Total** |  | **216** |  |
+
+## 8. Cut Order If Budget Breaks
+
+A credible secure V1 is not a 100h build. The old cut order protected hours instead of product value and is replaced.
+
+Value-preserving cuts, in order:
+
+1. Defer camera, gallery, file picker, and location bridge APIs to V1.5. Saves 10-12h.
+2. Reduce lottery dogfood from external-agent attempt to internal integration plus DX notes. Saves 4h.
+3. Ship only one demo integration, preferably lottery because it tests plugin DX better. Saves 6-8h.
+4. Limit OEM hardening to Pixel + Samsung only. Saves 6-8h but increases delivery risk.
+5. Defer `wait_for_action` long-poll ergonomics in Python SDK; keep action POST storage. Saves 4h.
+6. Defer advanced settings screens for revocation/update management, but keep backend capability and minimal UI. Saves 6h.
+
+Cuts that are not allowed for V1 without redefining the product:
+
+- No static-only notification fallback as the planned V1 path.
+- No unsigned plugin loading.
+- No hand-waved nonce/key derivation.
+- No single-device-only V1 if multi-device remains a stated demo requirement.
+- No server-blindness compromise.
+- No removal of revocation primitives.
+
+## 9. Risks
+
+1. **Android background delivery:** FCM and foreground service behavior varies by Android version and OEM. Mitigation: build M5 early, test on Pixel and Samsung, keep polling fallback for opened app.
+2. **WebView plugin security:** WebView isolation is not equivalent to OS-level app sandboxing. Mitigation: verified bundles, minimized bridge, process/storage isolation, strict allowlists, timeouts, crash containment.
+3. **Crypto implementation mistakes:** Silent failure risk is high. Mitigation: Tink/standard libraries, explicit nonce format, AAD tests, HKDF labels, code review.
+4. **State sync conflicts:** Offline devices can mutate encrypted state independently. Mitigation: use mergeable state by entity ID for plugins, pairings, dismissals, and device records. Avoid lossy last-write-wins except for scalar preferences.
+5. **Plugin update UX:** `min_plugin_version` can block old devices. Mitigation: explicit update prompt, defer option when safe, blocking screen when message requires newer plugin.
+6. **Revocation propagation:** Devices may be offline when sender/plugin revocation occurs. Mitigation: check revocation on inbox fetch, plugin launch, and message action.
+7. **AWS deployment scope creep:** AWS can consume build time. Mitigation: keep infrastructure minimal and scriptable; no multi-region or enterprise deployment in V1.
+
+## 10. Disposition of Remaining Backlog Questions
+
+- **Spec-doc page cap:** 6 pages remains the target, but quality is measured by DX findings, not by page count alone.
+- **Scheduled sending:** sender responsibility, not platform V1.
+- **Naming:** Syncler placeholder; final naming V1.5.
+- **Marketplace review rules:** V1.5, except server-side plugin revocation/blocklist exists in V1.
+- **Revocation:** V1 required.
+- **Retention:** V1 required with defaults listed above.
+- **Rate limiting:** V1 required.
+- **Conflict resolution:** V1 required for encrypted user state.
+- **Plugin update UX:** V1 required.
+- **Cloud provider:** AWS-first V1. Supabase/Fly removed.
+
+## 11. Ready-State
+
+Ready for build execution after accepting the 216h V1 estimate and AWS-first deployment path.
+
+The smallest blocker is not technical. It is scope confirmation: either accept this as the secure V1 contract, or explicitly reduce V1 product requirements. The most defensible reduced scope is to defer nonessential bridge capabilities and one demo integration, not to weaken crypto, plugin verification, revocation, or dynamic plugin-driven notifications.
+
+=== READY TO BUILD? ===
+
+yes, provided the team accepts the revised 216h scope. The smallest blocker is confirming that budget/time reality before execution starts.

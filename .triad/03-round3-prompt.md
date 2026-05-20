@@ -1,0 +1,62 @@
+# Round 3 — User answered Batch 1; react + generate Batch 2
+
+## User's answers to Batch 1
+
+**Q1 (success metric):** V1 success = "I connect my apps to it, but v1 should support others too. But of course v1 is just for me but shippable (we'll add things before shipping)."
+
+→ Lead's read: effectively (a) self-use, but with a "production-ready for arbitrary third parties" bar. Not "100 users." Not "Alpaca integrated." Just: I use it daily AND the architecture/DX doesn't embarrass us in front of a stranger developer.
+
+**Q2 (first workflow):** TWO concrete senders, plus a third meta-test:
+1. **Trading bot** running on user's AWS. Sends periodic reports to user's phone. Cadence to be decided by the Claude Code instance working in that bot's repo. (One-way push, primarily.)
+2. **Lottery app.** Sends batches of lottery number lists. User plays them in real life. Then user taps a "played" button on the card → confirmation flows back to the lottery app. (Roundtrip — push, human action, response.)
+3. **META TEST:** User wants the triad to author a spec doc / integration guide for the lottery app's integration, then hand that doc to a separate Claude Code instance working on the lottery app and have it integrate against the spec. This dogfoods the third-party developer DX without needing a third party.
+
+**Q3 (exclusions):** "I don't see any reason not to include anything."
+
+**Q4 (80-hour demo):** "The ones from Q2" — trading bot reports + lottery roundtrip working end-to-end.
+
+**Q5 (inclusion rule):** "Everything."
+
+## Lead's reframe (already sent to user)
+
+User is collapsing two distinct concepts:
+- **Shipping target** = what works end-to-end at hour 80 = the Q2/Q4 scope.
+- **Architectural ceiling** = what V1 design doesn't artificially block = the Q3/Q5 spirit.
+
+Both can hold. What can't hold: "everything built AND shippable in 80 hours."
+
+If user accepts reframe → V1 = trading bot reports + lottery roundtrip + spec-doc handoff test, on an architecture that doesn't paint into a corner.
+
+## Your task this round
+
+### Part A — React (3 sentences max)
+
+Do you agree with the reframe? Is there a sharper way to resolve Q3/Q5 vs Q2/Q4 that the lead missed? Is the user actually saying "everything" or are they saying "don't tell me no"?
+
+### Part B — Generate Batch 2 (8–10 questions)
+
+Solo-parallel again. Push harder now that we have concrete senders. Pull from Tier 1 of the merged question bank, but **adapt to the specific senders** (trading bot on AWS, lottery app, meta-test of third-party DX). Add anything new the answers triggered.
+
+Areas to press:
+- **Encryption posture** (Q6 in bank) — now made concrete: does the server see trading bot reports? Lottery number lists? Why or why not?
+- **Plugin proof** (Q7) — for these specific senders, what *needs* a plugin? Plotly chart from trading? Anything? If nothing, why is plugin infra in V1?
+- **Card lifecycle** (Q12) — what if user plays the numbers, taps "played," then the phone is offline? Sender retries? What if the trading bot sends 50 reports while user is on vacation?
+- **Pairing ceremony** (Q10) — how does the trading bot on AWS authenticate to the platform? API key in env var? Per-card signing? Rate limit?
+- **Sender SDK shape** — Python SDK for the lottery app and trading bot. What's the minimal API surface that makes both senders trivially easy to wire in?
+- **The spec-doc handoff test** — what does this doc need to contain to be a fair DX test? If we cheat by making it 500 pages, we've proven nothing.
+- **Trading bot cadence decision** — the user said the Claude Code instance in the bot's folder will decide cadence. What does the platform need to support? Hourly? On-event? Both? Does the platform care?
+- **Reverse channel** — the lottery "played" button is a structured response. What's the data shape sent back? Does the lottery app receive via webhook, poll, or persistent connection?
+
+Add anything else you think is sharper than these.
+
+### Output format
+
+```
+=== REACTION ===
+<3 sentences max>
+
+=== BATCH 2 QUESTIONS ===
+<numbered list, 8-10 questions, 1-2 sentences each, no preamble>
+```
+
+Be sharp. The user has now committed to specifics — questions should leverage that. Avoid generic "have you considered..." Press on the actual senders.

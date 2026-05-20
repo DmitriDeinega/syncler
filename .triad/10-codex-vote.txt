@@ -1,0 +1,6 @@
+=== VOTES ===
+q-build: a
+q-build-reason: Codex should write directly because it is lead and owns implementation coherence. Using Claude as a write proxy adds latency and transcription risk without adding quality.
+
+q-git: a
+q-git-reason: Initialize git now so every milestone has a clean diff, review point, and rollback boundary. The repo should be disciplined from the first scaffold commit.

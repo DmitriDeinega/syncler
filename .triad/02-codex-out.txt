@@ -1,0 +1,29 @@
+1. You said “V1 perfect, ready for everything.” Name five things that are explicitly not in V1; if nothing is excluded, V1 is not a product plan.
+
+2. Pick one V1 success metric: you personally use it daily for 30 days, 20 developers use it weekly, 100 strangers sign up, or one outside service integrates. Which one is the real target?
+
+3. What is the first workflow you will run through this app every day before anyone else cares: Claude Code approval prompts, trading decisions, file/photo handoff, lottery project outputs, or something else?
+
+4. Describe the first “perfect” card in concrete terms: what does the sender post, what does your phone show, what do you tap/type/upload, and what response goes back?
+
+5. If we give this four weeks of part-time work instead of two weeks of fantasy full-time output, what gets cut first: plugins, file previews, push notifications, search/tags, mobile polish, or third-party pairing?
+
+6. What is the rule for deciding whether a feature belongs in V1: “needed for my daily Claude Code workflow,” “needed by any developer,” “needed by future services,” or “cool infrastructure”?
+
+7. When a pending card asks “Buy or Sell?” and you answer six hours later, who decides whether the answer is still valid: sender, server, user, or card schema?
+
+8. What should happen if the sender process crashes after sending a card, the user submits twice from two devices, or the phone was offline for a week and receives stale prompts?
+
+9. How does a new sender get permission to reach you: manually issued API key, QR pairing, email invite, public handle, phone number, or something else?
+
+10. For stranger/service pairing, what prevents a fake “Alpaca” sender from requesting KYC photos from a user who trusts the brand name?
+
+11. Are card contents end-to-end encrypted from sender to device, or can the server read them for search, previews, moderation, and debugging? Pick one for V1.
+
+12. If a user uploads passport/KYC/photos through this product and data leaks, what is your intended posture: “we do not support regulated sensitive data yet,” “encrypted so we cannot see it,” or “we accept compliance obligations”?
+
+13. Give three concrete interactions you believe cannot be handled by declarative components plus sandboxed HTML. If you cannot name them, why are renderer plugins in V1?
+
+14. Are we building for a two-sided marketplace in V1, or deliberately ducking that and building a developer/self-use tool first? “Both” is not an answer for the first release.
+
+15. If you are still working on this in month 3, what failure would make you quit: not using it yourself, technical complexity, no users, unreliable notifications, security anxiety, or boredom from too much infrastructure?

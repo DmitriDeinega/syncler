@@ -1,0 +1,14 @@
+=== VOTES ===
+Q20: agree-with-caveat: Native Kotlin + WebView is the right host architecture, but only if we explicitly keep plugin UI in isolated WebViews/profiles where possible and define the bridge API narrowly. “Native” alone does not buy sandboxing; we still need deliberate isolation.
+
+Q22: agree-with-caveat: Sender-publishes-QR is the right default, with URL/deep-link fallback from day one because the AWS sender or lottery backend may be configured from the same machine rather than physically scanned. The QR payload should avoid carrying secrets beyond the one-time short-lived token and should bind token, manifest URL, and sender key fingerprint together.
+
+Q17: agree-with-caveat: Python V1 plus curl docs is correct. Keep the protocol spec canonical and small so the Python SDK is just convenience, not the only real integration path.
+
+Q23: agree-with-caveat: Prompt-to-update is correct for URL install V1. Also require plugin version pinning per paired sender so old messages render against the plugin version they were sent for, or at least fail with a clear “requires plugin >= x.y.z” state.
+
+=== READY FOR PLANNING? ===
+yes, after the pending clarifications on per-plugin permissions, notification execution model, and whether capabilities are opt-in or default. Those three directly affect the Android architecture and Plugin SDK contract.
+
+=== ANYTHING THE LEAD MISSED ===
+Add one planning decision before implementation: local key storage and backup/recovery. If the phone is lost or app data is wiped, E2E pairing and installed plugins may become unrecoverable unless we choose a recovery posture deliberately.
