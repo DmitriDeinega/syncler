@@ -1,0 +1,23 @@
+[project]
+name = "syncler"
+version = "0.1.0"
+description = "Syncler sender SDK (Python)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography==45.0.3",
+    "requests==2.32.3",
+    "qrcode[pil]==8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+]
+
+[build-system]
+requires = ["setuptools>=80.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
