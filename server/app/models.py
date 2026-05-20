@@ -1,11 +1,14 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer
+from sqlalchemy import JSON, LargeBinary, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
+
+JSONB_TYPE = JSONB().with_variant(JSON(), "sqlite")
+UUID_TYPE = Uuid(as_uuid=True)
 
 
 class Base(DeclarativeBase):
@@ -16,7 +19,7 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     email: Mapped[str] = mapped_column(Text, nullable=False)
     auth_key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     encrypted_master_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -28,9 +31,9 @@ class User(Base):
 class Device(Base):
     __tablename__ = "devices"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -46,7 +49,7 @@ class Sender(Base):
     __tablename__ = "senders"
     __table_args__ = (UniqueConstraint("public_key", name="uq_senders_public_key"),)
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     contact: Mapped[str | None] = mapped_column(Text)
@@ -58,15 +61,15 @@ class Pairing(Base):
     __tablename__ = "pairings"
     __table_args__ = (UniqueConstraint("user_id", "sender_id", name="uq_pairings_user_id_sender_id"),)
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
     sender_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("senders.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -80,9 +83,9 @@ class Plugin(Base):
     __tablename__ = "plugins"
     __table_args__ = (UniqueConstraint("sender_id", "version", name="uq_plugins_sender_id_version"),)
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     sender_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("senders.id"),
         nullable=False,
     )
@@ -91,8 +94,8 @@ class Plugin(Base):
     bundle_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     signature: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     signed_bundle_url: Mapped[str] = mapped_column(Text, nullable=False)
-    capabilities: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    endpoints: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    capabilities: Mapped[dict] = mapped_column(JSONB_TYPE, nullable=False)
+    endpoints: Mapped[dict] = mapped_column(JSONB_TYPE, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -101,19 +104,19 @@ class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (Index("ix_messages_user_id_sent_at_desc", "user_id", text("sent_at DESC")),)
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     sender_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("senders.id"),
         nullable=False,
     )
     user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
     plugin_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("plugins.id"),
         nullable=False,
     )
@@ -127,12 +130,12 @@ class DeliveryStatus(Base):
     __tablename__ = "delivery_status"
 
     message_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("messages.id", ondelete="CASCADE"),
         primary_key=True,
     )
     device_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("devices.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -145,7 +148,7 @@ class EncryptedUserState(Base):
     __tablename__ = "encrypted_user_state"
 
     user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
     )
