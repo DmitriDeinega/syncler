@@ -60,7 +60,24 @@ interface SynclerApi {
 
     @retrofit2.http.PUT("/v1/state")
     suspend fun putUserState(@Body body: StatePutRequestDto): Response<StatePutResponseDto>
+
+    @GET("/v1/plugins/{id}/latest")
+    suspend fun getPluginLatest(@Path("id") pluginId: String): PluginLatestDto
 }
+
+@JsonClass(generateAdapter = true)
+data class PluginLatestDto(
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "sender_id") val senderId: String,
+    val version: String,
+    @Json(name = "signed_bundle_url") val signedBundleUrl: String,
+    @Json(name = "manifest_hash") val manifestHash: String,
+    @Json(name = "bundle_hash") val bundleHash: String,
+    val signature: String,
+    val capabilities: List<String>,
+    val endpoints: List<String>,
+    @Json(name = "created_at") val createdAt: String,
+)
 
 @JsonClass(generateAdapter = true)
 data class StateGetResponseDto(
