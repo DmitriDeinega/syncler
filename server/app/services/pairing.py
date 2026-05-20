@@ -1,0 +1,151 @@
+"""Pairing service — broker-mediated sender↔user pairing."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import secrets
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Pairing, PendingPairing, Sender, User
+from app.services.senders import SenderRevokedError, get_active_sender
+
+PAIRING_TOKEN_BYTES = 32
+DEFAULT_TTL = timedelta(seconds=300)
+MAX_TTL = timedelta(minutes=15)
+
+
+class PairingError(Exception):
+    """Base."""
+
+
+class PairingTokenNotFoundError(PairingError):
+    """No pending pairing for that token."""
+
+
+class PairingTokenExpiredError(PairingError):
+    """Pending pairing TTL expired."""
+
+
+class PairingTokenConsumedError(PairingError):
+    """Pending pairing already consumed."""
+
+
+class PairingAlreadyExistsError(PairingError):
+    """Active pairing exists for (user, sender)."""
+
+
+def generate_pairing_token() -> bytes:
+    return secrets.token_bytes(PAIRING_TOKEN_BYTES)
+
+
+def fingerprint_for_public_key(public_key: bytes) -> str:
+    """6 groups of 4 base32-uppercased chars over the first 8 bytes of SHA-256(public_key).
+
+    Used for I4 anti-spoofing UX confirmation.
+    """
+    digest = hashlib.sha256(public_key).digest()
+    encoded = base64.b32encode(digest[:8]).decode("ascii").rstrip("=").upper()
+    return "-".join(encoded[i : i + 4] for i in range(0, len(encoded), 4))
+
+
+async def initiate_pairing(
+    db: AsyncSession,
+    *,
+    sender_id: uuid.UUID,
+    ttl_seconds: int,
+    metadata: dict[str, Any] | None,
+) -> PendingPairing:
+    sender = await get_active_sender(db, sender_id)  # may raise
+    ttl = timedelta(seconds=max(1, min(ttl_seconds, int(MAX_TTL.total_seconds()))))
+
+    pending = PendingPairing(
+        id=uuid.uuid4(),
+        sender_id=sender.id,
+        pairing_token=generate_pairing_token(),
+        expires_at=datetime.now(UTC) + ttl,
+        metadata_json=metadata,
+    )
+    db.add(pending)
+    await db.commit()
+    await db.refresh(pending)
+    return pending
+
+
+async def complete_pairing(
+    db: AsyncSession,
+    *,
+    user: User,
+    pairing_token: bytes,
+    encrypted_initial_state: bytes,
+) -> tuple[Pairing, Sender, PendingPairing]:
+    result = await db.execute(
+        select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
+    )
+    pending = result.scalar_one_or_none()
+    if pending is None:
+        raise PairingTokenNotFoundError("unknown pairing token")
+    if pending.consumed_at is not None:
+        raise PairingTokenConsumedError("pairing token already consumed")
+    now = datetime.now(UTC)
+    if pending.expires_at <= now:
+        raise PairingTokenExpiredError("pairing token expired")
+
+    sender = await get_active_sender(db, pending.sender_id)  # may raise SenderRevokedError
+
+    # Check for existing active pairing.
+    existing = await db.execute(
+        select(Pairing).where(
+            and_(
+                Pairing.user_id == user.id,
+                Pairing.sender_id == sender.id,
+                Pairing.revoked_at.is_(None),
+            ),
+        ),
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise PairingAlreadyExistsError("user is already paired with this sender")
+
+    pairing = Pairing(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        sender_id=sender.id,
+        encrypted_state=encrypted_initial_state,
+    )
+    pending.consumed_at = now
+    db.add(pairing)
+    await db.commit()
+    await db.refresh(pairing)
+    return pairing, sender, pending
+
+
+async def revoke_pairing(
+    db: AsyncSession, *, user: User, pairing_id: uuid.UUID
+) -> Pairing:
+    result = await db.execute(
+        select(Pairing).where(
+            and_(Pairing.id == pairing_id, Pairing.user_id == user.id),
+        ),
+    )
+    pairing = result.scalar_one_or_none()
+    if pairing is None:
+        raise PairingTokenNotFoundError(f"pairing {pairing_id} not found")
+    if pairing.revoked_at is None:
+        pairing.revoked_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(pairing)
+    return pairing
+
+
+def sender_metadata_for_response(sender: Sender) -> dict[str, str | None]:
+    """Build the data the device locks at pair-time for I4 anti-spoofing."""
+    name_hash = hashlib.sha256(sender.name.encode("utf-8")).digest()
+    return {
+        "fingerprint": fingerprint_for_public_key(sender.public_key),
+        "name_hash": base64.b64encode(name_hash).decode("ascii"),
+    }

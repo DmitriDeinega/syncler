@@ -157,6 +157,26 @@ class EncryptedUserState(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PendingPairing(Base):
+    """Sender-initiated pending pairing waiting for user-side completion."""
+
+    __tablename__ = "pending_pairings"
+    __table_args__ = (UniqueConstraint("pairing_token", name="uq_pending_pairings_token"),)
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pairing_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB_TYPE)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class RateLimitEvent(Base):
     __tablename__ = "rate_limit_events"
     __table_args__ = (

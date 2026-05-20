@@ -191,3 +191,59 @@ class MessageInboxResponse(BaseModel):
 
 class MessageDetailResponse(MessageInboxItem):
     pass
+
+
+class PairingInitiateRequest(BaseModel):
+    sender_id: UUID
+    ttl_seconds: Annotated[int, Field(ge=1, le=900)] = 300
+    metadata: dict | None = None
+    signature: str  # Ed25519 over canonical body (sender authentication)
+
+    @field_validator("signature")
+    @classmethod
+    def validate_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="signature", exact=64)
+        return value
+
+
+class PairingInitiateResponse(BaseModel):
+    pairing_id: UUID
+    pairing_token: str  # base64
+    broker_url: str
+    expires_at: datetime
+
+
+class PairingCompleteRequest(BaseModel):
+    pairing_token: str  # base64
+    encrypted_initial_state: str  # base64
+
+    @field_validator("pairing_token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        decode_base64(value, field_name="pairing_token", exact=32)
+        return value
+
+    @field_validator("encrypted_initial_state")
+    @classmethod
+    def validate_state(cls, value: str) -> str:
+        decode_base64(value, field_name="encrypted_initial_state", minimum=16)
+        return value
+
+
+class PairingCompleteResponse(BaseModel):
+    pairing_id: UUID
+    sender_id: UUID
+    sender_name: str
+    sender_public_key: str
+    sender_public_key_fingerprint: str
+    sender_name_hash: str
+    paired_at: datetime
+
+
+class PairingItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    sender_id: UUID
+    created_at: datetime | None
+    revoked_at: datetime | None
