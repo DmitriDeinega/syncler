@@ -24,6 +24,7 @@ include(
     ":core:push",
     ":core:storage",
     ":feature:inbox",
+    ":feature:pairing",
     ":feature:plugin-host",
     ":feature:settings",
 )

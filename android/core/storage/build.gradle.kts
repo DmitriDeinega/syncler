@@ -36,6 +36,7 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.sqlite)
     implementation(libs.hilt.android)
+    implementation(libs.kotlinx.coroutines.android)
     implementation(libs.sqlcipher)
 
     ksp(libs.androidx.room.compiler)

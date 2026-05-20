@@ -42,7 +42,41 @@ interface SynclerApi {
         @Path("id") id: String,
         @retrofit2.http.Query("device_id") deviceId: String,
     ): Response<Unit>
+
+    @POST("/v1/pairing/complete")
+    suspend fun completePairing(@Body body: PairingCompleteRequestDto): PairingCompleteResponseDto
+
+    @POST("/v1/pairing/{id}/revoke")
+    suspend fun revokePairing(@Path("id") id: String): Response<Unit>
+
+    @GET("/v1/pairing")
+    suspend fun listPairings(): List<PairingItemDto>
 }
+
+@JsonClass(generateAdapter = true)
+data class PairingCompleteRequestDto(
+    @Json(name = "pairing_token") val pairingToken: String,
+    @Json(name = "encrypted_initial_state") val encryptedInitialState: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingCompleteResponseDto(
+    @Json(name = "pairing_id") val pairingId: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "sender_name") val senderName: String,
+    @Json(name = "sender_public_key") val senderPublicKey: String,
+    @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
+    @Json(name = "sender_name_hash") val senderNameHash: String,
+    @Json(name = "paired_at") val pairedAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "created_at") val createdAt: String?,
+    @Json(name = "revoked_at") val revokedAt: String?,
+)
 
 @JsonClass(generateAdapter = true)
 data class MessageInboxItemDto(
