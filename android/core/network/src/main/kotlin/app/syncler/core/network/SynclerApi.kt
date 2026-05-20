@@ -30,7 +30,37 @@ interface SynclerApi {
 
     @DELETE("/v1/account")
     suspend fun deleteAccount(): Response<Unit>
+
+    @GET("/v1/messages/{id}")
+    suspend fun getMessage(@Path("id") id: String): MessageInboxItemDto
+
+    @GET("/v1/messages/inbox")
+    suspend fun inbox(@retrofit2.http.Query("since") since: String? = null): MessageInboxResponseDto
+
+    @POST("/v1/messages/{id}/dismiss")
+    suspend fun dismissMessage(
+        @Path("id") id: String,
+        @retrofit2.http.Query("device_id") deviceId: String,
+    ): Response<Unit>
 }
+
+@JsonClass(generateAdapter = true)
+data class MessageInboxItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String?,
+    @Json(name = "encrypted_body") val encryptedBody: String,
+    val nonce: String,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
+    @Json(name = "sent_at") val sentAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class MessageInboxResponseDto(
+    val messages: List<MessageInboxItemDto>,
+    @Json(name = "next_since") val nextSince: String?,
+)
 
 @JsonClass(generateAdapter = true)
 data class SignupRequest(

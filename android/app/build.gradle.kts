@@ -39,6 +39,7 @@ dependencies {
     implementation(project(":core:auth"))
     implementation(project(":core:crypto"))
     implementation(project(":core:network"))
+    implementation(project(":core:push"))
     implementation(project(":core:storage"))
     implementation(project(":feature:inbox"))
     implementation(project(":feature:plugin-host"))

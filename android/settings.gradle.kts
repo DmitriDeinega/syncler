@@ -21,6 +21,7 @@ include(
     ":core:auth",
     ":core:crypto",
     ":core:network",
+    ":core:push",
     ":core:storage",
     ":feature:inbox",
     ":feature:plugin-host",
