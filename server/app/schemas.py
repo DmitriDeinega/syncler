@@ -265,3 +265,29 @@ class PairingItem(BaseModel):
     sender_id: UUID
     created_at: datetime | None
     revoked_at: datetime | None
+
+
+class StateGetResponse(BaseModel):
+    state_version: int
+    encrypted_blob: str  # base64
+    updated_at: datetime | None
+
+
+class StatePutRequest(BaseModel):
+    expected_state_version: Annotated[int, Field(ge=0)]
+    new_encrypted_blob: str  # base64
+
+    @field_validator("new_encrypted_blob")
+    @classmethod
+    def validate_blob(cls, value: str) -> str:
+        decode_base64(value, field_name="new_encrypted_blob", minimum=1)
+        return value
+
+
+class StatePutResponse(BaseModel):
+    new_state_version: int
+
+
+class StateConflictBody(BaseModel):
+    current_state_version: int
+    current_encrypted_blob: str
