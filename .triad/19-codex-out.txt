@@ -1,0 +1,51 @@
+Implemented M4b under `android/`.
+
+**Created/Wired**
+- New module: [feature/plugin-host](D:/Projects/syncler/android/feature/plugin-host/build.gradle.kts)
+- Registered in [settings.gradle.kts](D:/Projects/syncler/android/settings.gradle.kts)
+- Added app dependency so the manifest merges into the app: [app/build.gradle.kts](D:/Projects/syncler/android/app/build.gradle.kts)
+- Added WebKit + Timber dependency aliases in [libs.versions.toml](D:/Projects/syncler/android/gradle/libs.versions.toml)
+
+**Security Pieces**
+- Process isolation confirmed in [AndroidManifest.xml](D:/Projects/syncler/android/feature/plugin-host/src/main/AndroidManifest.xml): `android:process=":pluginhost"`
+- Hardened WebView in [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt) and [PluginWebViewClient.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginWebViewClient.kt)
+- Single-method JS bridge only: `__syncler_native__.call(...)` in [PluginBridge.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginBridge.kt)
+- Ed25519 + canonical manifest verification in [PluginSignatureVerifier.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginSignatureVerifier.kt)
+- Endpoint allowlist matching in [EndpointMatcher.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/EndpointMatcher.kt)
+- Network, encrypted Room storage, notifications, message bridge, and guarded camera/gallery/file/location bridge surfaces under `capabilities/`
+
+**Tests Added**
+- [PluginSignatureVerifierTest.kt](D:/Projects/syncler/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginSignatureVerifierTest.kt)
+- [EndpointMatcherTest.kt](D:/Projects/syncler/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/EndpointMatcherTest.kt)
+- [PluginLoaderTest.kt](D:/Projects/syncler/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt)
+- Example test bundle: [minimal-plugin.bundle.js](D:/Projects/syncler/android/feature/plugin-host/src/test/resources/minimal-plugin.bundle.js)
+
+**Run**
+This checkout does not include `gradlew` and there is no system `gradle`/`kotlinc` on PATH, so I could not execute tests here.
+
+When Gradle is available:
+
+```powershell
+cd android
+gradle :feature:plugin-host:testDebugUnitTest
+```
+
+Example plugin load entrypoint:
+
+```kotlin
+val loader = PluginLoader.android(context, scope)
+val result = loader.load(manifestUrl, expectedSenderPublicKey)
+```
+
+**Audit Log**
+Denied calls/signature failures/hash mismatches are logged with Timber tag `PLUGIN_AUDIT` and appended to:
+
+```text
+context.noBackupFilesDir/pluginhost_audit.log
+```
+
+Typically:
+
+```text
+/data/user/0/app.syncler.android/no_backup/pluginhost_audit.log
+```

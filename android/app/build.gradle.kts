@@ -41,6 +41,7 @@ dependencies {
     implementation(project(":core:network"))
     implementation(project(":core:storage"))
     implementation(project(":feature:inbox"))
+    implementation(project(":feature:plugin-host"))
     implementation(project(":feature:settings"))
 
     implementation(platform(libs.androidx.compose.bom))

@@ -23,5 +23,6 @@ include(
     ":core:network",
     ":core:storage",
     ":feature:inbox",
+    ":feature:plugin-host",
     ":feature:settings",
 )
