@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.db import dispose_engine, init_engine
-from app.routers import auth, devices
+from app.routers import auth, devices, messages, senders
 
 
 @asynccontextmanager
@@ -24,6 +24,8 @@ app = FastAPI(title="Syncler Server", version=__version__, lifespan=lifespan)
 app.include_router(auth.router, prefix="/v1/auth")
 app.include_router(auth.account_router, prefix="/v1")
 app.include_router(devices.router, prefix="/v1/auth/devices")
+app.include_router(senders.router, prefix="/v1/senders")
+app.include_router(messages.router, prefix="/v1/messages")
 
 
 @app.exception_handler(RequestValidationError)

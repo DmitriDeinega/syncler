@@ -111,3 +111,74 @@ class DeviceListItem(BaseModel):
     last_seen: datetime | None
     revoked_at: datetime | None
     has_fcm_token: bool
+
+
+class SenderRegisterRequest(BaseModel):
+    public_key: str
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+    contact: Annotated[str | None, Field(max_length=200)] = None
+
+    @field_validator("public_key")
+    @classmethod
+    def validate_public_key(cls, value: str) -> str:
+        decode_base64(value, field_name="public_key", exact=32)
+        return value
+
+
+class SenderRegisterResponse(BaseModel):
+    sender_id: UUID
+    created_at: datetime
+
+
+class MessageSendRequest(BaseModel):
+    sender_id: UUID
+    user_id: UUID
+    plugin_id: UUID
+    encrypted_body: str
+    nonce: str
+    envelope_signature: str
+    min_plugin_version: str | None = None
+    expires_at: datetime | None = None
+
+    @field_validator("encrypted_body")
+    @classmethod
+    def validate_encrypted_body(cls, value: str) -> str:
+        decode_base64(value, field_name="encrypted_body", minimum=16)
+        return value
+
+    @field_validator("nonce")
+    @classmethod
+    def validate_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="nonce", exact=12)
+        return value
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_envelope_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+
+class MessageSendResponse(BaseModel):
+    message_id: UUID
+    expires_at: datetime
+
+
+class MessageInboxItem(BaseModel):
+    id: UUID
+    sender_id: UUID
+    plugin_id: UUID
+    min_plugin_version: str | None
+    encrypted_body: str
+    nonce: str
+    envelope_signature: str
+    sent_at: datetime
+
+
+class MessageInboxResponse(BaseModel):
+    messages: list[MessageInboxItem]
+    next_since: datetime | None
+
+
+class MessageDetailResponse(MessageInboxItem):
+    pass
