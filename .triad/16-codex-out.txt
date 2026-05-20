@@ -1,0 +1,32 @@
+Implemented M2 crypto foundation.
+
+Files created:
+- [server/app/crypto/__init__.py](</d:/Projects/syncler/server/app/crypto/__init__.py>)
+- [server/app/crypto/argon2.py](</d:/Projects/syncler/server/app/crypto/argon2.py>)
+- [server/app/crypto/hkdf.py](</d:/Projects/syncler/server/app/crypto/hkdf.py>)
+- [server/app/crypto/signatures.py](</d:/Projects/syncler/server/app/crypto/signatures.py>)
+- [server/app/crypto/aead.py](</d:/Projects/syncler/server/app/crypto/aead.py>)
+- [server/app/crypto/nonce.py](</d:/Projects/syncler/server/app/crypto/nonce.py>)
+- [server/app/crypto/wire.py](</d:/Projects/syncler/server/app/crypto/wire.py>)
+- [server/tests/test_crypto.py](</d:/Projects/syncler/server/tests/test_crypto.py>)
+- [docs/crypto-spec.md](</d:/Projects/syncler/docs/crypto-spec.md>)
+
+`server/pyproject.toml` already had pinned `argon2-cffi==23.1.0` and `cryptography==45.0.3`, so I left it unchanged.
+
+Verification:
+- Passed: `tests/test_crypto.py` isolated, 7 tests.
+- Full normal pytest collection is blocked locally because `tests/conftest.py` imports DB deps that are not installed in this environment. The isolated run used `--noconftest`.
+
+Generated vectors:
+```text
+ARGON2_HASH_HEX=e23ed7b136661e69f2424d8440777943827d9981e2fb409d69e48bce72dd7f82c8327524d69330d1993ba67e26a3576718d29f0602e44a881d924ca36836699c
+AUTH_KEY_HEX=e23ed7b136661e69f2424d8440777943827d9981e2fb409d69e48bce72dd7f82
+WRAP_KEY_HEX=c8327524d69330d1993ba67e26a3576718d29f0602e44a881d924ca36836699c
+PAIRING_KEY_HEX=f6ed649481dd8a5ffc57401b816803fba79556731c5c9ff53be49f7862f8cb8e
+CIPHERTEXT_WITH_TAG_HEX=3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc
+WIRE_HEX=101112131415161718191a1b3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc
+ED25519_PUBLIC_KEY_HEX=712651f450ba05b63898b99ef5f7ba45632e8e2527f7f715cd671ec4024cc51e
+ED25519_SIGNATURE_HEX=3d3a4963d6390f4392b36dac13938cadf015da019c6d0b2004e701656f544f6b336bb9da81ef4fde0b392f3ac33884c7dbb40dcd6f0ac30f1bbc06a464e68a06
+```
+
+Deviation from V1 contract: none. I did make AAD validation strict: missing or unexpected AAD fields raise `ValueError`, matching the exact seven-field V1 contract.
