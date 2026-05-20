@@ -41,3 +41,25 @@ class NonceRegistry:
             sender_nonces.popitem(last=False)
         return False
 
+
+_global_registry: NonceRegistry | None = None
+
+
+def get_global_registry() -> NonceRegistry:
+    """Process-wide nonce registry.
+
+    V1 is process-local; M11 / V1.5 migrates to a DB-backed registry so
+    multi-worker deployments share state and replay protection survives
+    restarts.
+    """
+    global _global_registry
+    if _global_registry is None:
+        _global_registry = NonceRegistry()
+    return _global_registry
+
+
+def reset_global_registry() -> None:
+    """Test helper — drop the global registry."""
+    global _global_registry
+    _global_registry = None
+

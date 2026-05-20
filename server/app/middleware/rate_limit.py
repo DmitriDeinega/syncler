@@ -138,7 +138,7 @@ async def _increment_and_read_sqlite(
 
 
 def _identify_actor(name: str, request: Request) -> tuple[str, str]:
-    if name in {"login", "signup"}:
+    if name in {"login", "signup", "message_send_ip"}:
         return "ip", _client_ip(request)
 
     if name in {"pairing_initiate", "message_send"}:

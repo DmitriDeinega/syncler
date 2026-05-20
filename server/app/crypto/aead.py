@@ -12,15 +12,19 @@ AES_GCM_NONCE_BYTES: Final[int] = 12
 AES_GCM_TAG_BYTES: Final[int] = 16
 
 AAD_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
-    "message_id",
     "sender_id",
     "user_id",
     "plugin_id",
     "min_plugin_version",
-    "created_at",
-    "schema_version",
+    "expires_at",
 )
 AAD_REQUIRED_FIELD_SET: Final[frozenset[str]] = frozenset(AAD_REQUIRED_FIELDS)
+
+ENVELOPE_REQUIRED_FIELDS: Final[tuple[str, ...]] = AAD_REQUIRED_FIELDS + (
+    "encrypted_body",
+    "nonce",
+)
+ENVELOPE_REQUIRED_FIELD_SET: Final[frozenset[str]] = frozenset(ENVELOPE_REQUIRED_FIELDS)
 
 
 def decrypt_message_body(pairing_key: bytes, wire: bytes, aad: bytes) -> bytes:
@@ -37,7 +41,12 @@ def decrypt_message_body(pairing_key: bytes, wire: bytes, aad: bytes) -> bytes:
 
 
 def assemble_aad(fields: dict[str, Any]) -> bytes:
-    """Assemble canonical JSON AAD for message encryption."""
+    """Assemble canonical JSON AAD for AES-GCM encryption.
+
+    AAD authenticates the protocol context bound to the ciphertext but does
+    NOT include the ciphertext itself. See ``assemble_envelope`` for the
+    Ed25519 signing input.
+    """
 
     missing_fields = [field for field in AAD_REQUIRED_FIELDS if field not in fields]
     if missing_fields:
@@ -47,6 +56,27 @@ def assemble_aad(fields: dict[str, Any]) -> bytes:
     if unexpected_fields:
         raise ValueError(f"unexpected AAD fields: {', '.join(unexpected_fields)}")
 
+    return _canonical(fields)
+
+
+def assemble_envelope(fields: dict[str, Any]) -> bytes:
+    """Assemble canonical envelope JSON for Ed25519 sender signing.
+
+    Envelope = AAD + ``encrypted_body`` (base64) + ``nonce`` (base64).
+    """
+
+    missing_fields = [field for field in ENVELOPE_REQUIRED_FIELDS if field not in fields]
+    if missing_fields:
+        raise ValueError(f"missing envelope fields: {', '.join(missing_fields)}")
+
+    unexpected_fields = sorted(set(fields) - ENVELOPE_REQUIRED_FIELD_SET)
+    if unexpected_fields:
+        raise ValueError(f"unexpected envelope fields: {', '.join(unexpected_fields)}")
+
+    return _canonical(fields)
+
+
+def _canonical(fields: dict[str, Any]) -> bytes:
     return json.dumps(
         fields,
         ensure_ascii=True,

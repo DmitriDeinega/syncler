@@ -1,0 +1,20 @@
+Reading prompt from stdin...
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: d:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019e43b0-8b01-78b0-9a13-7b971b3e5317
+--------
+user
+ping
+
+codex
+pong
+tokens used
+1,297
+pong

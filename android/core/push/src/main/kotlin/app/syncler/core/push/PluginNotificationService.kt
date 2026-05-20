@@ -38,8 +38,9 @@ class PluginNotificationService : Service() {
     @Inject lateinit var pipeline: PluginMessagePipeline
     @Inject lateinit var notifications: NotificationFactory
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var workJob: Job? = null
+    private val supervisor = SupervisorJob()
+    private val scope = CoroutineScope(supervisor + Dispatchers.IO)
+    private val activeJobs = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Job, Boolean>())
 
     override fun onCreate() {
         super.onCreate()
@@ -57,7 +58,7 @@ class PluginNotificationService : Service() {
             return START_NOT_STICKY
         }
 
-        workJob = scope.launch {
+        val job = scope.launch {
             val outcome = withTimeoutOrNull(MAX_WORK_MS) {
                 pipeline.process(
                     messageId = messageId,
@@ -67,6 +68,7 @@ class PluginNotificationService : Service() {
             }
             if (outcome == null) {
                 Timber.tag(TAG).w("plugin pipeline timed out for message=%s", messageId)
+                notifications.postDeliveryFailed(this@PluginNotificationService, messageId)
             } else {
                 outcome.notification?.let { notifications.post(this@PluginNotificationService, it) }
                 if (outcome.requiresUpdate) {
@@ -77,13 +79,18 @@ class PluginNotificationService : Service() {
                     )
                 }
             }
-            stopSelf(startId)
+            if (activeJobs.size <= 1) {
+                stopSelf(startId)
+            }
         }
+        activeJobs.add(job)
+        job.invokeOnCompletion { activeJobs.remove(job) }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        workJob?.cancel()
+        // Cancel the WHOLE scope so all queued jobs stop, not just the latest.
+        supervisor.cancel()
         super.onDestroy()
     }
 
@@ -164,6 +171,7 @@ interface NotificationFactory {
     fun ensureChannel(context: Context)
     fun post(context: Context, request: PluginNotificationRequest)
     fun postUpdateRequired(context: Context, pluginId: String, requiredVersion: String)
+    fun postDeliveryFailed(context: Context, messageId: String)
 }
 
 class DefaultNotificationFactory @Inject constructor() : NotificationFactory {
@@ -206,6 +214,17 @@ class DefaultNotificationFactory @Inject constructor() : NotificationFactory {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
         nm.notify(pluginId.hashCode(), builder.build())
+    }
+
+    override fun postDeliveryFailed(context: Context, messageId: String) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        val builder = NotificationCompat.Builder(context, PluginNotificationService.USER_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("Message delivery failed")
+            .setContentText("Open Syncler to retry")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+        nm.notify("failed:$messageId".hashCode(), builder.build())
     }
 
     private fun importanceToPriority(value: String): Int = when (value) {

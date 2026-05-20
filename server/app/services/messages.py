@@ -12,6 +12,7 @@ from app.models import DeliveryStatus, Device, Message, Pairing, Plugin
 
 
 DEFAULT_RETENTION = timedelta(days=30)
+MAX_RETENTION = timedelta(days=30)
 
 
 class MessageError(Exception):
@@ -27,17 +28,44 @@ class PairingMissingError(MessageError):
 
 
 class PluginInactiveError(MessageError):
-    """Plugin record missing or revoked."""
+    """Plugin record missing or revoked, or sender_id does not match."""
+
+
+class ExpiredEnvelopeError(MessageError):
+    """The signed envelope's expires_at is in the past or beyond the cap."""
+
+
+class NonceReplayError(MessageError):
+    """The (sender_id, nonce) pair was already used."""
 
 
 class MessageNotFoundError(MessageError):
     """Message does not exist for this user."""
 
 
+class DeviceOwnershipError(MessageError):
+    """The device_id does not belong to the authenticated user."""
+
+
 async def _active_devices(db: AsyncSession, user_id: uuid.UUID) -> list[Device]:
+    """Active devices (revoked_at IS NULL). Used for delivery_status fan-out."""
     result = await db.execute(
         select(Device).where(
             and_(Device.user_id == user_id, Device.revoked_at.is_(None)),
+        ),
+    )
+    return list(result.scalars().all())
+
+
+async def _active_devices_with_fcm(db: AsyncSession, user_id: uuid.UUID) -> list[Device]:
+    """Active devices with a non-null FCM token. Required for /send to succeed."""
+    result = await db.execute(
+        select(Device).where(
+            and_(
+                Device.user_id == user_id,
+                Device.revoked_at.is_(None),
+                Device.fcm_token.is_not(None),
+            ),
         ),
     )
     return list(result.scalars().all())
@@ -56,8 +84,23 @@ async def _pairing(db: AsyncSession, *, sender_id: uuid.UUID, user_id: uuid.UUID
     return result.scalar_one_or_none()
 
 
-async def _plugin(db: AsyncSession, plugin_id: uuid.UUID) -> Plugin | None:
-    result = await db.execute(select(Plugin).where(Plugin.id == plugin_id))
+async def _plugin(
+    db: AsyncSession, *, plugin_id: uuid.UUID, sender_id: uuid.UUID
+) -> Plugin | None:
+    """Plugin lookup that ALSO enforces sender ownership.
+
+    Prevents sender X from sending a message via sender Y's plugin (Codex
+    review finding, M5.1).
+    """
+    result = await db.execute(
+        select(Plugin).where(
+            and_(
+                Plugin.id == plugin_id,
+                Plugin.sender_id == sender_id,
+                Plugin.revoked_at.is_(None),
+            ),
+        ),
+    )
     return result.scalar_one_or_none()
 
 
@@ -71,22 +114,25 @@ async def store_message(
     nonce: bytes,
     envelope_signature: bytes,
     min_plugin_version: str | None,
-    expires_at: datetime | None = None,
+    expires_at: datetime,
 ) -> Message:
+    now = datetime.now(UTC)
+    if expires_at <= now:
+        raise ExpiredEnvelopeError("expires_at is not in the future")
+    if expires_at > now + MAX_RETENTION:
+        raise ExpiredEnvelopeError("expires_at exceeds 30-day retention cap")
+
     pairing = await _pairing(db, sender_id=sender_id, user_id=user_id)
     if pairing is None:
         raise PairingMissingError("no active pairing")
 
-    plugin = await _plugin(db, plugin_id)
-    if plugin is None or plugin.revoked_at is not None:
-        raise PluginInactiveError("plugin missing or revoked")
+    plugin = await _plugin(db, plugin_id=plugin_id, sender_id=sender_id)
+    if plugin is None:
+        raise PluginInactiveError("plugin missing, revoked, or not owned by sender")
 
-    devices = await _active_devices(db, user_id)
-    if not devices:
-        raise NoActiveDeviceWithPluginError("user has no active device")
-
-    if expires_at is None:
-        expires_at = datetime.now(UTC) + DEFAULT_RETENTION
+    fcm_devices = await _active_devices_with_fcm(db, user_id)
+    if not fcm_devices:
+        raise NoActiveDeviceWithPluginError("user has no active device with an FCM token")
 
     # Encrypted body is opaque to the server; we keep it in a separate blob table or
     # inline. For V1 we keep it inline via an "encrypted_body_pointer" addressed JSON.
@@ -104,7 +150,9 @@ async def store_message(
     db.add(message)
     await db.flush()
 
-    for device in devices:
+    # Delivery_status rows still cover ALL non-revoked devices (FCM-less devices
+    # can still pull via inbox once they come online and acquire a token).
+    for device in await _active_devices(db, user_id):
         db.add(
             DeliveryStatus(
                 message_id=message.id,
@@ -120,9 +168,14 @@ async def store_message(
 async def get_message_for_user(
     db: AsyncSession, *, user_id: uuid.UUID, message_id: uuid.UUID
 ) -> Message:
+    now = datetime.now(UTC)
     result = await db.execute(
         select(Message).where(
-            and_(Message.id == message_id, Message.user_id == user_id),
+            and_(
+                Message.id == message_id,
+                Message.user_id == user_id,
+                Message.expires_at > now,
+            ),
         ),
     )
     message = result.scalar_one_or_none()
@@ -139,9 +192,12 @@ async def inbox_for_device(
     since: datetime | None,
     limit: int = 50,
 ) -> tuple[list[Message], datetime | None]:
+    now = datetime.now(UTC)
     query = (
         select(Message)
-        .where(Message.user_id == user_id)
+        .where(
+            and_(Message.user_id == user_id, Message.expires_at > now),
+        )
         .order_by(Message.sent_at.asc())
         .limit(limit)
     )
@@ -152,6 +208,21 @@ async def inbox_for_device(
     messages = list(result.scalars().all())
     next_since = messages[-1].sent_at if messages else since
     return messages, next_since
+
+
+async def assert_device_belongs_to_user(
+    db: AsyncSession, *, user_id: uuid.UUID, device_id: uuid.UUID
+) -> Device:
+    """Confirm the device exists and belongs to the authenticated user."""
+    result = await db.execute(
+        select(Device).where(
+            and_(Device.id == device_id, Device.user_id == user_id),
+        ),
+    )
+    device = result.scalar_one_or_none()
+    if device is None:
+        raise DeviceOwnershipError(f"device {device_id} not found for this user")
+    return device
 
 
 async def mark_dismissed(

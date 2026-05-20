@@ -55,21 +55,37 @@ nonce = wire[0:12]
 ciphertext_with_tag = wire[12:]
 ```
 
-AAD is canonical JSON encoded as UTF-8 with sorted keys and compact separators. It contains exactly the following protocol fields:
+AAD (additional authenticated data passed to AES-GCM) contains the **protocol context** that binds the ciphertext but does NOT include the ciphertext itself. It is JSON-encoded UTF-8 with sorted keys and compact separators (no whitespace):
 
 ```json
 {
-  "message_id": "...",
   "sender_id": "...",
   "user_id": "...",
   "plugin_id": "...",
-  "min_plugin_version": 1,
-  "created_at": "...",
-  "schema_version": 1
+  "min_plugin_version": "...",
+  "expires_at": "<ISO8601 UTC>"
 }
 ```
 
-Missing AAD fields are errors. Callers must provide explicit values.
+Missing AAD fields are errors. `min_plugin_version` is an empty string when unset (never null). `expires_at` is required and must be a future timestamp ≤ 30 days from the signing instant.
+
+### 4.1 Envelope (Ed25519 signing input)
+
+The sender ALSO signs an envelope with Ed25519. The envelope is AAD plus the ciphertext and nonce so a server / network adversary cannot swap one ciphertext for another while leaving the AAD intact. Canonical envelope JSON (UTF-8, sorted keys, compact separators):
+
+```json
+{
+  "sender_id": "...",
+  "user_id": "...",
+  "plugin_id": "...",
+  "encrypted_body": "<base64 ciphertext_with_tag>",
+  "nonce": "<base64 12-byte nonce>",
+  "min_plugin_version": "...",
+  "expires_at": "<ISO8601 UTC>"
+}
+```
+
+> **V1 contract change (M5.1):** previous draft of this spec required `message_id`, `created_at`, and `schema_version` in AAD — those fields are server-generated and unknowable to the sender at signing time, so they have been removed from both AAD and the envelope. They remain server metadata stored next to the message but are not signed by the sender. AAD and the envelope are intentionally distinct: AAD authenticates context to AES-GCM (no ciphertext); the envelope is what Ed25519 signs (AAD + ciphertext + nonce). Replay protection is enforced at the server via the per-sender nonce registry (see §7).
 
 ## 5. Plugin Bundle Signing
 

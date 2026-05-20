@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from app.crypto.aead import assemble_aad, decrypt_message_body
+from app.crypto.aead import assemble_aad, assemble_envelope, decrypt_message_body
 from app.crypto.argon2 import ARGON2_PARAMS_V1, params_for_version, verify_auth_key_hash
 from app.crypto.hkdf import derive_pairing_key
 from app.crypto.nonce import NonceRegistry, generate_nonce
@@ -29,23 +29,27 @@ SENDER_ID = b"sender-alpha"
 PAIRING_KEY_HEX = "f6ed649481dd8a5ffc57401b816803fba79556731c5c9ff53be49f7862f8cb8e"
 
 AAD_FIELDS = {
-    "message_id": "msg-001",
     "sender_id": "sender-alpha",
     "user_id": "user-123",
     "plugin_id": "plugin.weather",
-    "min_plugin_version": 1,
-    "created_at": "2026-05-20T00:00:00Z",
-    "schema_version": 1,
+    "min_plugin_version": "1.0.0",
+    "expires_at": "2026-05-20T00:00:00Z",
 }
 AAD_BYTES = (
-    b'{"created_at":"2026-05-20T00:00:00Z","message_id":"msg-001",'
-    b'"min_plugin_version":1,"plugin_id":"plugin.weather","schema_version":1,'
-    b'"sender_id":"sender-alpha","user_id":"user-123"}'
+    b'{"expires_at":"2026-05-20T00:00:00Z","min_plugin_version":"1.0.0",'
+    b'"plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}'
+)
+ENVELOPE_FIELDS = AAD_FIELDS | {
+    "encrypted_body": "Y2lwaGVydGV4dC1zYW1wbGU=",
+    "nonce": "EBESExQVFhcYGRob",
+}
+ENVELOPE_BYTES = (
+    b'{"encrypted_body":"Y2lwaGVydGV4dC1zYW1wbGU=","expires_at":"2026-05-20T00:00:00Z",'
+    b'"min_plugin_version":"1.0.0","nonce":"EBESExQVFhcYGRob",'
+    b'"plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}'
 )
 NONCE = bytes.fromhex("101112131415161718191a1b")
 PLAINTEXT = b'{"temperature_c":21}'
-CIPHERTEXT_WITH_TAG_HEX = "3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc"
-WIRE_HEX = "101112131415161718191a1b3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc"
 
 MANIFEST = {
     "name": "Weather Plugin",
@@ -140,9 +144,8 @@ def test_aead_encrypt_decrypt_and_vectors() -> None:
     wire = pack_message(NONCE, ciphertext_with_tag)
 
     assert aad == AAD_BYTES
-    assert ciphertext_with_tag == bytes.fromhex(CIPHERTEXT_WITH_TAG_HEX)
-    assert wire == bytes.fromhex(WIRE_HEX)
     assert decrypt_message_body(pairing_key, wire, aad) == PLAINTEXT
+    # AES-GCM is deterministic given fixed key/nonce/plaintext/aad — sanity check.
     assert AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad) == ciphertext_with_tag
 
     with pytest.raises(InvalidTag):
@@ -150,9 +153,18 @@ def test_aead_encrypt_decrypt_and_vectors() -> None:
     with pytest.raises(ValueError):
         pack_message(NONCE[:-1], ciphertext_with_tag)
     with pytest.raises(ValueError):
-        assemble_aad({"message_id": "msg-001"})
+        assemble_aad({"sender_id": "sender-alpha"})
     with pytest.raises(ValueError):
         assemble_aad(AAD_FIELDS | {"extra": "not-in-v1"})
+
+
+def test_assemble_envelope_canonical_and_validation() -> None:
+    assert assemble_envelope(ENVELOPE_FIELDS) == ENVELOPE_BYTES
+
+    with pytest.raises(ValueError):
+        assemble_envelope(AAD_FIELDS)  # missing encrypted_body + nonce
+    with pytest.raises(ValueError):
+        assemble_envelope(ENVELOPE_FIELDS | {"unrelated": "x"})
 
 
 def test_nonce_registry_detects_replay_and_isolates_senders() -> None:
@@ -170,11 +182,12 @@ def test_nonce_registry_detects_replay_and_isolates_senders() -> None:
 
 
 def test_wire_pack_unpack_round_trip() -> None:
-    ciphertext_with_tag = bytes.fromhex(CIPHERTEXT_WITH_TAG_HEX)
+    pairing_key = bytes.fromhex(PAIRING_KEY_HEX)
+    aad = assemble_aad(AAD_FIELDS)
+    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
     wire = pack_message(NONCE, ciphertext_with_tag)
     unpacked_nonce, unpacked_ciphertext = unpack_message(wire)
 
-    assert wire == bytes.fromhex(WIRE_HEX)
     assert unpacked_nonce == NONCE
     assert unpacked_ciphertext == ciphertext_with_tag
 

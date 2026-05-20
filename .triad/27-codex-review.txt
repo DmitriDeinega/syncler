@@ -1,0 +1,50 @@
+=== AGREEMENTS WITH CLAUDE'S SELF-FLAGGED ITEMS ===
+1. **#1** - Concur. Envelope fields are not complete if `expires_at` is sender-controlled; do not add server-generated `message_id` unless sender supplies it.
+2. **#2** - Concur hard. Current M5 violates the crypto AAD contract: `message_id`, `created_at`, and `schema_version` are required by spec but cannot be known by the sender under current flow.
+3. **#3** - Concur, but not acceptable as-is. `docs/crypto-spec.md:196` says V1 does in-memory per-sender replay checks; `/send` does not call `NonceRegistry`.
+4. **#4** - Mostly safe. `|` is not in base64; parser should still use `validate=True` and length checks for DB-corruption robustness.
+5. **#5** - Confirmed. FCM payload only includes `type`, `message_id`, `plugin_id`, `min_plugin_version`; no plaintext path found.
+6. **#6** - Partly concur. 30s is a reasonable ceiling, but silent timeout is bad UX; emit a generic failure/retry notification or durable retry event.
+7. **#7** - Concur. Foreground delivery and user-message channels should be separate.
+8. **#8** - Concur. Helper is not enough for production: either add `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` plus policy justification, or use a general settings intent for V1 dev builds.
+9. **#9** - Concur. Pre-auth `/send` needs IP/global limiting; verified sender limiting can happen after signature verification.
+10. **#10** - Concur. Add `device_id` ownership validation; own-account scope, but current behavior can mark/push using another device id.
+
+=== ADDITIONAL FINDINGS ===
+- **high** Sender can send using another sender's plugin id  
+  evidence: `server/app/services/messages.py:59`, `server/app/services/messages.py:80`, `server/app/models.py:87`  
+  proposal: fetch plugin with `Plugin.id == plugin_id AND Plugin.sender_id == sender_id AND revoked_at IS NULL`.
+
+- **high** Android app likely does not compile due missing Hilt bindings  
+  evidence: `android/app/build.gradle.kts:42`, `android/core/push/src/main/kotlin/app/syncler/core/push/SynclerFcmService.kt:26`, `android/core/push/src/main/kotlin/app/syncler/core/push/PluginNotificationService.kt:38`, `android/core/push/src/main/kotlin/app/syncler/core/push/PushModule.kt:13`  
+  proposal: land app-level bindings/stubs for `PluginMessagePipeline`, `FcmDispatcher`, and `FcmTokenRegistrar`, or do not include `:core:push` in the app until host implementations exist.
+
+- **high** `/send` can succeed with no reachable push target  
+  evidence: `server/app/services/messages.py:37`, `server/app/services/messages.py:84`, `server/app/services/push.py:78`, `server/app/services/push.py:86`  
+  proposal: treat “no active non-revoked device with `fcm_token`” as 410, or explicitly document inbox-only delivery.
+
+- **medium** Expired messages can be accepted and fetched until retention runs  
+  evidence: `server/app/schemas.py:141`, `server/app/services/messages.py:88`, `server/app/services/messages.py:102`, `server/app/services/messages.py:143`  
+  proposal: reject past `expires_at`, cap max expiry, include it in signed envelope if sender-controlled, and filter expired rows in inbox/get.
+
+- **medium** Rapid FCM starts can orphan plugin work  
+  evidence: `android/core/push/src/main/kotlin/app/syncler/core/push/PluginNotificationService.kt:41`, `:42`, `:60`, `:85`  
+  proposal: track all jobs or serialize through a queue; cancel the whole service scope on destroy, not only the latest `workJob`.
+
+- **medium** Dismiss/token async work is fire-and-forget from `FirebaseMessagingService`  
+  evidence: `android/core/push/src/main/kotlin/app/syncler/core/push/SynclerFcmService.kt:29`, `:53`, `:63`  
+  proposal: use WorkManager or another durable bounded handoff for dismiss and token registration.
+
+=== SHOW-STOPPERS ===
+AAD/message-id contract mismatch; missing replay check; plugin ownership check; Android missing Hilt bindings; `/send` success with no reachable FCM token.
+
+=== SAFE / NOT-AN-ISSUE ===
+FCM plaintext leakage: ruled out.
+
+Inline pointer separator: safe against malicious base64 `|`; harden parser but not a blocker.
+
+Notification channel split: right design.
+
+30s service budget: acceptable ceiling, but needs failure surface.
+
+Server-generated `message_id` should not be added to sender envelope unless M5 changes to client-generated ids.

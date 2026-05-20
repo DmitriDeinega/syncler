@@ -26,7 +26,15 @@ class SynclerFcmService : FirebaseMessagingService() {
     @Inject lateinit var dispatcher: FcmDispatcher
     @Inject lateinit var fcmTokenRegistrar: FcmTokenRegistrar
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val supervisor = SupervisorJob()
+    private val scope = CoroutineScope(supervisor + Dispatchers.IO)
+
+    override fun onDestroy() {
+        // Service lifecycle is short and OS-managed; cancel pending fire-and-forget work
+        // when Android stops the service so we don't leak coroutine references.
+        supervisor.cancel()
+        super.onDestroy()
+    }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         val data = remoteMessage.data

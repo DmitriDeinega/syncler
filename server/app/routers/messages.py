@@ -8,7 +8,6 @@ inbox/fetch/dismiss routes via the JWT session.
 from __future__ import annotations
 
 import base64
-import json
 import uuid
 from datetime import datetime
 
@@ -16,6 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import current_user
+from app.crypto.aead import assemble_envelope
+from app.crypto.nonce import get_global_registry
 from app.crypto.signatures import verify_message_envelope
 from app.db import get_db
 from app.middleware.rate_limit import rate_limit
@@ -29,10 +30,14 @@ from app.schemas import (
     decode_base64,
 )
 from app.services.messages import (
+    DeviceOwnershipError,
+    ExpiredEnvelopeError,
     MessageNotFoundError,
     NoActiveDeviceWithPluginError,
+    NonceReplayError,
     PairingMissingError,
     PluginInactiveError,
+    assert_device_belongs_to_user,
     get_message_for_user,
     inbox_for_device,
     mark_dismissed,
@@ -54,29 +59,31 @@ def _b64(value: bytes) -> str:
 
 
 def _build_envelope_bytes(payload: MessageSendRequest) -> bytes:
-    """Canonical envelope bytes for signature verification.
-
-    The sender signs the JSON of the envelope WITHOUT the signature field,
-    with sorted keys and compact separators. Server reconstructs the same
-    bytes for verification.
-    """
-    envelope = {
-        "sender_id": str(payload.sender_id),
-        "user_id": str(payload.user_id),
-        "plugin_id": str(payload.plugin_id),
-        "encrypted_body": payload.encrypted_body,
-        "nonce": payload.nonce,
-        "min_plugin_version": payload.min_plugin_version or "",
-    }
-    return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """Build the canonical 7-field envelope the sender signs (matches crypto-spec §4.1)."""
+    if payload.expires_at is None:
+        raise HTTPException(status_code=400, detail="expires_at is required")
+    return assemble_envelope(
+        {
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+            "plugin_id": str(payload.plugin_id),
+            "min_plugin_version": payload.min_plugin_version or "",
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
+            "encrypted_body": payload.encrypted_body,
+            "nonce": payload.nonce,
+        }
+    )
 
 
 @router.post("/send", response_model=MessageSendResponse, status_code=status.HTTP_201_CREATED)
 async def send_message(
     payload: MessageSendRequest,
-    _: None = Depends(rate_limit("message_send")),
+    _: None = Depends(rate_limit("message_send_ip")),
     db: AsyncSession = Depends(get_db),
 ) -> MessageSendResponse:
+    if payload.expires_at is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expires_at is required")
+
     try:
         sender: Sender = await get_active_sender(db, payload.sender_id)
     except SenderNotFoundError as exc:
@@ -90,6 +97,14 @@ async def send_message(
     if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
 
+    # Replay check AFTER signature verification (so attackers can't OOM the
+    # nonce registry by spamming junk).
+    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+    registry = get_global_registry()
+    sender_key = str(payload.sender_id).encode("utf-8")
+    if registry.seen(sender_key, nonce_bytes):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+
     try:
         message = await store_message(
             db,
@@ -97,17 +112,21 @@ async def send_message(
             user_id=payload.user_id,
             plugin_id=payload.plugin_id,
             encrypted_body=decode_base64(payload.encrypted_body, field_name="encrypted_body", minimum=16),
-            nonce=decode_base64(payload.nonce, field_name="nonce", exact=12),
+            nonce=nonce_bytes,
             envelope_signature=signature,
             min_plugin_version=payload.min_plugin_version,
             expires_at=payload.expires_at,
         )
+    except ExpiredEnvelopeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except PairingMissingError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no active pairing") from exc
     except PluginInactiveError as exc:
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing or revoked") from exc
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing, revoked, or not owned by sender") from exc
     except NoActiveDeviceWithPluginError as exc:
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active device") from exc
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active device with FCM token") from exc
+    except NonceReplayError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
 
     await push_message_to_user_devices(db, message=message)
     return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
@@ -120,10 +139,16 @@ async def inbox(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> MessageInboxResponse:
+    if device_id is not None:
+        try:
+            await assert_device_belongs_to_user(db, user_id=user.id, device_id=device_id)
+        except DeviceOwnershipError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found") from exc
+
     messages, next_since = await inbox_for_device(
         db,
         user_id=user.id,
-        device_id=device_id or uuid.uuid4(),  # device_id is informational; inbox is per-user in V1
+        device_id=device_id or uuid.uuid4(),  # informational; inbox is per-user in V1
         since=since,
     )
     items = [_message_to_inbox_item(m) for m in messages]
@@ -150,6 +175,12 @@ async def dismiss_message(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
+    # M5.1 fix: verify device_id belongs to the authenticated user.
+    try:
+        await assert_device_belongs_to_user(db, user_id=user.id, device_id=device_id)
+    except DeviceOwnershipError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found for this user") from exc
+
     try:
         message = await get_message_for_user(db, user_id=user.id, message_id=message_id)
     except MessageNotFoundError as exc:

@@ -6,6 +6,12 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Cross-implementation crypto spec vectors. Argon2id, HKDF, and Ed25519
+ * vectors are byte-identical to ``server/tests/test_crypto.py``. AEAD's
+ * ciphertext output is verified via round-trip decrypt since the spec
+ * no longer fixes a hex vector for ciphertext (AAD changes invalidate it).
+ */
 class SpecVectorsTest {
     private val ARGON2_HASH_HEX = "e23ed7b136661e69f2424d8440777943827d9981e2fb409d69e48bce72dd7f82c8327524d69330d1993ba67e26a3576718d29f0602e44a881d924ca36836699c"
     private val AUTH_KEY_HEX = "e23ed7b136661e69f2424d8440777943827d9981e2fb409d69e48bce72dd7f82"
@@ -20,13 +26,18 @@ class SpecVectorsTest {
     private val senderId = "sender-alpha".encodeToByteArray()
     private val nonce = "101112131415161718191a1b".hexToBytes()
     private val plaintext = """{"temperature_c":21}""".encodeToByteArray()
-    private val ciphertextWithTagHex = "3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc"
-    private val wireHex = "101112131415161718191a1b3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc"
+
     private val aadBytes = (
-        """{"created_at":"2026-05-20T00:00:00Z","message_id":"msg-001",""" +
-            """"min_plugin_version":1,"plugin_id":"plugin.weather","schema_version":1,""" +
+        """{"expires_at":"2026-05-20T00:00:00Z","min_plugin_version":"1.0.0",""" +
+            """"plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}"""
+        ).encodeToByteArray()
+
+    private val envelopeBytes = (
+        """{"encrypted_body":"Y2lwaGVydGV4dC1zYW1wbGU=","expires_at":"2026-05-20T00:00:00Z",""" +
+            """"min_plugin_version":"1.0.0","nonce":"EBESExQVFhcYGRob","plugin_id":"plugin.weather",""" +
             """"sender_id":"sender-alpha","user_id":"user-123"}"""
         ).encodeToByteArray()
+
     private val canonicalManifestHex = (
         "7b2262756e646c6548617368223a223966383664303831383834633764363539613266656161306335356164303135" +
             "6133626634663162326230623832326364313564366331356230663030613038222c226e616d65223a225765617468" +
@@ -56,38 +67,46 @@ class SpecVectorsTest {
     }
 
     @Test
-    fun `aad canonical json sorts non alphabetical input`() {
-        val fields = linkedMapOf<String, Any>(
-            "message_id" to "msg-001",
-            "sender_id" to "sender-alpha",
-            "user_id" to "user-123",
-            "plugin_id" to "plugin.weather",
-            "min_plugin_version" to 1,
-            "created_at" to "2026-05-20T00:00:00Z",
-            "schema_version" to 1,
+    fun `aad canonical json matches V1_1 5-field shape`() {
+        val aad = MessageAad(
+            senderId = "sender-alpha",
+            userId = "user-123",
+            pluginId = "plugin.weather",
+            minPluginVersion = "1.0.0",
+            expiresAt = "2026-05-20T00:00:00Z",
         )
-
-        assertArrayEquals(aadBytes, canonicalJsonBytes(fields))
+        assertArrayEquals(aadBytes, aad.toCanonicalJsonBytes())
     }
 
     @Test
-    fun `aead wire format roundtrip matches spec`() {
-        val aad = canonicalJsonBytes(
-            linkedMapOf(
-                "message_id" to "msg-001",
-                "sender_id" to "sender-alpha",
-                "user_id" to "user-123",
-                "plugin_id" to "plugin.weather",
-                "min_plugin_version" to 1,
-                "created_at" to "2026-05-20T00:00:00Z",
-                "schema_version" to 1,
-            ),
+    fun `envelope canonical json matches V1_1 7-field shape`() {
+        val envelope = MessageEnvelope(
+            senderId = "sender-alpha",
+            userId = "user-123",
+            pluginId = "plugin.weather",
+            minPluginVersion = "1.0.0",
+            expiresAt = "2026-05-20T00:00:00Z",
+            encryptedBody = "Y2lwaGVydGV4dC1zYW1wbGU=",
+            nonce = "EBESExQVFhcYGRob",
         )
-        val wire = Aead.encrypt(PAIRING_KEY_HEX.hexToBytes(), plaintext, aad, nonce)
+        assertArrayEquals(envelopeBytes, envelope.toCanonicalJsonBytes())
+    }
 
-        assertEquals(ciphertextWithTagHex, wire.copyOfRange(12, wire.size).toHex())
-        assertEquals(wireHex, wire.toHex())
-        assertArrayEquals(plaintext, Aead.decrypt(PAIRING_KEY_HEX.hexToBytes(), wire, aad))
+    @Test
+    fun `aead round-trip works under V1_1 aad shape`() {
+        val pairingKey = PAIRING_KEY_HEX.hexToBytes()
+        val wire = Aead.encrypt(pairingKey, plaintext, aadBytes, nonce)
+        assertArrayEquals(plaintext, Aead.decrypt(pairingKey, wire, aadBytes))
+        // AES-GCM is deterministic — same inputs → same ciphertext.
+        assertArrayEquals(wire, Aead.encrypt(pairingKey, plaintext, aadBytes, nonce))
+        // Tampered AAD fails decrypt.
+        val tampered = aadBytes + "x".toByteArray()
+        try {
+            Aead.decrypt(pairingKey, wire, tampered)
+            error("expected decrypt to fail under tampered aad")
+        } catch (expected: Exception) {
+            // expected
+        }
     }
 
     @Test

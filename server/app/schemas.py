@@ -138,7 +138,7 @@ class MessageSendRequest(BaseModel):
     nonce: str
     envelope_signature: str
     min_plugin_version: str | None = None
-    expires_at: datetime | None = None
+    expires_at: datetime
 
     @field_validator("encrypted_body")
     @classmethod
