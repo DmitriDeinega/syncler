@@ -59,28 +59,36 @@ class PluginNotificationService : Service() {
         }
 
         val job = scope.launch {
-            val outcome = withTimeoutOrNull(MAX_WORK_MS) {
-                pipeline.process(
-                    messageId = messageId,
-                    pluginId = pluginId,
-                    minPluginVersion = minVersion,
-                )
-            }
-            if (outcome == null) {
-                Timber.tag(TAG).w("plugin pipeline timed out for message=%s", messageId)
-                notifications.postDeliveryFailed(this@PluginNotificationService, messageId)
-            } else {
-                outcome.notification?.let { notifications.post(this@PluginNotificationService, it) }
-                if (outcome.requiresUpdate) {
-                    notifications.postUpdateRequired(
-                        context = this@PluginNotificationService,
+            try {
+                val outcome = withTimeoutOrNull(MAX_WORK_MS) {
+                    pipeline.process(
+                        messageId = messageId,
                         pluginId = pluginId,
-                        requiredVersion = outcome.requiredVersion ?: minVersion,
+                        minPluginVersion = minVersion,
                     )
                 }
-            }
-            if (activeJobs.size <= 1) {
-                stopSelf(startId)
+                if (outcome == null) {
+                    Timber.tag(TAG).w("plugin pipeline timed out for message=%s", messageId)
+                    notifications.postDeliveryFailed(this@PluginNotificationService, messageId)
+                } else {
+                    outcome.notification?.let { notifications.post(this@PluginNotificationService, it) }
+                    if (outcome.requiresUpdate) {
+                        notifications.postUpdateRequired(
+                            context = this@PluginNotificationService,
+                            pluginId = pluginId,
+                            requiredVersion = outcome.requiredVersion ?: minVersion,
+                        )
+                    }
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                Timber.tag(TAG).e(t, "plugin pipeline failed for message=%s", messageId)
+                notifications.postDeliveryFailed(this@PluginNotificationService, messageId)
+            } finally {
+                if (activeJobs.size <= 1) {
+                    stopSelf(startId)
+                }
             }
         }
         activeJobs.add(job)

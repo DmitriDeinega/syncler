@@ -140,6 +140,13 @@ class MessageSendRequest(BaseModel):
     min_plugin_version: str | None = None
     expires_at: datetime
 
+    @field_validator("expires_at")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("expires_at must be timezone-aware (ISO-8601 with offset, e.g. ...Z)")
+        return value
+
     @field_validator("encrypted_body")
     @classmethod
     def validate_encrypted_body(cls, value: str) -> str:
@@ -173,6 +180,8 @@ class MessageInboxItem(BaseModel):
     nonce: str
     envelope_signature: str
     sent_at: datetime
+    # Required so the recipient can reconstruct AAD/envelope for decrypt + sig verify.
+    expires_at: datetime
 
 
 class MessageInboxResponse(BaseModel):

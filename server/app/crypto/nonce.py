@@ -26,7 +26,11 @@ class NonceRegistry:
         self._nonces_by_sender: defaultdict[bytes, OrderedDict[bytes, None]] = defaultdict(OrderedDict)
 
     def seen(self, sender_id: bytes, nonce: bytes) -> bool:
-        """Return True if the nonce was already seen for this sender."""
+        """Return True if the nonce was already seen, and mark it as seen otherwise.
+
+        Legacy API. Prefer ``has()`` + ``mark()`` for code paths that need
+        atomic check-then-store coupled to durable commit success.
+        """
 
         if len(nonce) != NONCE_BYTES:
             raise ValueError("nonce must be 12 bytes")
@@ -40,6 +44,25 @@ class NonceRegistry:
         if len(sender_nonces) > self._window:
             sender_nonces.popitem(last=False)
         return False
+
+    def has(self, sender_id: bytes, nonce: bytes) -> bool:
+        """Return True if the nonce was previously marked seen for this sender."""
+
+        if len(nonce) != NONCE_BYTES:
+            raise ValueError("nonce must be 12 bytes")
+        sender_nonces = self._nonces_by_sender.get(sender_id)
+        return sender_nonces is not None and nonce in sender_nonces
+
+    def mark(self, sender_id: bytes, nonce: bytes) -> None:
+        """Record the nonce as seen for this sender."""
+
+        if len(nonce) != NONCE_BYTES:
+            raise ValueError("nonce must be 12 bytes")
+        sender_nonces = self._nonces_by_sender[sender_id]
+        sender_nonces[nonce] = None
+        sender_nonces.move_to_end(nonce)
+        if len(sender_nonces) > self._window:
+            sender_nonces.popitem(last=False)
 
 
 _global_registry: NonceRegistry | None = None

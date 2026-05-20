@@ -136,18 +136,24 @@ info = 73796e636c65722d76312d70616972696e672d6b65793a73656e6465722d616c706861
 pairing_key = f6ed649481dd8a5ffc57401b816803fba79556731c5c9ff53be49f7862f8cb8e
 ```
 
-### Message AEAD
+### Message AEAD (V1.1 — 5-field AAD)
 
 ```text
-aad_json = {"created_at":"2026-05-20T00:00:00Z","message_id":"msg-001","min_plugin_version":1,"plugin_id":"plugin.weather","schema_version":1,"sender_id":"sender-alpha","user_id":"user-123"}
-aad_hex = 7b22637265617465645f6174223a22323032362d30352d32305430303a30303a30305a222c226d6573736167655f6964223a226d73672d303031222c226d696e5f706c7567696e5f76657273696f6e223a312c22706c7567696e5f6964223a22706c7567696e2e77656174686572222c22736368656d615f76657273696f6e223a312c2273656e6465725f6964223a2273656e6465722d616c706861222c22757365725f6964223a22757365722d313233227d
+aad_json = {"expires_at":"2026-05-20T00:00:00Z","min_plugin_version":"1.0.0","plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}
 key = f6ed649481dd8a5ffc57401b816803fba79556731c5c9ff53be49f7862f8cb8e
 nonce = 101112131415161718191a1b
 plaintext = 7b2274656d70657261747572655f63223a32317d
-
-ciphertext_with_tag = 3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc
-wire = 101112131415161718191a1b3fefbb1a0238b24f6860563d1e3194c9bf47d1dfdb255e7b87ad60d5ab9b07573bbf55bc
 ```
+
+Ciphertext is verified via round-trip in both `server/tests/test_crypto.py` and `android/core/crypto/.../SpecVectorsTest.kt` rather than via a fixed hex assertion — the ciphertext depends on AAD bytes, and the V1.1 AAD shape is the contract going forward. Old AAD bytes (with `message_id`/`created_at`/`schema_version`) are obsolete.
+
+### Message Envelope (Ed25519 sender signature input)
+
+```text
+envelope_json = {"encrypted_body":"<base64 ciphertext_with_tag>","expires_at":"2026-05-20T00:00:00Z","min_plugin_version":"1.0.0","nonce":"<base64 nonce>","plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}
+```
+
+The sender signs the canonical envelope JSON with Ed25519. The server reconstructs the envelope from the request fields and verifies against the registered sender's public key. Envelope is also what the recipient device uses to verify the signature on inbox fetch — therefore inbox/detail responses include `expires_at` (in addition to the body, nonce, signature).
 
 ### Plugin Bundle Signature
 

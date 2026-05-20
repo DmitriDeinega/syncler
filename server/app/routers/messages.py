@@ -11,7 +11,7 @@ import base64
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import current_user
@@ -78,6 +78,7 @@ def _build_envelope_bytes(payload: MessageSendRequest) -> bytes:
 @router.post("/send", response_model=MessageSendResponse, status_code=status.HTTP_201_CREATED)
 async def send_message(
     payload: MessageSendRequest,
+    request: Request,
     _: None = Depends(rate_limit("message_send_ip")),
     db: AsyncSession = Depends(get_db),
 ) -> MessageSendResponse:
@@ -97,12 +98,23 @@ async def send_message(
     if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
 
+    # Per-sender rate limit AFTER signature verification (so spammers can't
+    # inflate someone else's bucket by spoofing the body sender_id).
+    request.state.sender_id = str(payload.sender_id)
+    request.state.user_id = str(payload.user_id)
+    from app.middleware.rate_limit import check_rate_limit
+    from app.middleware.rate_limit_config import RATE_LIMITS
+    await check_rate_limit(db, request, RATE_LIMITS["message_send"])
+    await check_rate_limit(db, request, RATE_LIMITS["message_send_user_hour"])
+
     # Replay check AFTER signature verification (so attackers can't OOM the
-    # nonce registry by spamming junk).
+    # nonce registry by spamming junk). We check first to short-circuit,
+    # then re-mark after successful store_message so failed stores don't
+    # burn the nonce.
     nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
     registry = get_global_registry()
     sender_key = str(payload.sender_id).encode("utf-8")
-    if registry.seen(sender_key, nonce_bytes):
+    if registry.has(sender_key, nonce_bytes):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
 
     try:
@@ -127,6 +139,10 @@ async def send_message(
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active device with FCM token") from exc
     except NonceReplayError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
+
+    # Mark nonce as seen ONLY after store_message succeeds; failed stores
+    # don't burn the nonce.
+    registry.mark(sender_key, nonce_bytes)
 
     await push_message_to_user_devices(db, message=message)
     return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
@@ -209,4 +225,5 @@ def _message_to_inbox_item(message) -> MessageInboxItem:  # noqa: ANN001
         nonce=_b64(nonce),
         envelope_signature=_b64(envelope_signature),
         sent_at=message.sent_at,
+        expires_at=message.expires_at,
     )
