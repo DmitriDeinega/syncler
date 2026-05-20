@@ -37,12 +37,16 @@ class PluginBridge(
         scope.launch {
             val resultJson = runCatching {
                 withTimeout(CALL_TIMEOUT_MS) {
-                    dispatch(method, argsJson)
+                    bridgeSuccessJson(dispatch(method, argsJson))
                 }
             }.getOrElse { error ->
-                val reason = if (error is kotlinx.coroutines.TimeoutCancellationException) "timeout" else "bridge_error"
+                val reason = when (error) {
+                    is kotlinx.coroutines.TimeoutCancellationException -> "timeout"
+                    is PluginBridgeException -> error.code
+                    else -> "bridge_error"
+                }
                 auditLogger.denied(plugin.manifest.id, reason, method)
-                errorJson(reason)
+                bridgeErrorJson(reason, error.message ?: reason)
             }
             deliver(callbackId, resultJson)
         }
@@ -52,7 +56,7 @@ class PluginBridge(
         val capability = requiredCapability(method)
         if (capability != null && capability !in plugin.grantedCapabilities) {
             auditLogger.denied(plugin.manifest.id, "capability_not_granted", capability)
-            return """{"error":"capability_not_granted","capability":${JsonEscaping.quote(capability)}}"""
+            throw PluginBridgeException("capability_not_granted", "Capability not granted: $capability")
         }
 
         return when (method) {
@@ -69,21 +73,9 @@ class PluginBridge(
             "platform.message.dismissBehavior" -> messageBridge.dismissBehavior(plugin, argsJson)
             else -> {
                 auditLogger.denied(plugin.manifest.id, "unknown_method", method)
-                errorJson("unknown_method")
+                throw PluginBridgeException("unknown_method", "Unknown bridge method: $method")
             }
         }
-    }
-
-    private fun requiredCapability(method: String): String? = when {
-        method.startsWith("platform.network.") -> "network"
-        method.startsWith("platform.storage.") -> "storage"
-        method.startsWith("platform.camera.") -> "camera"
-        method.startsWith("platform.gallery.") -> "gallery"
-        method.startsWith("platform.file.") -> "file"
-        method.startsWith("platform.location.") -> "location"
-        method == "platform.showNotification" -> "background-exec"
-        method.startsWith("platform.message.") -> null
-        else -> null
     }
 
     private fun deliver(callbackId: String, resultJson: String) {
@@ -94,10 +86,31 @@ class PluginBridge(
         }
     }
 
-    private fun errorJson(reason: String): String = """{"error":${JsonEscaping.quote(reason)}}"""
-
     companion object {
         const val NATIVE_BRIDGE_NAME = "__syncler_native__"
         const val CALL_TIMEOUT_MS = 30_000L
     }
 }
+
+internal fun requiredCapability(method: String): String? = when {
+    method.startsWith("platform.network.") -> "network"
+    method.startsWith("platform.storage.") -> "storage"
+    method.startsWith("platform.camera.") -> "camera"
+    method.startsWith("platform.gallery.") -> "gallery"
+    method.startsWith("platform.file.") -> "file"
+    method.startsWith("platform.location.") -> "location"
+    method == "platform.showNotification" -> null
+    method.startsWith("platform.message.") -> null
+    else -> null
+}
+
+internal fun bridgeSuccessJson(valueJson: String): String =
+    """{"success":true,"value":$valueJson}"""
+
+internal fun bridgeErrorJson(error: String, message: String): String =
+    """{"success":false,"error":${JsonEscaping.quote(error)},"message":${JsonEscaping.quote(message)}}"""
+
+internal class PluginBridgeException(
+    val code: String,
+    override val message: String,
+) : RuntimeException(message)

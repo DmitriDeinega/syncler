@@ -1,6 +1,6 @@
 package app.syncler.android.pluginhost.capabilities
 
-import app.syncler.android.pluginhost.JsonEscaping
+import app.syncler.android.pluginhost.PluginBridgeException
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 
@@ -14,5 +14,5 @@ internal object JsonBridgeCodec {
 
     fun toJson(value: Map<String, Any?>): String = mapAdapter.toJson(value)
 
-    fun error(reason: String): String = """{"error":${JsonEscaping.quote(reason)}}"""
+    fun error(reason: String): Nothing = throw PluginBridgeException(reason, reason)
 }

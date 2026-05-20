@@ -63,6 +63,6 @@ class PluginWebViewClient(
     }
 
     companion object {
-        const val INITIAL_URL = "file:///plugin/index.html"
+        const val INITIAL_URL = "https://syncler-plugin-host/index.html"
     }
 }

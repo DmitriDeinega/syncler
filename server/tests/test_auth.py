@@ -33,6 +33,7 @@ def signup_payload(email: str = "user@example.com", auth_key_hash: str | None = 
 async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
     """Uses SQLite in memory; ORM models provide SQLite variants for Postgres UUID/JSONB fields."""
     monkeypatch.setenv("JWT_SECRET", "test-secret-with-at-least-32-bytes")
+    monkeypatch.setenv("PRE_LOGIN_PEPPER", "test-pre-login-pepper")
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -106,6 +107,46 @@ async def test_login_success_returns_token_and_encryption_blobs(client: AsyncCli
     assert body["encrypted_master_key"] == payload["encrypted_master_key"]
     assert body["auth_salt"] == payload["auth_salt"]
     assert body["argon2_params_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_login_real_user_returns_stored_salt(client: AsyncClient) -> None:
+    payload = signup_payload()
+    await client.post("/v1/auth/signup", json=payload)
+
+    response = await client.post("/v1/auth/pre-login", json={"email": payload["email"]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "auth_salt": payload["auth_salt"],
+        "argon2_params_version": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pre_login_unknown_user_returns_deterministic_fake_salt(client: AsyncClient) -> None:
+    first = await client.post("/v1/auth/pre-login", json={"email": "missing@example.com"})
+    second = await client.post("/v1/auth/pre-login", json={"email": "missing@example.com"})
+    other = await client.post("/v1/auth/pre-login", json={"email": "other@example.com"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert other.status_code == 200
+    assert first.json()["auth_salt"] == second.json()["auth_salt"]
+    assert first.json()["auth_salt"] != other.json()["auth_salt"]
+    assert len(base64.b64decode(first.json()["auth_salt"])) == 16
+    assert first.json()["argon2_params_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_login_is_rate_limited_by_login_bucket(client: AsyncClient) -> None:
+    payload = {"email": "rate-limited@example.com"}
+
+    responses = [await client.post("/v1/auth/pre-login", json=payload) for _ in range(6)]
+
+    assert [response.status_code for response in responses[:5]] == [200, 200, 200, 200, 200]
+    assert responses[5].status_code == 429
+    assert responses[5].json()["detail"] == "rate limited"
 
 
 @pytest.mark.asyncio

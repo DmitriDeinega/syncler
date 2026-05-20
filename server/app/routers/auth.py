@@ -7,13 +7,22 @@ from app.auth import create_access_token, current_user
 from app.db import get_db
 from app.middleware.rate_limit import rate_limit
 from app.models import User
-from app.schemas import LoginRequest, LoginResponse, SignupRequest, SignupResponse, decode_base64
+from app.schemas import (
+    LoginRequest,
+    LoginResponse,
+    PreLoginRequest,
+    PreLoginResponse,
+    SignupRequest,
+    SignupResponse,
+    decode_base64,
+)
 from app.services.users import (
     InvalidCredentialsError,
     UserAlreadyExistsError,
     authenticate_user,
     create_user,
     delete_user,
+    pre_login_salt,
 )
 
 router = APIRouter(tags=["auth"])
@@ -47,6 +56,16 @@ async def signup(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already exists") from exc
 
     return SignupResponse(user_id=user.id, created_at=user.created_at)
+
+
+@router.post("/pre-login", response_model=PreLoginResponse)
+async def pre_login(
+    payload: PreLoginRequest,
+    _: None = Depends(rate_limit("login")),
+    db: AsyncSession = Depends(get_db),
+) -> PreLoginResponse:
+    salt, version = await pre_login_salt(db, str(payload.email))
+    return PreLoginResponse(auth_salt=_encode_base64(salt), argon2_params_version=version)
 
 
 @router.post("/login", response_model=LoginResponse)

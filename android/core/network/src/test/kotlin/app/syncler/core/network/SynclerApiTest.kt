@@ -60,6 +60,21 @@ class SynclerApiTest {
         assertEquals("Bearer jwt-token", request.getHeader("Authorization"))
     }
 
+    @Test
+    fun preLoginPostsExpectedJson() = runTest {
+        server.enqueue(MockResponse().setBody("""{"auth_salt":"cccccccccccccccccw==","argon2_params_version":1}"""))
+        val api = api(token = null)
+
+        val response = api.preLogin(PreLoginRequest(email = "user@example.com"))
+        val request = server.takeRequest()
+
+        assertEquals("cccccccccccccccccw==", response.authSalt)
+        assertEquals(1, response.argon2ParamsVersion)
+        assertEquals("/v1/auth/pre-login", request.path)
+        assertEquals("POST", request.method)
+        assertEquals(true, request.body.readUtf8().contains("user@example.com"))
+    }
+
     private fun api(token: String?): SynclerApi {
         val interceptor = NetworkModule.provideAuthInterceptor(
             setOf(object : AuthTokenProvider {

@@ -39,23 +39,19 @@ export function clearRegisteredPlugin(): void {
  * Dispatches a host bridge hook into the registered plugin.
  */
 export async function dispatchPluginHook(hook: DispatchHook, args: unknown[]): Promise<unknown> {
-  try {
-    if (!registeredPlugin) {
-      throw new Error('No Syncler plugin has been registered');
-    }
+  if (!registeredPlugin) {
+    throw new Error('No Syncler plugin has been registered');
+  }
 
-    switch (hook) {
-      case 'onMessage':
-        return await registeredPlugin.onMessage(args[0]);
-      case 'onAction':
-        return await registeredPlugin.onAction(asString(args[0], 'actionName'), args[1]);
-      case 'onDismiss':
-        return await registeredPlugin.onDismiss(asString(args[0], 'deviceId'));
-      default:
-        return assertNever(hook);
-    }
-  } catch (error) {
-    return JSON.stringify(serializeError(error));
+  switch (hook) {
+    case 'onMessage':
+      return await registeredPlugin.onMessage(args[0]);
+    case 'onAction':
+      return await registeredPlugin.onAction(asString(args[0], 'actionName'), args[1]);
+    case 'onDismiss':
+      return await registeredPlugin.onDismiss(asString(args[0], 'deviceId'));
+    default:
+      return assertNever(hook);
   }
 }
 
@@ -77,23 +73,6 @@ function asString(value: unknown, name: string): string {
     throw new TypeError(`${name} must be a string`);
   }
   return value;
-}
-
-function serializeError(error: unknown): { name: string; message: string; stack?: string } {
-  if (error instanceof Error) {
-    const result: { name: string; message: string; stack?: string } = {
-      name: error.name,
-      message: error.message,
-    };
-    if (error.stack) {
-      result.stack = error.stack;
-    }
-    return result;
-  }
-  return {
-    name: 'Error',
-    message: String(error),
-  };
 }
 
 function assertNever(value: never): never {

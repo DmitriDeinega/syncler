@@ -59,6 +59,15 @@ class SignupResponse(BaseModel):
     created_at: datetime
 
 
+class PreLoginRequest(BaseModel):
+    email: EmailField
+
+
+class PreLoginResponse(BaseModel):
+    auth_salt: str
+    argon2_params_version: int
+
+
 class LoginRequest(BaseModel):
     email: EmailField
     auth_key_hash: str

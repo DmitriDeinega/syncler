@@ -41,6 +41,14 @@ class ThrowingPlugin extends BasePlugin {
   async onMessage(): Promise<void> {
     throw new Error('boom');
   }
+
+  async onAction(): Promise<void> {
+    throw new Error('action boom');
+  }
+
+  async onDismiss(): Promise<DismissAction> {
+    throw new Error('dismiss boom');
+  }
 }
 
 describe('BasePlugin', () => {
@@ -76,13 +84,12 @@ describe('BasePlugin', () => {
     });
   });
 
-  it('dispatcher catches and serializes errors', async () => {
+  it('dispatcher propagates hook errors as rejected promises', async () => {
     registerPlugin(new ThrowingPlugin());
 
-    const result = await dispatchPluginHook('onMessage', [{}]);
-
-    expect(typeof result).toBe('string');
-    expect(JSON.parse(result as string)).toMatchObject({ name: 'Error', message: 'boom' });
+    await expect(dispatchPluginHook('onMessage', [{}])).rejects.toThrow('boom');
+    await expect(dispatchPluginHook('onAction', ['open', {}])).rejects.toThrow('action boom');
+    await expect(dispatchPluginHook('onDismiss', ['device-1'])).rejects.toThrow('dismiss boom');
   });
 });
 

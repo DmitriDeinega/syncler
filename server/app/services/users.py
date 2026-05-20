@@ -2,11 +2,18 @@ import secrets
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.models import User
+
+DEFAULT_ARGON2_PARAMS_VERSION = 1
+PRE_LOGIN_FAKE_SALT_LENGTH_BYTES = 16
+PRE_LOGIN_FAKE_SALT_INFO_PREFIX = b"syncler-v1-pre-login-salt:"
 
 
 class UserAlreadyExistsError(Exception):
@@ -67,6 +74,21 @@ async def authenticate_user(db: AsyncSession, *, email: str, auth_key_hash: byte
         raise InvalidCredentialsError
 
     return user
+
+
+async def pre_login_salt(db: AsyncSession, email: str) -> tuple[bytes, int]:
+    user = await get_user_by_email(db, email)
+    if user is not None:
+        return user.auth_salt, user.argon2_params_version
+
+    normalized_email = email.strip().lower().encode("utf-8")
+    fake_salt = HKDF(
+        algorithm=hashes.SHA256(),
+        length=PRE_LOGIN_FAKE_SALT_LENGTH_BYTES,
+        salt=None,
+        info=PRE_LOGIN_FAKE_SALT_INFO_PREFIX + normalized_email,
+    ).derive(Settings().pre_login_pepper.encode("utf-8"))
+    return fake_salt, DEFAULT_ARGON2_PARAMS_VERSION
 
 
 async def delete_user(db: AsyncSession, user: User) -> None:

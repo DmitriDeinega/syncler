@@ -7,8 +7,11 @@ import app.syncler.core.crypto.toBase64
 import app.syncler.core.network.DeviceEnrollRequest
 import app.syncler.core.network.DeviceItem
 import app.syncler.core.network.LoginRequest
+import app.syncler.core.network.PreLoginRequest
 import app.syncler.core.network.SignupRequest
 import app.syncler.core.network.SynclerApi
+import java.security.SecureRandom
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -24,8 +27,8 @@ class AuthRepository @Inject constructor(
     private val deviceKeyProvider: DevicePublicKeyProvider,
 ) {
     suspend fun signup(email: String, password: CharArray): Result<SignupResult> = runCatching {
-        val normalizedEmail = AuthSalt.normalizedEmail(email)
-        val salt = AuthSalt.forEmail(normalizedEmail)
+        val normalizedEmail = normalizedEmail(email)
+        val salt = generateAuthSalt()
         val keys = withContext(Dispatchers.Default) {
             KeyDerivation.derive(password, salt)
         }
@@ -52,8 +55,12 @@ class AuthRepository @Inject constructor(
     }
 
     suspend fun login(email: String, password: CharArray): Result<LoginResult> = runCatching {
-        val normalizedEmail = AuthSalt.normalizedEmail(email)
-        val salt = AuthSalt.forEmail(normalizedEmail)
+        val normalizedEmail = normalizedEmail(email)
+        val preLogin = api.preLogin(PreLoginRequest(email = normalizedEmail))
+        require(preLogin.argon2ParamsVersion == KeyDerivation.PARAMS_VERSION) {
+            "Unsupported Argon2 params version: ${preLogin.argon2ParamsVersion}"
+        }
+        val salt = preLogin.authSalt.base64ToBytes()
         val keys = withContext(Dispatchers.Default) {
             KeyDerivation.derive(password, salt)
         }
@@ -98,4 +105,9 @@ class AuthRepository @Inject constructor(
     private suspend fun enrollCurrentDevice() {
         api.enrollDevice(DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()))
     }
+
+    private fun normalizedEmail(email: String): String = email.trim().lowercase(Locale.US)
+
+    private fun generateAuthSalt(): ByteArray =
+        ByteArray(KeyDerivation.SALT_LENGTH_BYTES).also(SecureRandom()::nextBytes)
 }

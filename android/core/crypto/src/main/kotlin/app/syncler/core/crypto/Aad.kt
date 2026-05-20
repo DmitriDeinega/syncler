@@ -11,7 +11,7 @@ data class MessageAad(
 )
 
 fun MessageAad.toCanonicalJsonBytes(): ByteArray {
-    val fields = linkedMapOf(
+    val fields = mapOf(
         "created_at" to createdAt,
         "message_id" to messageId,
         "min_plugin_version" to minPluginVersion,
@@ -20,7 +20,11 @@ fun MessageAad.toCanonicalJsonBytes(): ByteArray {
         "sender_id" to senderId,
         "user_id" to userId,
     )
-    return fields.entries.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
+    return canonicalJsonBytes(fields)
+}
+
+internal fun canonicalJsonBytes(fields: Map<String, Any>): ByteArray =
+    fields.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
         val encodedValue = when (value) {
             is Int -> value.toString()
             is String -> "\"${value.jsonEscape()}\""
@@ -28,7 +32,6 @@ fun MessageAad.toCanonicalJsonBytes(): ByteArray {
         }
         "\"$key\":$encodedValue"
     }.encodeToByteArray()
-}
 
 private fun String.jsonEscape(): String = buildString {
     for (char in this@jsonEscape) {

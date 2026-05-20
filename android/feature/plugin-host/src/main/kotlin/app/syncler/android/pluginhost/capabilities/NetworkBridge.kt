@@ -2,6 +2,7 @@ package app.syncler.android.pluginhost.capabilities
 
 import app.syncler.android.pluginhost.AuditLogger
 import app.syncler.android.pluginhost.EndpointMatcher
+import app.syncler.android.pluginhost.PluginBridgeException
 import app.syncler.android.pluginhost.PluginInstance
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,7 +27,7 @@ class NetworkBridge(
         val url = args["url"] as? String ?: return@withContext JsonBridgeCodec.error("invalid_args")
         if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
             auditLogger.denied(plugin.manifest.id, "endpoint_not_declared", url)
-            return@withContext """{"error":"endpoint_not_declared","url":${app.syncler.android.pluginhost.JsonEscaping.quote(url)}}"""
+            throw PluginBridgeException("endpoint_not_declared", "Endpoint not declared: $url")
         }
 
         val init = args["init"] as? Map<*, *>

@@ -44,6 +44,7 @@ class PluginLoader(
     suspend fun load(manifestUrl: String, expectedSenderPublicKey: ByteArray): Result<PluginInstance> =
         withContext(Dispatchers.IO) {
             runCatching {
+                requireHttps(manifestUrl)
                 val manifestJson = fetchNoCache(manifestUrl)
                 val rawManifest = rawManifestAdapter.fromJson(manifestJson)
                     ?: throw IllegalArgumentException("manifest JSON is empty")
@@ -53,6 +54,9 @@ class PluginLoader(
                     ?: throw IllegalArgumentException("manifest JSON is empty")
                 val bundleUrl = manifest.bundleUrlOrNull(rawManifest)
                     ?: throw IllegalArgumentException("manifest signed_bundle_url is missing")
+                if (bundleUrl.startsWith("http://") || bundleUrl.startsWith("https://")) {
+                    requireHttps(bundleUrl)
+                }
                 val resolvedBundleUrl = manifestUrl.toHttpUrl().resolve(bundleUrl)?.toString()
                     ?: throw IllegalArgumentException("signed_bundle_url is invalid")
                 val bundleBytes = fetchBytesNoCache(resolvedBundleUrl)
@@ -74,6 +78,7 @@ class PluginLoader(
     private fun fetchNoCache(url: String): String = fetchBytesNoCache(url).toString(Charsets.UTF_8)
 
     private fun fetchBytesNoCache(url: String): ByteArray {
+        requireHttps(url)
         val request = Request.Builder()
             .url(url)
             .cacheControl(CacheControl.Builder().noCache().noStore().build())
@@ -81,6 +86,13 @@ class PluginLoader(
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code} fetching $url")
             return response.body?.bytes() ?: ByteArray(0)
+        }
+    }
+
+    private fun requireHttps(url: String) {
+        val allowHttpLocalhost = BuildConfig.DEBUG && (url.startsWith("http://localhost") || url.startsWith("http://10.0.2.2"))
+        require(url.startsWith("https://") || allowHttpLocalhost) {
+            "plugin URLs must use HTTPS (got $url)"
         }
     }
 
@@ -231,7 +243,8 @@ private object PluginHtmlShell {
                 const callback = callbacks.get(callbackId);
                 if (!callback) return;
                 callbacks.delete(callbackId);
-                if (result && result.error) callback.reject(result); else callback.resolve(result);
+                if (result && result.success) callback.resolve(result.value);
+                else callback.reject({ error: result?.error || "unknown_error", message: result?.message });
               };
               const nativeCall = (method, args) => new Promise((resolve, reject) => {
                 const callbackId = String(nextCallbackId++);
@@ -272,8 +285,8 @@ private object PluginHtmlShell {
                 const promise = sdkDispatch ? Promise.resolve(sdkDispatch(hook, args || [])) : Promise.reject(new Error("plugin dispatcher unavailable"));
                 if (callbackId) {
                   promise.then(
-                    (value) => window.__syncler_internal_callback(callbackId, { value }),
-                    (error) => window.__syncler_internal_callback(callbackId, { error: "plugin_dispatch_failed", message: String(error && error.message || error) })
+                    (value) => window.__syncler_internal_callback(callbackId, { success: true, value }),
+                    (error) => window.__syncler_internal_callback(callbackId, { success: false, error: "plugin_dispatch_failed", message: String(error && error.message || error) })
                   );
                 }
                 return promise;

@@ -13,6 +13,9 @@ interface SynclerApi {
     @POST("/v1/auth/signup")
     suspend fun signup(@Body body: SignupRequest): SignupResponse
 
+    @POST("/v1/auth/pre-login")
+    suspend fun preLogin(@Body body: PreLoginRequest): PreLoginResponse
+
     @POST("/v1/auth/login")
     suspend fun login(@Body body: LoginRequest): LoginResponse
 
@@ -42,6 +45,17 @@ data class SignupRequest(
 data class SignupResponse(
     @Json(name = "user_id") val userId: String,
     @Json(name = "created_at") val createdAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PreLoginRequest(
+    val email: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PreLoginResponse(
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
 )
 
 @JsonClass(generateAdapter = true)

@@ -6,6 +6,8 @@ import app.syncler.core.network.DeviceEnrollResponse
 import app.syncler.core.network.DeviceItem
 import app.syncler.core.network.LoginRequest
 import app.syncler.core.network.LoginResponse
+import app.syncler.core.network.PreLoginRequest
+import app.syncler.core.network.PreLoginResponse
 import app.syncler.core.network.SignupRequest
 import app.syncler.core.network.SignupResponse
 import app.syncler.core.network.SynclerApi
@@ -31,6 +33,7 @@ class AuthRepositoryTest {
         assertEquals("token-1", session.currentToken())
         assertEquals("token-1", tokenStore.token)
         assertEquals("user@example.com", api.signupRequest?.email)
+        assertEquals("user@example.com", api.preLoginRequest?.email)
         assertNotNull(api.signupRequest?.encryptedMasterKey)
         assertEquals(1, api.enrollCount)
     }
@@ -66,11 +69,22 @@ private class FakeApi(
     private val revokeSucceeds: Boolean = true,
 ) : SynclerApi {
     var signupRequest: SignupRequest? = null
+    var preLoginRequest: PreLoginRequest? = null
     var enrollCount: Int = 0
 
     override suspend fun signup(body: SignupRequest): SignupResponse {
         signupRequest = body
         return SignupResponse(userId = "user-1", createdAt = "2026-05-20T00:00:00Z")
+    }
+
+    override suspend fun preLogin(body: PreLoginRequest): PreLoginResponse {
+        preLoginRequest = body
+        val signup = requireNotNull(signupRequest)
+        assertEquals(signup.email, body.email)
+        return PreLoginResponse(
+            authSalt = signup.authSalt,
+            argon2ParamsVersion = signup.argon2ParamsVersion,
+        )
     }
 
     override suspend fun login(body: LoginRequest): LoginResponse {
