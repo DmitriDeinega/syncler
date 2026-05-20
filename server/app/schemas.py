@@ -291,3 +291,59 @@ class StatePutResponse(BaseModel):
 class StateConflictBody(BaseModel):
     current_state_version: int
     current_encrypted_blob: str
+
+
+class PluginPublishRequest(BaseModel):
+    plugin_id: UUID
+    sender_id: UUID
+    version: Annotated[str, Field(min_length=1, max_length=64)]
+    manifest_hash: str  # base64 32 bytes
+    bundle_hash: str    # base64 32 bytes
+    signature: str      # base64 64 bytes Ed25519 (bundle signature)
+    signed_bundle_url: str
+    capabilities: list[str]
+    endpoints: list[str]
+    sender_signature: str  # base64 Ed25519 over canonical publish body
+
+    @field_validator("manifest_hash")
+    @classmethod
+    def validate_manifest_hash(cls, value: str) -> str:
+        decode_base64(value, field_name="manifest_hash", exact=32)
+        return value
+
+    @field_validator("bundle_hash")
+    @classmethod
+    def validate_bundle_hash(cls, value: str) -> str:
+        decode_base64(value, field_name="bundle_hash", exact=32)
+        return value
+
+    @field_validator("signature")
+    @classmethod
+    def validate_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="signature", exact=64)
+        return value
+
+    @field_validator("sender_signature")
+    @classmethod
+    def validate_sender_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="sender_signature", exact=64)
+        return value
+
+
+class PluginPublishResponse(BaseModel):
+    plugin_id: UUID
+    version: str
+    created_at: datetime
+
+
+class PluginLatestResponse(BaseModel):
+    plugin_id: UUID
+    sender_id: UUID
+    version: str
+    signed_bundle_url: str
+    manifest_hash: str
+    bundle_hash: str
+    signature: str
+    capabilities: list[str]
+    endpoints: list[str]
+    created_at: datetime
