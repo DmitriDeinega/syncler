@@ -1,8 +1,22 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app import __version__
+from app.db import dispose_engine, init_engine
 
-app = FastAPI(title="Syncler Server", version=__version__)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    init_engine()
+    try:
+        yield
+    finally:
+        await dispose_engine()
+
+
+app = FastAPI(title="Syncler Server", version=__version__, lifespan=lifespan)
 
 
 @app.get("/health")
