@@ -1,4 +1,4 @@
-"""Tests for /v1/plugins/* publish + latest + revoke."""
+"""Tests for /v1/plugins/* publish + latest + revoke (M8.1)."""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ async def _register_sender(client: AsyncClient) -> tuple[uuid.UUID, Ed25519Priva
 def _sign_publish(
     private_key: Ed25519PrivateKey,
     *,
-    plugin_id: uuid.UUID,
     sender_id: uuid.UUID,
+    plugin_identifier: str,
     version: str,
     manifest_hash: str,
     bundle_hash: str,
@@ -39,8 +39,8 @@ def _sign_publish(
     endpoints: list[str],
 ) -> str:
     envelope = {
-        "plugin_id": str(plugin_id),
         "sender_id": str(sender_id),
+        "plugin_identifier": plugin_identifier,
         "version": version,
         "manifest_hash": manifest_hash,
         "bundle_hash": bundle_hash,
@@ -53,89 +53,137 @@ def _sign_publish(
     return _b64(private_key.sign(canonical))
 
 
-@pytest.mark.asyncio
-async def test_publish_and_fetch_latest(app_client: AsyncClient) -> None:
-    sender_id, private_key = await _register_sender(app_client)
-    plugin_id = uuid.uuid4()
+def _sign_revoke(private_key: Ed25519PrivateKey, *, sender_id: uuid.UUID, plugin_row_id: uuid.UUID) -> str:
+    envelope = {"sender_id": str(sender_id), "plugin_row_id": str(plugin_row_id)}
+    canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _b64(private_key.sign(canonical))
+
+
+def _body(
+    sender_id: uuid.UUID,
+    private_key: Ed25519PrivateKey,
+    *,
+    version: str,
+    plugin_identifier: str = "com.lottery.app",
+) -> dict:
     manifest_hash = _b64(b"M" * 32)
     bundle_hash = _b64(b"B" * 32)
     signature = _b64(b"S" * 64)
-
-    body_v1 = {
-        "plugin_id": str(plugin_id),
+    capabilities = ["network"]
+    endpoints = ["https://lottery.app/api/*"]
+    url = "https://lottery.app/plugin.js"
+    return {
         "sender_id": str(sender_id),
-        "version": "1.0.0",
+        "plugin_identifier": plugin_identifier,
+        "version": version,
         "manifest_hash": manifest_hash,
         "bundle_hash": bundle_hash,
         "signature": signature,
-        "signed_bundle_url": "https://lottery.app/plugin.js",
-        "capabilities": ["network"],
-        "endpoints": ["https://lottery.app/api/*"],
+        "signed_bundle_url": url,
+        "capabilities": capabilities,
+        "endpoints": endpoints,
+        "sender_signature": _sign_publish(
+            private_key,
+            sender_id=sender_id,
+            plugin_identifier=plugin_identifier,
+            version=version,
+            manifest_hash=manifest_hash,
+            bundle_hash=bundle_hash,
+            signature=signature,
+            signed_bundle_url=url,
+            capabilities=capabilities,
+            endpoints=endpoints,
+        ),
     }
-    body_v1["sender_signature"] = _sign_publish(private_key, **{k: v for k, v in body_v1.items() if k != "sender_signature"} | {"plugin_id": plugin_id, "sender_id": sender_id})
 
-    publish_v1 = await app_client.post("/v1/plugins/publish", json=body_v1)
+
+@pytest.mark.asyncio
+async def test_publish_then_upgrade(app_client: AsyncClient) -> None:
+    sender_id, private_key = await _register_sender(app_client)
+
+    publish_v1 = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
+    )
     assert publish_v1.status_code == 201, publish_v1.text
 
-    latest = await app_client.get(f"/v1/plugins/{plugin_id}/latest")
+    # M8.1 critical fix: upgrading must work (v1.0.1 after v1.0.0).
+    publish_v2 = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.1")
+    )
+    assert publish_v2.status_code == 201, publish_v2.text
+
+    latest = await app_client.get(f"/v1/plugins/{sender_id}/com.lottery.app/latest")
     assert latest.status_code == 200, latest.text
-    assert latest.json()["version"] == "1.0.0"
+    assert latest.json()["version"] == "1.0.1"
 
 
 @pytest.mark.asyncio
 async def test_publish_rejects_version_regression(app_client: AsyncClient) -> None:
     sender_id, private_key = await _register_sender(app_client)
-    plugin_id = uuid.uuid4()
-    manifest_hash = _b64(b"M" * 32)
-    bundle_hash = _b64(b"B" * 32)
-    signature = _b64(b"S" * 64)
-
-    def body_for(version: str) -> dict:
-        b = {
-            "plugin_id": str(plugin_id),
-            "sender_id": str(sender_id),
-            "version": version,
-            "manifest_hash": manifest_hash,
-            "bundle_hash": bundle_hash,
-            "signature": signature,
-            "signed_bundle_url": "https://lottery.app/plugin.js",
-            "capabilities": ["network"],
-            "endpoints": ["https://lottery.app/api/*"],
-        }
-        b["sender_signature"] = _sign_publish(
-            private_key,
-            plugin_id=plugin_id,
-            sender_id=sender_id,
-            version=version,
-            manifest_hash=manifest_hash,
-            bundle_hash=bundle_hash,
-            signature=signature,
-            signed_bundle_url=b["signed_bundle_url"],
-            capabilities=b["capabilities"],
-            endpoints=b["endpoints"],
-        )
-        return b
-
-    await app_client.post("/v1/plugins/publish", json=body_for("1.0.0"))
-    regress = await app_client.post("/v1/plugins/publish", json=body_for("0.9.0"))
+    await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
+    )
+    regress = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="0.9.0")
+    )
     assert regress.status_code == 409
 
 
 @pytest.mark.asyncio
 async def test_publish_rejects_invalid_signature(app_client: AsyncClient) -> None:
     sender_id, _ = await _register_sender(app_client)
-    plugin_id = uuid.uuid4()
-    body = {
-        "plugin_id": str(plugin_id),
-        "sender_id": str(sender_id),
-        "version": "1.0.0",
-        "manifest_hash": _b64(b"M" * 32),
-        "bundle_hash": _b64(b"B" * 32),
-        "signature": _b64(b"S" * 64),
-        "signed_bundle_url": "https://lottery.app/plugin.js",
-        "capabilities": [],
-        "endpoints": [],
-        "sender_signature": _b64(b"\xff" * 64),
-    }
+    body = _body(sender_id, Ed25519PrivateKey.generate(), version="1.0.0")  # wrong key
     response = await app_client.post("/v1/plugins/publish", json=body)
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_revoke_requires_sender_signature(app_client: AsyncClient) -> None:
+    sender_id, private_key = await _register_sender(app_client)
+    publish = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
+    )
+    plugin_row_id = uuid.UUID(publish.json()["plugin_row_id"])
+
+    # Unauthed call without sender_signature is rejected as 4xx (was a
+    # CRITICAL pre-M8.1: anyone with the UUID could revoke).
+    naked = await app_client.post(
+        "/v1/plugins/revoke",
+        json={"sender_id": str(sender_id), "plugin_row_id": str(plugin_row_id)},
+    )
+    assert naked.status_code in (400, 422)
+
+    # Authenticated revoke succeeds.
+    sig = _sign_revoke(private_key, sender_id=sender_id, plugin_row_id=plugin_row_id)
+    authed = await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_id),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig,
+        },
+    )
+    assert authed.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_revoke_rejects_foreign_sender(app_client: AsyncClient) -> None:
+    sender_a, key_a = await _register_sender(app_client)
+    sender_b, key_b = await _register_sender(app_client)
+    publish = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_a, key_a, version="1.0.0")
+    )
+    plugin_row_id = uuid.UUID(publish.json()["plugin_row_id"])
+
+    # Sender B signs a valid revoke envelope for sender A's plugin row.
+    # Sig valid against B's key but row belongs to A → 404 (no leak).
+    sig = _sign_revoke(key_b, sender_id=sender_b, plugin_row_id=plugin_row_id)
+    response = await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_b),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig,
+        },
+    )
+    assert response.status_code == 404

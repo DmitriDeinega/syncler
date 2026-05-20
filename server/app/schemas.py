@@ -294,8 +294,8 @@ class StateConflictBody(BaseModel):
 
 
 class PluginPublishRequest(BaseModel):
-    plugin_id: UUID
     sender_id: UUID
+    plugin_identifier: Annotated[str, Field(min_length=1, max_length=200)]
     version: Annotated[str, Field(min_length=1, max_length=64)]
     manifest_hash: str  # base64 32 bytes
     bundle_hash: str    # base64 32 bytes
@@ -331,14 +331,16 @@ class PluginPublishRequest(BaseModel):
 
 
 class PluginPublishResponse(BaseModel):
-    plugin_id: UUID
+    plugin_row_id: UUID
+    plugin_identifier: str
     version: str
     created_at: datetime
 
 
 class PluginLatestResponse(BaseModel):
-    plugin_id: UUID
+    plugin_row_id: UUID
     sender_id: UUID
+    plugin_identifier: str
     version: str
     signed_bundle_url: str
     manifest_hash: str
@@ -347,3 +349,15 @@ class PluginLatestResponse(BaseModel):
     capabilities: list[str]
     endpoints: list[str]
     created_at: datetime
+
+
+class PluginRevokeRequest(BaseModel):
+    sender_id: UUID
+    plugin_row_id: UUID
+    sender_signature: str  # base64 Ed25519 over canonical body
+
+    @field_validator("sender_signature")
+    @classmethod
+    def validate_sender_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="sender_signature", exact=64)
+        return value

@@ -1,0 +1,27 @@
+**Findings**
+
+- CRITICAL: `/v1/plugins/{id}/revoke` is unauthenticated. Anyone who knows a plugin UUID can revoke it; the route has only `db` dependency and no sender signature/auth check. See [plugins.py](D:/Projects/syncler/server/app/routers/plugins.py:120). This is a show-stopper for M8.
+
+- HIGH: valid plugin upgrades cannot publish. `Plugin.id` is the table primary key [models.py](D:/Projects/syncler/server/app/models.py:100), and `publish_plugin()` inserts each version with `id=_to_uuid(plugin_id)` [plugins.py](D:/Projects/syncler/server/app/services/plugins.py:74). Publishing `1.0.1` after `1.0.0` for the same plugin passes the regression check, then hits the PK constraint and is mapped to 409. The tests only cover first publish and lower-version regression, not a successful higher-version update.
+
+- HIGH: `IntegrityError -> VersionRegressionError` is too broad. Duplicate `(sender_id, version)` does map to 409 as intended [plugins.py](D:/Projects/syncler/server/app/services/plugins.py:87), but the same handler also catches primary-key collisions, FK failures, and “same sender publishes different plugin at same version” under the M1.3 `UNIQUE(sender_id, version)` schema [models.py](D:/Projects/syncler/server/app/models.py:98). The error text always says `(sender_id, version) already exists`, which will hide real schema/lifecycle bugs.
+
+- MEDIUM: server/client version parsing is not exact for large numeric components. Server uses Python `int()` with unbounded size [plugins.py](D:/Projects/syncler/server/app/services/plugins.py:36); Android uses `toInt()` [PluginVersionComparator.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/PluginVersionComparator.kt:40). A server-accepted version like a 12-digit major can later throw on Android.
+
+- MEDIUM: `PendingUpdatesStore.deferUpdate()` is not monotonic and no consumer exists yet to suppress prompts. It blindly writes the supplied `untilMs` [PendingUpdatesStore.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/PendingUpdatesStore.kt:74), so callers can move a reminder backwards. I found no UI/checker consumer of `remindAfterMs > now()`, and `PendingUpdatesStore` is also not bound in `StorageModule`, unlike `PairedSenderStore`.
+
+**Verification Notes**
+
+1. `_parse_version` and Android compare agree for ordinary int-range versions and prerelease lexicographic ordering. Not exact because of Kotlin `Int` overflow.
+2. IntegrityError mapping is only correct for the specific unique duplicate case; it is wrong as a blanket mapping.
+3. `/publish` canonical bytes are deterministic: sorted compact JSON, excludes `sender_signature`, arrays preserve order. No direct mismatch found, but tests mirror the server rather than using an independent SDK/vector.
+4. Regex accepted language is effectively the same; Android captures prerelease, server does not.
+5. Defer behavior is not monotonic, and the consuming UI/checker is deferred, so no prompt suppression check exists yet.
+
+**Show-Stoppers For M11**
+
+Fix public revoke auth and the plugin-version data model before building the M11 checker/UI on top of this. As landed, the lifecycle cannot publish an actual upgrade, and any unauthenticated caller can revoke plugins.
+
+**Ready For M11?**
+
+No. M8 needs another pass on revoke authorization, plugin version identity/schema, and narrower DB error handling. I did not run tests because this session is read-only; review is static.

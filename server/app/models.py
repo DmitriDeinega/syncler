@@ -95,7 +95,15 @@ class Pairing(Base):
 
 class Plugin(Base):
     __tablename__ = "plugins"
-    __table_args__ = (UniqueConstraint("sender_id", "version", name="uq_plugins_sender_id_version"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "sender_id",
+            "plugin_identifier",
+            "version",
+            name="uq_plugins_sender_identifier_version",
+        ),
+        Index("ix_plugins_sender_identifier", "sender_id", "plugin_identifier"),
+    )
 
     id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     sender_id: Mapped[UUID] = mapped_column(
@@ -103,6 +111,9 @@ class Plugin(Base):
         ForeignKey("senders.id"),
         nullable=False,
     )
+    # Sender-chosen stable identity (e.g. "com.lottery.app"). Decouples
+    # the logical plugin from per-version row UUIDs.
+    plugin_identifier: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[str] = mapped_column(Text, nullable=False)
     manifest_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     bundle_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

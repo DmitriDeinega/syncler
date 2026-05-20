@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Plugin
 
 # Semver-lite: MAJOR.MINOR.PATCH[-prerelease]. Reject anything weirder.
-_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-[A-Za-z0-9.\-]+)?$")
+# Components capped at 6 digits each so server + client Int parsers agree.
+_SEMVER = re.compile(r"^(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:-[A-Za-z0-9.\-]+)?$")
 
 
 class PluginError(Exception):
@@ -29,8 +30,12 @@ class VersionRegressionError(PluginError):
     """New version is not strictly greater than the latest published."""
 
 
+class DuplicateVersionError(PluginError):
+    """(sender_id, plugin_identifier, version) already exists."""
+
+
 class PluginNotFoundError(PluginError):
-    """No plugin with that id."""
+    """No plugin with that identifier."""
 
 
 def _parse_version(version: str) -> tuple[int, int, int, str]:
@@ -45,8 +50,8 @@ def _parse_version(version: str) -> tuple[int, int, int, str]:
 async def publish_plugin(
     db: AsyncSession,
     *,
-    plugin_id: str,
     sender_id: uuid.UUID,
+    plugin_identifier: str,
     version: str,
     manifest_hash: bytes,
     bundle_hash: bytes,
@@ -57,22 +62,25 @@ async def publish_plugin(
 ) -> Plugin:
     new_key = _parse_version(version)
 
-    # Confirm new version > all existing non-revoked versions
+    # Reject if any existing non-revoked version is >= new version.
     existing = await db.execute(
-        select(Plugin)
-        .where(and_(Plugin.sender_id == sender_id, Plugin.id == _to_uuid(plugin_id)))
-        .order_by(desc(Plugin.created_at))
+        select(Plugin).where(
+            and_(
+                Plugin.sender_id == sender_id,
+                Plugin.plugin_identifier == plugin_identifier,
+            ),
+        ),
     )
-    rows = list(existing.scalars().all())
-    for row in rows:
+    for row in existing.scalars().all():
         if _parse_version(row.version) >= new_key:
             raise VersionRegressionError(
                 f"new version {version} not greater than existing {row.version}",
             )
 
     plugin = Plugin(
-        id=_to_uuid(plugin_id),
+        id=uuid.uuid4(),  # fresh row UUID per published version
         sender_id=sender_id,
+        plugin_identifier=plugin_identifier,
         version=version,
         manifest_hash=manifest_hash,
         bundle_hash=bundle_hash,
@@ -86,30 +94,43 @@ async def publish_plugin(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise VersionRegressionError("(sender_id, version) already exists") from exc
+        # Narrowed: only re-classify the UNIQUE-specific case as a 409
+        # duplicate. Other IntegrityErrors (FK violations etc) escape
+        # to the route handler as 500s so we see actual schema bugs.
+        msg = str(exc.orig) if exc.orig else str(exc)
+        if "uq_plugins_sender_identifier_version" in msg:
+            raise DuplicateVersionError(
+                f"plugin {plugin_identifier} version {version} already exists",
+            ) from exc
+        raise
     await db.refresh(plugin)
     return plugin
 
 
-async def get_latest_for_plugin(db: AsyncSession, plugin_id: str) -> Plugin:
-    pid = _to_uuid(plugin_id)
+async def get_latest_for_plugin(
+    db: AsyncSession, *, sender_id: uuid.UUID, plugin_identifier: str
+) -> Plugin:
     result = await db.execute(
-        select(Plugin)
-        .where(and_(Plugin.id == pid, Plugin.revoked_at.is_(None)))
+        select(Plugin).where(
+            and_(
+                Plugin.sender_id == sender_id,
+                Plugin.plugin_identifier == plugin_identifier,
+                Plugin.revoked_at.is_(None),
+            ),
+        ),
     )
     rows = list(result.scalars().all())
     if not rows:
-        raise PluginNotFoundError(f"no active plugin {plugin_id}")
+        raise PluginNotFoundError(f"no active plugin {plugin_identifier} for sender")
     rows.sort(key=lambda r: _parse_version(r.version), reverse=True)
     return rows[0]
 
 
-async def revoke_plugin(db: AsyncSession, plugin_id: str) -> Plugin:
-    pid = _to_uuid(plugin_id)
-    result = await db.execute(select(Plugin).where(Plugin.id == pid))
+async def revoke_plugin_row(db: AsyncSession, plugin_row_id: uuid.UUID) -> Plugin:
+    result = await db.execute(select(Plugin).where(Plugin.id == plugin_row_id))
     plugin = result.scalar_one_or_none()
     if plugin is None:
-        raise PluginNotFoundError(f"no plugin {plugin_id}")
+        raise PluginNotFoundError(f"no plugin row {plugin_row_id}")
     if plugin.revoked_at is None:
         plugin.revoked_at = datetime.now(UTC)
         await db.commit()

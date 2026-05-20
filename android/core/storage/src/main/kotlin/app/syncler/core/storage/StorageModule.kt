@@ -13,4 +13,8 @@ abstract class StorageModule {
     @Binds
     @Singleton
     abstract fun bindPairedSenderStore(impl: EncryptedPairedSenderStore): PairedSenderStore
+
+    @Binds
+    @Singleton
+    abstract fun bindPendingUpdatesStore(impl: EncryptedPendingUpdatesStore): PendingUpdatesStore
 }

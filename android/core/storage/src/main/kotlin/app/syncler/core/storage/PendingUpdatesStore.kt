@@ -73,6 +73,9 @@ class EncryptedPendingUpdatesStore @Inject constructor(
     @Synchronized
     override suspend fun deferUpdate(pluginId: String, untilMs: Long) {
         val existing = cache.value.firstOrNull { it.pluginId == pluginId } ?: return
+        // Monotonic: never roll a reminder backwards. If a caller supplies
+        // an earlier untilMs than the current one, ignore.
+        if (untilMs <= existing.remindAfterMs) return
         addOrReplace(existing.copy(remindAfterMs = untilMs))
     }
 
