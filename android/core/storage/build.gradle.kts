@@ -41,4 +41,6 @@ dependencies {
 
     ksp(libs.androidx.room.compiler)
     ksp(libs.hilt.compiler)
+
+    testImplementation(libs.junit)
 }

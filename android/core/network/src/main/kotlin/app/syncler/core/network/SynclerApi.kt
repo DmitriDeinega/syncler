@@ -54,7 +54,37 @@ interface SynclerApi {
 
     @GET("/v1/pairing")
     suspend fun listPairings(): List<PairingItemDto>
+
+    @GET("/v1/state")
+    suspend fun getUserState(): StateGetResponseDto
+
+    @retrofit2.http.PUT("/v1/state")
+    suspend fun putUserState(@Body body: StatePutRequestDto): Response<StatePutResponseDto>
 }
+
+@JsonClass(generateAdapter = true)
+data class StateGetResponseDto(
+    @Json(name = "state_version") val stateVersion: Int,
+    @Json(name = "encrypted_blob") val encryptedBlob: String,
+    @Json(name = "updated_at") val updatedAt: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class StatePutRequestDto(
+    @Json(name = "expected_state_version") val expectedStateVersion: Int,
+    @Json(name = "new_encrypted_blob") val newEncryptedBlob: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class StatePutResponseDto(
+    @Json(name = "new_state_version") val newStateVersion: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class StateConflictBodyDto(
+    @Json(name = "current_state_version") val currentStateVersion: Int,
+    @Json(name = "current_encrypted_blob") val currentEncryptedBlob: String,
+)
 
 @JsonClass(generateAdapter = true)
 data class PairingPreviewResponseDto(
