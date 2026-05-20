@@ -1,20 +1,22 @@
 package app.syncler.core.storage
 
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Base64
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONObject
 
 /**
  * Locally-stored paired-sender record. Locks the identity tuple at pairing
  * time so future incoming messages can be verified against the same
- * fingerprint + name hash (I4 anti-spoofing layers 2/3).
+ * fingerprint + name hash + public key (I4 anti-spoofing layers 2/3/4).
  */
 data class PairedSender(
     val pairingId: String,
@@ -58,15 +60,20 @@ class EncryptedPairedSenderStore @Inject constructor(
     private val cache = MutableStateFlow<List<PairedSender>>(loadAll())
     override val pairedSenders: StateFlow<List<PairedSender>> = cache.asStateFlow()
 
+    @Synchronized
     override suspend fun add(pairedSender: PairedSender) {
-        val all = (cache.value.filter { it.pairingId != pairedSender.pairingId } + pairedSender)
-            .sortedBy { it.firstPairedAt }
-        persist(all)
+        prefs.edit()
+            .putString(recordKey(pairedSender.pairingId), encodeRecord(pairedSender))
+            .apply()
+        updateIndex { ids -> ids + pairedSender.pairingId }
+        cache.value = loadAll()
     }
 
+    @Synchronized
     override suspend fun remove(pairingId: String) {
-        val all = cache.value.filter { it.pairingId != pairingId }
-        persist(all)
+        prefs.edit().remove(recordKey(pairingId)).apply()
+        updateIndex { ids -> ids - pairingId }
+        cache.value = loadAll()
     }
 
     override suspend fun byPairingId(pairingId: String): PairedSender? =
@@ -75,43 +82,47 @@ class EncryptedPairedSenderStore @Inject constructor(
     override suspend fun bySenderId(senderId: String): PairedSender? =
         cache.value.firstOrNull { it.senderId == senderId }
 
-    private fun loadAll(): List<PairedSender> {
-        val ids = prefs.getStringSet(KEY_IDS, emptySet()) ?: emptySet()
-        return ids.mapNotNull { id ->
-            val record = prefs.getString("record:$id", null) ?: return@mapNotNull null
-            decodeRecord(record)
-        }
+    private fun updateIndex(transform: (Set<String>) -> Set<String>) {
+        val current = prefs.getStringSet(KEY_IDS, emptySet()) ?: emptySet()
+        prefs.edit().putStringSet(KEY_IDS, transform(current)).apply()
     }
 
-    private fun persist(records: List<PairedSender>) {
-        val editor = prefs.edit()
-        editor.clear()
-        editor.putStringSet(KEY_IDS, records.map { it.pairingId }.toSet())
-        for (record in records) {
-            editor.putString("record:${record.pairingId}", encodeRecord(record))
-        }
-        editor.apply()
-        cache.value = records
+    private fun recordKey(id: String) = "record:$id"
+
+    private fun loadAll(): List<PairedSender> {
+        val ids = prefs.getStringSet(KEY_IDS, emptySet()) ?: emptySet()
+        return ids
+            .mapNotNull { id -> prefs.getString(recordKey(id), null)?.let(::decodeRecord) }
+            .sortedBy { it.firstPairedAt }
     }
 
     private fun encodeRecord(r: PairedSender): String {
-        val pk = android.util.Base64.encodeToString(r.senderPublicKey, android.util.Base64.NO_WRAP)
-        val nh = android.util.Base64.encodeToString(r.nameHash, android.util.Base64.NO_WRAP)
-        return "${r.pairingId}|${r.senderId}|${r.senderName}|$pk|${r.fingerprint}|$nh|${r.firstPairedAt}"
+        // JSON-encoded: variable-length text fields (sender name, etc.)
+        // cannot break parsing — replaces the M6 `|` delimiter scheme.
+        return JSONObject().apply {
+            put("pairing_id", r.pairingId)
+            put("sender_id", r.senderId)
+            put("sender_name", r.senderName)
+            put("sender_public_key", Base64.encodeToString(r.senderPublicKey, Base64.NO_WRAP))
+            put("fingerprint", r.fingerprint)
+            put("name_hash", Base64.encodeToString(r.nameHash, Base64.NO_WRAP))
+            put("first_paired_at", r.firstPairedAt)
+        }.toString()
     }
 
-    private fun decodeRecord(s: String): PairedSender? {
-        val parts = s.split("|")
-        if (parts.size != 7) return null
-        return PairedSender(
-            pairingId = parts[0],
-            senderId = parts[1],
-            senderName = parts[2],
-            senderPublicKey = android.util.Base64.decode(parts[3], android.util.Base64.NO_WRAP),
-            fingerprint = parts[4],
-            nameHash = android.util.Base64.decode(parts[5], android.util.Base64.NO_WRAP),
-            firstPairedAt = parts[6],
+    private fun decodeRecord(json: String): PairedSender? = try {
+        val obj = JSONObject(json)
+        PairedSender(
+            pairingId = obj.getString("pairing_id"),
+            senderId = obj.getString("sender_id"),
+            senderName = obj.getString("sender_name"),
+            senderPublicKey = Base64.decode(obj.getString("sender_public_key"), Base64.NO_WRAP),
+            fingerprint = obj.getString("fingerprint"),
+            nameHash = Base64.decode(obj.getString("name_hash"), Base64.NO_WRAP),
+            firstPairedAt = obj.getString("first_paired_at"),
         )
+    } catch (_: Exception) {
+        null
     }
 
     private companion object {
@@ -119,4 +130,3 @@ class EncryptedPairedSenderStore @Inject constructor(
         const val KEY_IDS = "paired_ids"
     }
 }
-

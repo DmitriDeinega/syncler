@@ -1,0 +1,63 @@
+=== AGREEMENTS WITH CONCERNS ===
+1. Agree. Token collision is cryptographically negligible. Only concern: a UNIQUE collision would currently surface as an unhandled DB error, but this is not a practical V1 race.
+
+2. Agree for Postgres. `TIMESTAMPTZ` + `DateTime(timezone=True)` + `datetime.now(UTC)` are aligned.
+
+3. Agree on 64 bits for human confirmation. Concern: the comment/test wording is wrong: 8 digest bytes base32-encode to 13 chars, not “6 groups of 4”.
+
+4. Agree on signature binding. The public key is selected from `payload.sender_id`, so replaying another sender’s signature against this sender ID fails.
+
+5. Mostly agree. The placeholder is not itself a confidentiality break because the server treats it as opaque, but M7 must not assume existing `pairings.encrypted_state` is real encrypted pairing material.
+
+6. Disagree with the current behavior. The service allows re-pair after revoke in logic, but the DB unique constraint prevents it. See finding below.
+
+7. Disagree. Base64 does not include `|`, but `senderName` is stored raw and sender names are not forbidden from containing `|`.
+
+8. Agree. `request.base_url` inherits proxy trust assumptions. Document now; fix with trusted proxy/root URL config before production.
+
+9. Agree. Token brute force is infeasible, but `/complete` should still get an auth/IP rate limit for hygiene.
+
+10. Mostly agree. It requires `https://` and extracts `token`, but it accepts any HTTPS host/path and the server emits raw standard Base64 in a query parameter.
+
+=== ADDITIONAL FINDINGS ===
+- CRITICAL `/pairing/initiate` rate limiter is broken/spoofable
+  evidence: `server/app/routers/pairing.py:66`, `server/app/middleware/rate_limit.py:144`
+  proposal: use an IP pre-limit first, then after signature verification set `request.state.sender_id` and call `check_rate_limit(... RATE_LIMITS["pairing_initiate"])`.
+
+- CRITICAL Android fingerprint confirmation is not gating pairing
+  evidence: `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingScreen.kt:65`, `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt:54`, `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt:72`, `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingScreen.kt:143`
+  proposal: add a non-consuming preview/inspect endpoint, show fingerprint first, then complete+persist only after OK. At minimum, dismiss must revoke server pairing and remove local state.
+
+- HIGH Same pairing token can be completed by concurrent users
+  evidence: `server/app/services/pairing.py:87`, `server/app/services/pairing.py:93`, `server/app/services/pairing.py:120`
+  proposal: lock the pending row with `SELECT ... FOR UPDATE` or use an atomic `UPDATE ... WHERE consumed_at IS NULL RETURNING`, then test two concurrent completes.
+
+- HIGH Re-pair after revoke is blocked by DB constraint
+  evidence: `server/app/models.py:62`, `server/alembic/versions/0001_initial_schema.py:72`, `server/app/services/pairing.py:101`
+  proposal: replace the full unique constraint with a partial unique index on active pairings: `(user_id, sender_id) WHERE revoked_at IS NULL`.
+
+- HIGH `PairedSenderStore` delimiter encoding corrupts valid sender names
+  evidence: `server/app/schemas.py:118`, `android/core/storage/src/main/kotlin/app/syncler/core/storage/PairedSenderStore.kt:100`, `android/core/storage/src/main/kotlin/app/syncler/core/storage/PairedSenderStore.kt:104`
+  proposal: store JSON/Moshi, separate encrypted preference fields, or Base64-encode every variable text field.
+
+- MAJOR Pairing UI is not reachable from the app
+  evidence: `android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:11`, `android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:33`
+  proposal: add navigation/state and an entry point from inbox/settings.
+
+- MAJOR I4 runtime enforcement is not wired on Android
+  evidence: `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt:20`, `android/app/src/main/kotlin/app/syncler/android/push/PushHostBindings.kt:26`
+  proposal: message fetch/decrypt must look up `PairedSender` by `sender_id`, verify envelope signature against the locked public key, and reject unpaired/mismatched senders.
+
+- MEDIUM Broker URL should not embed raw standard Base64
+  evidence: `server/app/routers/pairing.py:88`
+  proposal: percent-encode the token or use URL-safe Base64 consistently.
+
+=== SHOW-STOPPERS FOR M7 ===
+- Fix `/pairing/initiate` rate limiting so the endpoint works and cannot be bucket-spoofed.
+- Make fingerprint confirmation a real pre-complete gate.
+- Serialize token completion so one pending token creates at most one pairing.
+- Fix the active-pairing uniqueness model before M7 builds re-pair/sync assumptions on it.
+- Replace delimiter storage before relying on `PairedSenderStore` as the I4 trust anchor.
+
+=== READY FOR M7? ===
+No. The protocol shape is close, but M6 is not yet a safe foundation for I4. The biggest issue is that Android creates and stores trust before the user confirms the fingerprint, and the server does not enforce single-consumer completion under concurrency.

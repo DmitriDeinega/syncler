@@ -77,13 +77,12 @@ async def initiate_pairing(
     return pending
 
 
-async def complete_pairing(
-    db: AsyncSession,
-    *,
-    user: User,
-    pairing_token: bytes,
-    encrypted_initial_state: bytes,
-) -> tuple[Pairing, Sender, PendingPairing]:
+async def preview_pending(
+    db: AsyncSession, *, pairing_token: bytes
+) -> tuple[PendingPairing, Sender]:
+    """Look up a pending pairing WITHOUT consuming it. Used by the device UI
+    to show the sender identity before the user confirms the fingerprint.
+    """
     result = await db.execute(
         select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
     )
@@ -92,13 +91,58 @@ async def complete_pairing(
         raise PairingTokenNotFoundError("unknown pairing token")
     if pending.consumed_at is not None:
         raise PairingTokenConsumedError("pairing token already consumed")
+    if pending.expires_at <= datetime.now(UTC):
+        raise PairingTokenExpiredError("pairing token expired")
+    sender = await get_active_sender(db, pending.sender_id)
+    return pending, sender
+
+
+async def complete_pairing(
+    db: AsyncSession,
+    *,
+    user: User,
+    pairing_token: bytes,
+    encrypted_initial_state: bytes,
+) -> tuple[Pairing, Sender, PendingPairing]:
     now = datetime.now(UTC)
-    if pending.expires_at <= now:
+
+    # Atomic claim: UPDATE consumed_at WHERE consumed_at IS NULL AND
+    # expires_at > now AND pairing_token = ... RETURNING.
+    # Only one concurrent request can succeed.
+    from sqlalchemy import update
+    claim = (
+        update(PendingPairing)
+        .where(
+            and_(
+                PendingPairing.pairing_token == pairing_token,
+                PendingPairing.consumed_at.is_(None),
+                PendingPairing.expires_at > now,
+            ),
+        )
+        .values(consumed_at=now)
+        .returning(PendingPairing)
+    )
+    result = await db.execute(claim)
+    pending = result.scalar_one_or_none()
+    if pending is None:
+        # Distinguish causes for clearer errors
+        existing = await db.execute(
+            select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
+        )
+        row = existing.scalar_one_or_none()
+        if row is None:
+            await db.rollback()
+            raise PairingTokenNotFoundError("unknown pairing token")
+        if row.consumed_at is not None:
+            await db.rollback()
+            raise PairingTokenConsumedError("pairing token already consumed")
+        await db.rollback()
         raise PairingTokenExpiredError("pairing token expired")
 
     sender = await get_active_sender(db, pending.sender_id)  # may raise SenderRevokedError
 
-    # Check for existing active pairing.
+    # Re-pair-after-revoke: only an ACTIVE pairing should block. Hard
+    # UNIQUE(user_id, sender_id) is dropped in migration 0003.
     existing = await db.execute(
         select(Pairing).where(
             and_(
@@ -109,6 +153,7 @@ async def complete_pairing(
         ),
     )
     if existing.scalar_one_or_none() is not None:
+        await db.rollback()
         raise PairingAlreadyExistsError("user is already paired with this sender")
 
     pairing = Pairing(
@@ -117,7 +162,6 @@ async def complete_pairing(
         sender_id=sender.id,
         encrypted_state=encrypted_initial_state,
     )
-    pending.consumed_at = now
     db.add(pairing)
     await db.commit()
     await db.refresh(pairing)

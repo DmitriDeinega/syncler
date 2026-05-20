@@ -70,3 +70,9 @@ python -m app.jobs.retention
 ```
 
 The process deletes expired messages, revoked pairings older than 180 days, and stale rate limit events. Schedule it outside the app process, for example with AWS EventBridge or a systemd timer.
+
+## Deployment
+
+When deploying the server behind a reverse proxy (e.g., Nginx, Traefik, AWS ALB), it is critical to configure the proxy correctly. The application relies on the `X-Forwarded-For` and `X-Forwarded-Host` headers to determine the client's IP address (for rate limiting) and the public-facing hostname (for generating pairing URLs).
+
+Ensure your proxy correctly sets these headers and that the application is configured to trust the proxy. Failure to do so may result in incorrect rate limiting or the generation of invalid URLs for client pairing.

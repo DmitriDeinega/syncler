@@ -14,6 +14,8 @@ import app.syncler.android.ui.DevicesViewModel
 import app.syncler.android.ui.InboxScreenStub
 import app.syncler.android.ui.MainViewModel
 import app.syncler.android.ui.SettingsDevicesScreen
+import app.syncler.android.ui.TopLevelScreen
+import app.syncler.feature.pairing.PairingScreen
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
@@ -28,17 +30,21 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface {
                     val isUnlocked by mainViewModel.isUnlocked.collectAsStateWithLifecycle(initialValue = false)
-                    val showingDevices by mainViewModel.showingDevices.collectAsStateWithLifecycle()
+                    val screen by mainViewModel.screen.collectAsStateWithLifecycle()
 
                     when {
                         !isUnlocked -> AuthScreen(viewModel = authViewModel)
-                        showingDevices -> SettingsDevicesScreen(
+                        screen == TopLevelScreen.Devices -> SettingsDevicesScreen(
                             viewModel = devicesViewModel,
                             onBack = mainViewModel::showInbox,
+                        )
+                        screen == TopLevelScreen.Pairing -> PairingScreen(
+                            onDone = mainViewModel::showInbox,
                         )
                         else -> InboxScreenStub(
                             onLogout = mainViewModel::logout,
                             onManageDevices = mainViewModel::showDevices,
+                            onPairSender = mainViewModel::showPairing,
                         )
                     }
                 }

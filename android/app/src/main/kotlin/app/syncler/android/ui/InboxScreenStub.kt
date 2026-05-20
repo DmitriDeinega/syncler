@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 fun InboxScreenStub(
     onLogout: () -> Unit,
     onManageDevices: () -> Unit,
+    onPairSender: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -29,12 +30,9 @@ fun InboxScreenStub(
         Text("You are logged in", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = onManageDevices) {
-                Text("Manage devices")
-            }
-            OutlinedButton(onClick = onLogout) {
-                Text("Log out")
-            }
+            Button(onClick = onPairSender) { Text("Pair a sender") }
+            Button(onClick = onManageDevices) { Text("Manage devices") }
+            OutlinedButton(onClick = onLogout) { Text("Log out") }
         }
     }
 }

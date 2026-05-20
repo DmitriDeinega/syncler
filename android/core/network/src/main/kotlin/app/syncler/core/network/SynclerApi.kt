@@ -43,6 +43,9 @@ interface SynclerApi {
         @retrofit2.http.Query("device_id") deviceId: String,
     ): Response<Unit>
 
+    @GET("/v1/pairing/preview")
+    suspend fun previewPairing(@retrofit2.http.Query("token") token: String): PairingPreviewResponseDto
+
     @POST("/v1/pairing/complete")
     suspend fun completePairing(@Body body: PairingCompleteRequestDto): PairingCompleteResponseDto
 
@@ -52,6 +55,16 @@ interface SynclerApi {
     @GET("/v1/pairing")
     suspend fun listPairings(): List<PairingItemDto>
 }
+
+@JsonClass(generateAdapter = true)
+data class PairingPreviewResponseDto(
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "sender_name") val senderName: String,
+    @Json(name = "sender_public_key") val senderPublicKey: String,
+    @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
+    @Json(name = "sender_name_hash") val senderNameHash: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
 
 @JsonClass(generateAdapter = true)
 data class PairingCompleteRequestDto(
@@ -88,6 +101,7 @@ data class MessageInboxItemDto(
     val nonce: String,
     @Json(name = "envelope_signature") val envelopeSignature: String,
     @Json(name = "sent_at") val sentAt: String,
+    @Json(name = "expires_at") val expiresAt: String,
 )
 
 @JsonClass(generateAdapter = true)

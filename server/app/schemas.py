@@ -213,14 +213,32 @@ class PairingInitiateResponse(BaseModel):
     expires_at: datetime
 
 
+class PairingPreviewResponse(BaseModel):
+    sender_id: UUID
+    sender_name: str
+    sender_public_key: str
+    sender_public_key_fingerprint: str
+    sender_name_hash: str
+    expires_at: datetime
+
+
 class PairingCompleteRequest(BaseModel):
-    pairing_token: str  # base64
+    pairing_token: str  # url-safe or standard base64 (32 bytes)
     encrypted_initial_state: str  # base64
 
     @field_validator("pairing_token")
     @classmethod
     def validate_token(cls, value: str) -> str:
-        decode_base64(value, field_name="pairing_token", exact=32)
+        try:
+            if "-" in value or "_" in value or not value.endswith("="):
+                pad = "=" * (-len(value) % 4)
+                decoded = base64.urlsafe_b64decode(value + pad)
+            else:
+                decoded = base64.b64decode(value, validate=True)
+        except Exception as exc:
+            raise ValueError("pairing_token must be valid base64") from exc
+        if len(decoded) != 32:
+            raise ValueError("pairing_token must decode to 32 bytes")
         return value
 
     @field_validator("encrypted_initial_state")

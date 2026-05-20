@@ -59,7 +59,9 @@ class Sender(Base):
 
 class Pairing(Base):
     __tablename__ = "pairings"
-    __table_args__ = (UniqueConstraint("user_id", "sender_id", name="uq_pairings_user_id_sender_id"),)
+    # No hard UNIQUE(user_id, sender_id) — re-pair after revoke must work.
+    # Migration 0003 replaces the M1.3 constraint with a partial unique
+    # index on (user_id, sender_id) WHERE revoked_at IS NULL.
 
     id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
     user_id: Mapped[UUID] = mapped_column(

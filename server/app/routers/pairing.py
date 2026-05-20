@@ -23,6 +23,7 @@ from app.schemas import (
     PairingInitiateRequest,
     PairingInitiateResponse,
     PairingItem,
+    PairingPreviewResponse,
     decode_base64,
 )
 from app.services.pairing import (
@@ -33,6 +34,7 @@ from app.services.pairing import (
     complete_pairing,
     fingerprint_for_public_key,
     initiate_pairing,
+    preview_pending,
     revoke_pairing,
     sender_metadata_for_response,
 )
@@ -49,6 +51,16 @@ def _b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
+def _b64url(value: bytes) -> str:
+    """URL-safe base64 (no padding) for use in URLs without percent-encoding."""
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(value: str) -> bytes:
+    pad = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + pad)
+
+
 def _initiate_envelope_bytes(payload: PairingInitiateRequest) -> bytes:
     """Canonical bytes the sender signs to authenticate the initiate call."""
     envelope = {
@@ -63,7 +75,7 @@ def _initiate_envelope_bytes(payload: PairingInitiateRequest) -> bytes:
 async def initiate(
     payload: PairingInitiateRequest,
     request: Request,
-    _: None = Depends(rate_limit("pairing_initiate")),
+    _: None = Depends(rate_limit("message_send_ip")),  # pre-auth IP bucket
     db: AsyncSession = Depends(get_db),
 ) -> PairingInitiateResponse:
     try:
@@ -77,6 +89,10 @@ async def initiate(
     if not verify_message_envelope(sender.public_key, _initiate_envelope_bytes(payload), signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid sender signature")
 
+    # Post-auth per-sender bucket so an authenticated sender can't outpace us.
+    request.state.sender_id = str(sender.id)
+    await check_rate_limit(db, request, RATE_LIMITS["pairing_initiate"])
+
     pending = await initiate_pairing(
         db,
         sender_id=sender.id,
@@ -85,12 +101,49 @@ async def initiate(
     )
 
     base_url = str(request.base_url).rstrip("/")
-    broker_url = f"{base_url}/v1/pairing/complete?token={_b64(pending.pairing_token)}"
+    broker_url = f"{base_url}/v1/pairing/complete?token={_b64url(pending.pairing_token)}"
 
     return PairingInitiateResponse(
         pairing_id=pending.id,
-        pairing_token=_b64(pending.pairing_token),
+        pairing_token=_b64url(pending.pairing_token),
         broker_url=broker_url,
+        expires_at=pending.expires_at,
+    )
+
+
+@router.get("/preview", response_model=PairingPreviewResponse)
+async def preview(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> PairingPreviewResponse:
+    """Non-consuming sender-identity lookup. Lets the device show fingerprint
+    + name BEFORE the user confirms; only ``/complete`` consumes the token.
+    """
+    # Token comes URL-safe base64 (no padding); accept standard b64 too.
+    try:
+        raw = _b64url_decode(token) if not token.endswith("=") else base64.b64decode(token)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid token encoding") from exc
+    if len(raw) != 32:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="pairing token must be 32 bytes")
+    try:
+        pending, sender = await preview_pending(db, pairing_token=raw)
+    except PairingTokenNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="pairing token not found") from exc
+    except PairingTokenExpiredError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="pairing token expired") from exc
+    except PairingTokenConsumedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="pairing token already consumed") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    meta = sender_metadata_for_response(sender)
+    return PairingPreviewResponse(
+        sender_id=sender.id,
+        sender_name=sender.name,
+        sender_public_key=_b64(sender.public_key),
+        sender_public_key_fingerprint=meta["fingerprint"] or "",
+        sender_name_hash=meta["name_hash"] or "",
         expires_at=pending.expires_at,
     )
 
@@ -101,7 +154,18 @@ async def complete(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PairingCompleteResponse:
-    token = decode_base64(payload.pairing_token, field_name="pairing_token", exact=32)
+    # Accept URL-safe + standard base64.
+    raw = payload.pairing_token
+    try:
+        if "-" in raw or "_" in raw or not raw.endswith("="):
+            token = _b64url_decode(raw)
+        else:
+            token = base64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="pairing_token must be valid base64") from exc
+    if len(token) != 32:
+        raise HTTPException(status_code=400, detail="pairing_token must decode to 32 bytes")
+
     encrypted_initial_state = decode_base64(
         payload.encrypted_initial_state, field_name="encrypted_initial_state", minimum=16
     )
