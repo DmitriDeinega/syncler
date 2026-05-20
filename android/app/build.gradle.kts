@@ -18,6 +18,14 @@ android {
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SERVER_BASE_URL", "\"http://10.0.2.2:8000/\"")
+
+        // Environment label. Override at build time:
+        //   ./gradlew :app:assembleDebug -Psyncler.environment=PROD
+        // Anything other than "PROD" labels the app "Syncler DEV".
+        val env = (project.findProperty("syncler.environment") as? String)?.uppercase() ?: "DEV"
+        val appName = if (env == "PROD") "Syncler" else "Syncler $env"
+        resValue("string", "app_name", appName)
+        buildConfigField("String", "BUILD_ENVIRONMENT", "\"$env\"")
     }
 
     buildFeatures {

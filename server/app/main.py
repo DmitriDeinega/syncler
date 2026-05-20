@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app import __version__
+from app.config import get_settings
 from app.db import dispose_engine, init_engine
 from app.routers import auth, devices, messages, pairing, plugins, senders, state
 
@@ -20,7 +21,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await dispose_engine()
 
 
-app = FastAPI(title="Syncler Server", version=__version__, lifespan=lifespan)
+def _app_title() -> str:
+    """Append the environment label to the FastAPI title for any non-prod env.
+
+    ``ENVIRONMENT=production`` → "Syncler Server". Anything else
+    (development, staging, etc.) → "Syncler Server DEV" (uppercased label).
+    """
+    env = (get_settings().environment or "development").upper()
+    return "Syncler Server" if env == "PRODUCTION" else f"Syncler Server {env}"
+
+
+app = FastAPI(title=_app_title(), version=__version__, lifespan=lifespan)
 app.include_router(auth.router, prefix="/v1/auth")
 app.include_router(auth.account_router, prefix="/v1")
 app.include_router(devices.router, prefix="/v1/auth/devices")
@@ -38,4 +49,9 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError) 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "version": __version__}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "environment": get_settings().environment,
+        "title": _app_title(),
+    }
