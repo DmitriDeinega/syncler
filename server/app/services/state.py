@@ -47,7 +47,13 @@ async def upsert_state_cas(
     - If exists and current.state_version == expected_state_version: update.
     - Otherwise: raise StateConflictError with the current row so the client
       can pull, merge locally, and retry.
+
+    CAS uses ``UPDATE ... WHERE state_version = expected RETURNING`` for
+    atomic check-and-set; loser receives no row (rowcount=0) and we raise
+    StateConflictError without ever returning success.
     """
+    from sqlalchemy.exc import IntegrityError
+
     current = await get_state(db, user_id)
 
     if current is None:
@@ -66,7 +72,22 @@ async def upsert_state_cas(
             encrypted_blob=new_encrypted_blob,
         )
         db.add(row)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Initial-create race: another writer beat us. Convert the DB
+            # error into a clean 409 with the current state.
+            await db.rollback()
+            current_now = await get_state(db, user_id)
+            raise StateConflictError(
+                current=current_now
+                or EncryptedUserState(
+                    user_id=user_id,
+                    state_version=0,
+                    encrypted_blob=b"",
+                    updated_at=datetime.now(UTC),
+                ),
+            ) from None
         await db.refresh(row)
         return row
 
@@ -74,7 +95,9 @@ async def upsert_state_cas(
         raise StateConflictError(current=current)
 
     new_version = current.state_version + 1
-    await db.execute(
+    # RETURNING the row makes "did this UPDATE actually hit?" unambiguous —
+    # no row returned = lost the race, not a silent success.
+    stmt = (
         update(EncryptedUserState)
         .where(EncryptedUserState.user_id == user_id)
         .where(EncryptedUserState.state_version == expected_state_version)
@@ -82,11 +105,24 @@ async def upsert_state_cas(
             state_version=new_version,
             encrypted_blob=new_encrypted_blob,
             updated_at=datetime.now(UTC),
-        ),
+        )
+        .returning(
+            EncryptedUserState.user_id,
+            EncryptedUserState.state_version,
+        )
     )
+    result = await db.execute(stmt)
+    row_data = result.first()
+    if row_data is None:
+        # Lost the race. Pull fresh and surface conflict.
+        await db.rollback()
+        fresh = await get_state(db, user_id)
+        raise StateConflictError(current=fresh or current)
+
     await db.commit()
     refreshed = await get_state(db, user_id)
+    # Sanity: refreshed must report the version we wrote (else somehow yet
+    # another concurrent writer flipped past us).
     if refreshed is None or refreshed.state_version != new_version:
-        # Lost the race between version-check and update.
         raise StateConflictError(current=refreshed or current)
     return refreshed

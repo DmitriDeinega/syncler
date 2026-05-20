@@ -1,0 +1,82 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+I will start by examining the codebase to verify the user's points and identify any potential issues related to sync correctness, data loss, schema migration, and API response parsing. My investigation will cover both the server and Android components.
+I'll locate the Android files now using `glob` to search for `EncryptedUserState.kt`, `StateMerger.kt`, `SynclerApi.kt`, and `StateMergerTest.kt`.
+Got it: `android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt`. Path was a bit off. Finding other files now.
+`StateMerger.kt` path is `android\core\storage\src\main\kotlin\app\syncler\core\storage\StateMerger.kt`. Now, `SynclerApi.kt`.
+Okay, `SynclerApi.kt` path: `android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt`. Now for `StateMergerTest.kt`.
+Got paths for `StateMergerTest.kt` and server files. Reading all files in parallel now: `state.py`, `routers.py`, `schemas.py`, `test_state.py`, `EncryptedUserState.kt`, `StateMerger.kt`, `SynclerApi.kt`, `StateMergerTest.kt`.
+Read `server/app/services/state.py`; now reading other files.
+Read `server/app/routers/state.py`; now reading other files.
+Read `server/app/schemas.py`; now reading other files.
+Error executing tool read_file: File not found.
+`tests/test_state.py` is likely in `server/tests/test_state.py`, not `server/app/tests/test_state.py`. I'll try the former.
+Read `server/tests/test_state.py`; now reading other files.
+Read `EncryptedUserState.kt`, now reading other files.
+Read `StateMerger.kt`. Now reading other files.
+Read `SynclerApi.kt`. Reading last file.
+After reviewing the code against the user's verification points, here's my analysis.
+
+**1. Server CAS race:** The server's compare-and-swap logic in `upsert_state_cas` is sound. It re-fetches the state post-commit to verify the update, which correctly prevents race conditions where two clients might believe their update succeeded. No vulnerability was found here.
+
+**2. StateMerger.userScopedStorage remote-wins:** The `remote-wins` strategy in `StateMerger.kt` for `userScopedStorage` presents a significant risk of **data loss**. If two offline devices modify the same data and then sync, the second device to sync will have its changes overwritten. While noted as a V1 simplification, this is a critical issue to flag.
+
+**3. EncryptedUserState.fromJson handles missing fields:** The Android `EncryptedUserState.fromJson` method correctly uses `opt` variants and null-safe calls, ensuring that older schema versions (e.g., missing new fields) can be parsed safely without crashing, defaulting to empty collections. This implementation is robust.
+
+**4. State endpoint encoding:** I found no encoding mismatches. The server consistently uses Base64 encoding for blob data across `GET`, `PUT`, and the `409` conflict response. The Android client's DTOs use `String` fields, correctly placing the responsibility of `ByteArray` to Base64 conversion on the client-side logic.
+
+**5. PUT empty blob:** The server-side validation (`minimum=1` on the decoded blob) correctly prevents storing empty state blobs. Since a valid state object, even if empty, serializes to a non-empty JSON string, this validation is appropriate.
+
+**6. Server 409 body:** FastAPI correctly serializes the `detail` dictionary in the `HTTPException` to a JSON object, not a string. The Android client has a corresponding `StateConflictBodyDto`, indicating a clear path for parsing this structured error response from the `errorBody()` of the Retrofit `Response`. This is a well-defined and parseable error-handling mechanism.
+
+In summary, the primary concern is the potential for data loss due to the V1 merge strategy. All other points of verification check out. I will now prepare the final report in the requested format.
+## Review of M7 (Multi-device sync — encrypted state + CAS)
+
+Commits `bec5185` (server) + `46327dd` (android).
+
+## What landed
+
+**Server**
+- `services/state.py` — get_state + upsert_state_cas (atomic UPDATE WHERE version = expected)
+- `routers/state.py` — GET /v1/state, PUT /v1/state {expected_state_version, new_encrypted_blob} → 409 with current state on conflict
+- `schemas.py` — StateGetResponse, StatePutRequest, StatePutResponse, StateConflictBody
+- `tests/test_state.py` — empty read, 2 writes versioning correctly, stale 409, auth required
+
+**Android**
+- `core/storage/EncryptedUserState.kt` — structured local model with schema_version + installed_plugins + dismissed_messages + plugin_settings + user_scoped_storage; JSON round-trip
+- `core/storage/StateMerger.kt` — three-way merge: installed_plugins by id-newest-wins, dismissed_messages union, plugin_settings by id-newest-wins, user_scoped_storage remote-wins
+- `core/network/SynclerApi` — getUserState + putUserState DTOs
+- `core/storage/test/StateMergerTest.kt` — 4 tests covering merge classes + JSON round-trip
+
+## NOT yet built (intentional deferral)
+- UserStateSyncer (the pull-merge-CAS-push loop) — needs master key context which is currently scoped to the Session. Wired in M8 alongside the plugin update UX which triggers state changes.
+- DismissEventHandler in :core:push for Gap 1 fan-out
+- Per-key user_scoped_storage timestamps (V1.5)
+
+## Verify
+
+1.  **Server CAS race: the atomic UPDATE WHERE version=expected returns no rows on conflict; we then re-read and raise. Is there any window where two concurrent PUTs could both think they succeeded?**
+    -   **Verdict: Safe.** The implementation in `upsert_state_cas` is robust. It re-reads the state from the database after the `UPDATE` is committed and verifies that its change was the one that stuck. If another process won the race, `refreshed.state_version` will not equal `new_version`, and a `StateConflictError` is correctly raised. This prevents a split-brain scenario.
+
+2.  **StateMerger.userScopedStorage remote-wins: appropriate V1 simplification, or does this lose data dangerously?**
+    -   **Verdict: Dangerous data loss.** The "remote-wins" strategy for `userScopedStorage` will discard local changes if the remote state has also changed. For example, if two offline devices both modify different keys within the same plugin's storage, the second device to sync will lose its changes entirely for that plugin's scope. This is a significant data integrity issue, even for a V1. The planned V1.5 fix (per-key timestamps) is necessary.
+
+3.  **EncryptedUserState.fromJson handles missing fields (.optJSONArray/.optJSONObject) — schema-version-0 (older blob) parses safely?**
+    -   **Verdict: Safe.** The use of `optJSONArray` and `optJSONObject` combined with `.orEmpty()` default values in `EncryptedUserState.fromJson` ensures forward compatibility. An older state blob lacking newer fields will parse correctly into a model with empty lists/maps for the missing fields, preventing crashes and data corruption during schema evolution.
+
+4.  **State endpoint returns base64-encoded blob; tests pass blob as `_b64(bytes)`. Confirm no encoding mismatch.**
+    -   **Verdict: Correct.** The server-side code in `routers/state.py` consistently uses base64 encoding for `encrypted_blob` on both `GET` responses and in the `409 Conflict` body. The corresponding `decode_base64` on the `PUT` request ensures symmetry. The contract is clear and the test coverage reflects this.
+
+5.  **PUT empty blob (length 0) — currently `minimum=1` in schema. Is 0-length a valid state? Probably no, since users always have at least the schema_version field, but worth confirming.**
+    -   **Verdict: Correct.** The `minimum=1` constraint on the decoded `new_encrypted_blob` in `StatePutRequest` is a valid safeguard. The minimal valid `EncryptedUserState` serializes to a non-empty JSON string (e.g., `{"schema_version":1,...}`), which, when encrypted, will produce a non-empty blob. This prevents storing ambiguous or invalid empty states.
+
+6.  **Server 409 returns the conflict body inline in `detail`. FastAPI's HTTPException stringifies dict detail. Is the client-side parsing path well-defined?**
+    -   **Verdict: Well-defined.** FastAPI does *not* stringify a Pydantic model or dict passed to `detail` in an `HTTPException`; it serializes it to a proper JSON object within the error response. The response will be `{"detail": {"current_state_version": ...}}`. The presence of `StateConflictBodyDto` on the Android client shows there is a clear, type-safe path for parsing this JSON error body with Retrofit's `response.errorBody()`.
+
+## Output
+
+Same format. Look for issues affecting:
+- Sync correctness under concurrency
+- Merge data loss
+- JSON schema migration safety
+- 409 body parseability

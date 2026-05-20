@@ -86,6 +86,16 @@ data class StateConflictBodyDto(
     @Json(name = "current_encrypted_blob") val currentEncryptedBlob: String,
 )
 
+/**
+ * FastAPI nests HTTPException(detail=...) under a top-level ``detail`` key,
+ * so the actual 409 body shape is ``{"detail": {…}}``. Retrofit error-body
+ * parsing must go through this envelope to reach the conflict fields.
+ */
+@JsonClass(generateAdapter = true)
+data class StateConflictResponseDto(
+    val detail: StateConflictBodyDto,
+)
+
 @JsonClass(generateAdapter = true)
 data class PairingPreviewResponseDto(
     @Json(name = "sender_id") val senderId: String,

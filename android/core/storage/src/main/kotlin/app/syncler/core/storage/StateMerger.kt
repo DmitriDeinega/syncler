@@ -1,18 +1,22 @@
 package app.syncler.core.storage
 
 /**
- * Three-way merge over [EncryptedUserState] (M7 Codex Round 6 spec):
+ * Two-way merge over [EncryptedUserState] (M7.1 — refined per Codex review):
  *
- *   - installedPlugins: merge by plugin_id, last-installed wins (newer
- *     installedAt timestamp).
+ *   - installedPlugins: merge by plugin_id, newer installedAt wins.
  *   - dismissedMessages: union (a dismissal anywhere is final).
- *   - pluginSettings: merge by plugin_id, last-modified wins.
- *   - userScopedStorage[plugin_id][key]: per-key last-write-wins via
- *     modifiedAt on PluginSettings. (V1 simplification: nested per-key
- *     timestamps land in V1.5 if conflicts get noisy.)
+ *   - pluginSettings: merge by plugin_id, newer modifiedAt wins.
+ *   - userScopedStorage: **NOT MERGED in V1**. Per Codex M7 review, naive
+ *     remote-wins risks resurrecting locally-deleted keys and dropping
+ *     local edits on same-key conflicts. Without per-key timestamps or
+ *     tombstones the merge cannot distinguish "remote is fresher" from
+ *     "remote never saw the local delete." V1 keeps userScopedStorage
+ *     device-local; cross-device plugin state sync lands V1.5 alongside
+ *     per-key metadata. Plugins that need cross-device state today must
+ *     sync through their own sender backend.
  *
- * Schema-version downgrades are rejected; mismatched-up gets the local
- * version untouched (caller bumps via migration).
+ * Schema-version mismatch: take the max; [EncryptedUserState.fromJson] is
+ * responsible for forward-migrating older blobs at parse time.
  */
 object StateMerger {
     fun merge(
@@ -35,19 +39,13 @@ object StateMerger {
             remote.pluginSettings,
         ) { a, b -> if (a.modifiedAt >= b.modifiedAt) a else b }
 
-        // For user-scoped storage, prefer remote values when they exist
-        // (V1 simplification — last-writer-wins per-key is V1.5).
-        val userScopedStorage = mergeNestedMaps(
-            local.userScopedStorage,
-            remote.userScopedStorage,
-        )
-
+        // userScopedStorage NOT merged in V1 — local wins. See class kdoc.
         return EncryptedUserState(
             schemaVersion = schema,
             installedPlugins = installedPlugins,
             dismissedMessages = dismissedMessages,
             pluginSettings = pluginSettings,
-            userScopedStorage = userScopedStorage,
+            userScopedStorage = local.userScopedStorage,
         )
     }
 
@@ -76,16 +74,4 @@ object StateMerger {
         return merged
     }
 
-    private fun mergeNestedMaps(
-        local: Map<String, Map<String, String>>,
-        remote: Map<String, Map<String, String>>,
-    ): Map<String, Map<String, String>> {
-        val merged = local.mapValues { it.value.toMutableMap() }.toMutableMap()
-        for ((pluginId, kvs) in remote) {
-            val target = merged[pluginId]?.toMutableMap() ?: mutableMapOf()
-            for ((k, v) in kvs) target[k] = v  // remote-wins
-            merged[pluginId] = target
-        }
-        return merged
-    }
 }

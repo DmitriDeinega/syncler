@@ -39,26 +39,49 @@ data class EncryptedUserState(
     companion object {
         const val SCHEMA_V1 = 1
 
+        /** Pre-V1 blobs (no schema_version field) — migrated forward at parse. */
+        const val SCHEMA_V0 = 0
+
         fun fromJson(json: String): EncryptedUserState {
             if (json.isEmpty()) return EncryptedUserState()
             val obj = JSONObject(json)
+            // Absent schema_version = V0 (pre-V1). We treat it explicitly
+            // rather than silently calling it V1, so future migrations can
+            // route the blob through a dedicated upgrade step.
+            val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
             return EncryptedUserState(
-                schemaVersion = obj.optInt("schema_version", SCHEMA_V1),
+                schemaVersion = if (schema == SCHEMA_V0) SCHEMA_V1 else schema,
                 installedPlugins = obj.optJSONArray("installed_plugins")
-                    ?.let { arr -> (0 until arr.length()).map { InstalledPluginRef.fromJson(arr.getJSONObject(it)) } }
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { InstalledPluginRef.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
                     .orEmpty(),
                 dismissedMessages = obj.optJSONArray("dismissed_messages")
-                    ?.let { arr -> (0 until arr.length()).map { DismissedMessageEntry.fromJson(arr.getJSONObject(it)) } }
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { DismissedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
                     .orEmpty(),
                 pluginSettings = obj.optJSONObject("plugin_settings")
-                    ?.let { o -> o.keys().asSequence().associateWith { PluginSettings.fromJson(o.getJSONObject(it)) } }
+                    ?.let { o ->
+                        o.keys().asSequence().mapNotNull { key ->
+                            runCatching { key to PluginSettings.fromJson(o.getJSONObject(key)) }.getOrNull()
+                        }.toMap()
+                    }
                     .orEmpty(),
                 userScopedStorage = obj.optJSONObject("user_scoped_storage")
                     ?.let { o ->
-                        o.keys().asSequence().associateWith { pluginId ->
-                            val nested = o.getJSONObject(pluginId)
-                            nested.keys().asSequence().associateWith { nested.getString(it) }
-                        }
+                        o.keys().asSequence().mapNotNull { pluginId ->
+                            runCatching {
+                                val nested = o.getJSONObject(pluginId)
+                                pluginId to nested.keys().asSequence().mapNotNull { k ->
+                                    runCatching { k to nested.getString(k) }.getOrNull()
+                                }.toMap()
+                            }.getOrNull()
+                        }.toMap()
                     }
                     .orEmpty(),
             )
