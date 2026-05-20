@@ -1,0 +1,25 @@
+{
+  "name": "@syncler/plugin-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc && esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=dist/index.js",
+    "build:example": "esbuild examples/minimal/src/plugin.ts --bundle --format=esm --platform=browser --alias:@syncler/plugin-sdk=./src/index.ts --outfile=examples/minimal/dist/plugin.bundle.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

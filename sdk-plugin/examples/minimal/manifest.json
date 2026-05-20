@@ -1,0 +1,12 @@
+{
+  "id": "com.example.minimal",
+  "name": "Minimal",
+  "version": "1.0.0",
+  "senderId": "com.example.sender",
+  "bundleHash": "00",
+  "signature": "00",
+  "declaredCapabilities": ["storage"],
+  "declaredEndpoints": [],
+  "dismissBehavior": "dismiss_local_only",
+  "minPlatformVersion": "1.0.0"
+}

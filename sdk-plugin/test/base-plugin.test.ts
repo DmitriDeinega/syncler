@@ -1,0 +1,102 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { BasePlugin, type DismissAction } from '../src/base-plugin';
+import { clearRegisteredPlugin, dispatchPluginHook, registerPlugin } from '../src/bridge';
+import { Capability, DismissBehavior } from '../src/enums';
+
+class DefaultsPlugin extends BasePlugin {
+  static manifest = manifestFor('com.example.defaults');
+
+  render(): string {
+    return '<div>defaults</div>';
+  }
+}
+
+class OverridesPlugin extends BasePlugin {
+  static manifest = manifestFor('com.example.overrides');
+
+  render(data: { text: string }): string {
+    return `<div>${data.text}</div>`;
+  }
+
+  async onMessage(payload: { text: string }) {
+    return { title: 'Title', body: payload.text };
+  }
+
+  async onAction(actionName: string, payload: { id: string }): Promise<void> {
+    await Promise.resolve(`${actionName}:${payload.id}`);
+  }
+
+  async onDismiss(deviceId: string): Promise<DismissAction> {
+    return { behavior: DismissBehavior.DISMISS_LOCAL_ONLY, payload: { deviceId } };
+  }
+}
+
+class ThrowingPlugin extends BasePlugin {
+  static manifest = manifestFor('com.example.throwing');
+
+  render(): string {
+    return '<div>throwing</div>';
+  }
+
+  async onMessage(): Promise<void> {
+    throw new Error('boom');
+  }
+}
+
+describe('BasePlugin', () => {
+  afterEach(() => {
+    clearRegisteredPlugin();
+  });
+
+  it('default hooks return undefined', async () => {
+    const plugin = new DefaultsPlugin();
+    await expect(plugin.onMessage({})).resolves.toBeUndefined();
+    await expect(plugin.onAction('open', {})).resolves.toBeUndefined();
+    await expect(plugin.onDismiss('device')).resolves.toBeUndefined();
+  });
+
+  it('subclass overrides are called', async () => {
+    const plugin = new OverridesPlugin();
+    await expect(plugin.onMessage({ text: 'hello' })).resolves.toEqual({ title: 'Title', body: 'hello' });
+    await expect(plugin.onAction('open', { id: '1' })).resolves.toBeUndefined();
+    await expect(plugin.onDismiss('device-1')).resolves.toEqual({
+      behavior: DismissBehavior.DISMISS_LOCAL_ONLY,
+      payload: { deviceId: 'device-1' },
+    });
+  });
+
+  it('dispatcher routes to registered hooks', async () => {
+    registerPlugin(new OverridesPlugin());
+
+    await expect(dispatchPluginHook('onMessage', [{ text: 'hello' }])).resolves.toEqual({ title: 'Title', body: 'hello' });
+    await expect(dispatchPluginHook('onAction', ['open', { id: '1' }])).resolves.toBeUndefined();
+    await expect(dispatchPluginHook('onDismiss', ['device-1'])).resolves.toEqual({
+      behavior: DismissBehavior.DISMISS_LOCAL_ONLY,
+      payload: { deviceId: 'device-1' },
+    });
+  });
+
+  it('dispatcher catches and serializes errors', async () => {
+    registerPlugin(new ThrowingPlugin());
+
+    const result = await dispatchPluginHook('onMessage', [{}]);
+
+    expect(typeof result).toBe('string');
+    expect(JSON.parse(result as string)).toMatchObject({ name: 'Error', message: 'boom' });
+  });
+});
+
+function manifestFor(id: string) {
+  return {
+    id,
+    name: 'Test',
+    version: '1.0.0',
+    senderId: 'com.example.sender',
+    bundleHash: 'abc123',
+    signature: 'def456',
+    declaredCapabilities: [Capability.STORAGE],
+    declaredEndpoints: [],
+    dismissBehavior: DismissBehavior.DISMISS_LOCAL_ONLY,
+    minPlatformVersion: '1.0.0',
+  };
+}
