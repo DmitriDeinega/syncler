@@ -1,0 +1,26 @@
+Implemented M1.6 and M1.7 under `server/`.
+
+**Summary**
+- Created rate limiting modules:
+  - `server/app/middleware/__init__.py`
+  - `server/app/middleware/rate_limit.py`
+  - `server/app/middleware/rate_limit_config.py`
+- Wired auth limits:
+  - `login`: `5 / 60s` per IP
+  - `signup`: `3 / 60s` per IP
+- Removed the old placeholder limiter from `server/app/auth.py`.
+- Added retention job:
+  - `server/app/jobs/__init__.py`
+  - `server/app/jobs/retention.py`
+  - CLI entry: `python -m app.jobs.retention`
+- Updated `server/README.md` with a Background jobs section.
+- Added tests:
+  - `server/tests/test_rate_limit.py`
+  - `server/tests/test_retention.py`
+
+**Policy note**
+- Pairing pruning uses `revoked_at < now - 180d`, matching the explicit M1.7 design step. The earlier retention-target wording referenced `created_at`; using `revoked_at` avoids deleting a pairing that was created long ago but revoked recently.
+
+**Verification**
+- AST syntax parse passed for `app/` and `tests/`.
+- Full pytest execution could not run in this environment: `sqlalchemy`, `aiosqlite`, and `pytest-asyncio` are missing from the active Python, and `uv` is not installed.

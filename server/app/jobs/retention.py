@@ -1,0 +1,46 @@
+import asyncio
+import json
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import dispose_engine, get_db, init_engine
+from app.models import Message, Pairing, RateLimitEvent
+
+
+async def prune_expired(session: AsyncSession) -> dict[str, int]:
+    now = datetime.now(UTC)
+
+    messages = await session.execute(delete(Message).where(Message.expires_at < now))
+    pairings = await session.execute(
+        delete(Pairing).where(
+            Pairing.revoked_at.is_not(None),
+            Pairing.revoked_at < now - timedelta(days=180),
+        )
+    )
+    rate_limit_events = await session.execute(
+        delete(RateLimitEvent).where(RateLimitEvent.window_start < now - timedelta(days=7))
+    )
+    await session.commit()
+
+    return {
+        "messages": messages.rowcount or 0,
+        "pairings": pairings.rowcount or 0,
+        "rate_limit_events": rate_limit_events.rowcount or 0,
+    }
+
+
+async def _main() -> None:
+    init_engine()
+    try:
+        async for session in get_db():
+            summary = await prune_expired(session)
+            print(json.dumps(summary, sort_keys=True))
+            break
+    finally:
+        await dispose_engine()
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())

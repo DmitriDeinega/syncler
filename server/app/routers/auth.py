@@ -3,8 +3,9 @@ import base64
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import create_access_token, current_user, rate_limit
+from app.auth import create_access_token, current_user
 from app.db import get_db
+from app.middleware.rate_limit import rate_limit
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, SignupRequest, SignupResponse, decode_base64
 from app.services.users import (
@@ -24,7 +25,11 @@ def _encode_base64(value: bytes) -> str:
 
 
 @router.post("/signup", response_model=SignupResponse, status_code=status.HTTP_201_CREATED)
-async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)) -> SignupResponse:
+async def signup(
+    payload: SignupRequest,
+    _: None = Depends(rate_limit("signup")),
+    db: AsyncSession = Depends(get_db),
+) -> SignupResponse:
     try:
         user = await create_user(
             db,

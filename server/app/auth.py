@@ -1,9 +1,8 @@
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt import InvalidTokenError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +44,7 @@ def decode_access_token(token: str) -> UUID:
 
 
 async def current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
@@ -56,11 +56,5 @@ async def current_user(
             detail="invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    request.state.user_id = str(user.id)
     return user
-
-
-def rate_limit(_: str) -> Callable[[], Awaitable[None]]:
-    async def dependency() -> None:
-        return None
-
-    return dependency
