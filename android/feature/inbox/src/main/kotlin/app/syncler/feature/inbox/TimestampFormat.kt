@@ -31,7 +31,12 @@ internal object TimestampFormat {
     fun relative(iso: String, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()): String {
         val parsed = runCatching { Instant.parse(iso) }.getOrElse { return iso }
         val zoned = parsed.atZone(zone)
-        val today = LocalDate.now(zone)
+        // Derive `today` from the supplied `now` (not from LocalDate.now(zone))
+        // so tests with a fake clock get deterministic same-day / yesterday
+        // / earlier-this-year branches. Codex review 43 caught this — the
+        // previous LocalDate.now() call ignored the now parameter and made
+        // any fixed-clock test stale on different real calendar days.
+        val today = now.atZone(zone).toLocalDate()
         val date = zoned.toLocalDate()
 
         val delta = Duration.between(parsed, now)

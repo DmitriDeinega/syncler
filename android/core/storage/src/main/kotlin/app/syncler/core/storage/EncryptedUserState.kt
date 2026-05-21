@@ -54,7 +54,8 @@ data class EncryptedUserState(
     companion object {
         const val SCHEMA_V1 = 1
         const val SCHEMA_V2 = 2
-        const val SCHEMA_CURRENT = SCHEMA_V2
+        const val SCHEMA_V3 = 3
+        const val SCHEMA_CURRENT = SCHEMA_V3
 
         /** Pre-V1 blobs (no schema_version field) — migrated forward at parse. */
         const val SCHEMA_V0 = 0
@@ -68,7 +69,7 @@ data class EncryptedUserState(
             val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
             return EncryptedUserState(
                 schemaVersion = when (schema) {
-                    SCHEMA_V0, SCHEMA_V1 -> SCHEMA_CURRENT  // forward-migrate
+                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2 -> SCHEMA_CURRENT  // forward-migrate
                     else -> schema
                 },
                 installedPlugins = obj.optJSONArray("installed_plugins")

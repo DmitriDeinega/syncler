@@ -75,6 +75,7 @@ class StateMergerTest {
             userScopedStorage = mapOf("a" to mapOf("k" to "v")),
             readMessages = listOf(ReadMessageEntry("m2", "2026-05-21T08:00:00Z")),
             archivedMessages = listOf(ArchivedMessageEntry("m3", "2026-05-21T09:00:00Z")),
+            deletedMessages = listOf(DeletedMessageEntry("m4", "2026-05-21T10:00:00Z")),
         )
         val roundtrip = EncryptedUserState.fromJson(original.toJson())
         assertEquals(original.installedPlugins, roundtrip.installedPlugins)
@@ -83,6 +84,7 @@ class StateMergerTest {
         assertEquals(original.userScopedStorage, roundtrip.userScopedStorage)
         assertEquals(original.readMessages, roundtrip.readMessages)
         assertEquals(original.archivedMessages, roundtrip.archivedMessages)
+        assertEquals(original.deletedMessages, roundtrip.deletedMessages)
     }
 
     @Test
@@ -123,6 +125,23 @@ class StateMergerTest {
     }
 
     @Test
+    fun `deleted messages merge by id with max deletedAt wins`() {
+        val local = EncryptedUserState(
+            deletedMessages = listOf(DeletedMessageEntry("m1", "2026-05-20T10:00:00Z")),
+        )
+        val remote = EncryptedUserState(
+            deletedMessages = listOf(
+                DeletedMessageEntry("m1", "2026-05-20T11:00:00Z"),
+                DeletedMessageEntry("m2", "2026-05-20T12:00:00Z"),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(2, merged.deletedMessages.size)
+        val m1 = merged.deletedMessages.first { it.messageId == "m1" }
+        assertEquals("2026-05-20T11:00:00Z", m1.deletedAt)
+    }
+
+    @Test
     fun `timestamp comparison uses Instant not string lex`() {
         // Real-time order: T2 (with .500 millis) is LATER than T1 (whole seconds).
         // Lexicographic comparison would put "T1Z" AFTER "T0.500Z" because 'Z' > '.'
@@ -142,20 +161,23 @@ class StateMergerTest {
     }
 
     @Test
-    fun `V1 blob without read messages parses as empty list and forward-migrates`() {
-        // Simulate a blob written by a pre-M11.2 device that lacked the
-        // read_messages and archived_messages fields entirely.
-        val v1Json = """{
-            "schema_version": 1,
+    fun `V2 blob without deleted messages parses as empty list and forward-migrates`() {
+        // Simulate a blob written by a pre-M11.6 device that lacked the
+        // deleted_messages field.
+        val v2Json = """{
+            "schema_version": 2,
             "installed_plugins": [],
             "dismissed_messages": [{"message_id":"m1","dismissed_at":"2026-05-20T10:00:00Z"}],
             "plugin_settings": {},
-            "user_scoped_storage": {}
+            "user_scoped_storage": {},
+            "read_messages": [],
+            "archived_messages": []
         }""".trimIndent()
-        val parsed = EncryptedUserState.fromJson(v1Json)
+        val parsed = EncryptedUserState.fromJson(v2Json)
         assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
         assertEquals(emptyList<ReadMessageEntry>(), parsed.readMessages)
         assertEquals(emptyList<ArchivedMessageEntry>(), parsed.archivedMessages)
+        assertEquals(emptyList<DeletedMessageEntry>(), parsed.deletedMessages)
         assertEquals(1, parsed.dismissedMessages.size)
     }
 }

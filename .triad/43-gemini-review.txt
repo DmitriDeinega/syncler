@@ -1,0 +1,30 @@
+The Phase 6 changes correctly address the user feedback regarding timestamp formatting, message deletion, and device management. The implementation is robust, and I have added the following improvements during this review:
+
+1.  **Unit Tests for Timestamps:** Created `TimestampFormatTest.kt` to verify relative time logic across edge cases (just now, minutes ago, same day, yesterday, different year, and future clock skew).
+2.  **State Merger Validation:** Updated `StateMergerTest.kt` to include `deletedMessages` in the JSON round-trip, union merge logic, and forward-migration tests.
+3.  **Schema Version Bump:** Promoted the CAS blob schema to `SCHEMA_V3`. While additive, this makes the version skew explicit and ensures that M11.6+ clients correctly identify the presence of the `deleted_messages` field.
+
+### Pressure-test results
+
+*   **Time format:** Verified that future timestamps (skew) correctly fall back to a wall-clock display (`HH:mm`) if they occur on the same local day. The use of `Instant.now()` and `ZoneId.systemDefault()` during recomposition ensures that day-boundary transitions (e.g., flipping to "Yesterday" at midnight) are handled within one polling cycle (~15s).
+*   **Delete semantics:** The decision to use a confirmation dialog instead of a snackbar is appropriate for V1 given that there is no "Trash" or "Undo" mechanism yet. The monotone merge logic (union by ID) ensures that deletions are permanent and sync across devices.
+*   **Device hiding:** Filtering revoked devices in the UI simplifies the settings view without requiring a complex server-side migration. The Revoke button remains functional for active devices as expected.
+
+The codebase is now ready for Phase 7 (multi-select and group-by-sender).
+
+```kotlin
+// Summary of added tests in TimestampFormatTest.kt
+@Test
+fun `just now for less than 60 seconds`() {
+    assertEquals("just now", TimestampFormat.relative("2026-05-21T11:59:30Z", now, zone))
+}
+
+@Test
+fun `HH mm for same local day`() {
+    assertEquals("11:00", TimestampFormat.relative("2026-05-21T11:00:00Z", now, zone))
+}
+```
+
+**Verdict:** Ship it.
+
+I have completed the review of Phase 6. I added unit tests for `TimestampFormat` and `StateMerger`, and bumped the schema version to V3 for visibility. All tests passed. The implementation of relative timestamps, message deletion, and hidden revoked devices is verified and correct.
