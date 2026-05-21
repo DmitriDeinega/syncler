@@ -5,7 +5,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,21 +21,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.MarkEmailUnread
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,9 +63,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
 import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.delay
@@ -92,8 +87,6 @@ class InboxViewModel @Inject constructor(
     private val session: app.syncler.core.auth.Session,
 ) : ViewModel() {
 
-    private val _refreshing = MutableStateFlow(false)
-    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
     val items: StateFlow<List<InboxItem>> = repository.items
 
     // Derived: set of message IDs already read on any of the user's devices.
@@ -153,24 +146,21 @@ class InboxViewModel @Inject constructor(
 
     private fun clearUiState() {
         _selectedId.value = null
-        _showArchive.value = false
         _searchQuery.value = ""
         _searchActive.value = false
         _selectedIds.value = emptySet()
-        _collapsedSenders.value = emptySet()
-        _groupMode.value = GroupMode.Chronological
+        _viewMode.value = InboxView.All
+        _selectedSenderId.value = null
     }
 
     fun refresh() {
+        // Periodic poll: no visible spinner. The previous CircularProgressIndicator
+        // in the top bar redrew on every poll and read as noisy. State changes
+        // (new rows, read-mark sync) surface implicitly through the list.
         viewModelScope.launch {
-            _refreshing.value = true
             repository.refresh()
-            // Opportunistically pull state — cheap, catches read marks
-            // pushed from another device between polls — and flush any
-            // dirty local change that hasn't been pushed yet.
             userState.pull()
             userState.flushPendingPush()
-            _refreshing.value = false
         }
     }
 
@@ -211,10 +201,44 @@ class InboxViewModel @Inject constructor(
         viewModelScope.launch { userState.markDeleted(itemId) }
     }
 
-    private val _showArchive = MutableStateFlow(false)
-    val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
-    fun openArchive() { _showArchive.value = true }
-    fun closeArchive() { _showArchive.value = false }
+    // ---------- Drawer-driven filter ----------
+    /**
+     * The Inbox tab now lives behind a left navigation drawer with four
+     * "views" the user can pick: Unread (read-state filter), All (everything
+     * except archive/delete), Archive (archived only), or Sender (one
+     * specific paired sender). The top-bar title and the row list both
+     * reflect the active view.
+     */
+    private val _viewMode = MutableStateFlow(InboxView.All)
+    val viewMode: StateFlow<InboxView> = _viewMode.asStateFlow()
+
+    private val _selectedSenderId = MutableStateFlow<String?>(null)
+    val selectedSenderId: StateFlow<String?> = _selectedSenderId.asStateFlow()
+
+    fun selectView(view: InboxView) {
+        _viewMode.value = view
+        if (view != InboxView.Sender) _selectedSenderId.value = null
+    }
+
+    fun selectSender(senderId: String) {
+        _selectedSenderId.value = senderId
+        _viewMode.value = InboxView.Sender
+    }
+
+    /**
+     * Distinct (senderId, senderName) pairs derived from the current item
+     * set, used to populate the "Groups" expandable section of the drawer.
+     * Sorted by sender name for a stable list.
+     */
+    val sendersInInbox: StateFlow<List<Pair<String, String>>> = repository.items
+        .map { items ->
+            items.asSequence()
+                .map { it.senderId to it.senderName }
+                .distinctBy { it.first }
+                .sortedBy { it.second.lowercase(Locale.ROOT) }
+                .toList()
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // ---------- M11.7: multi-select ----------
     /**
@@ -251,32 +275,14 @@ class InboxViewModel @Inject constructor(
         clearSelection()
     }
 
-    // ---------- M11.7: group-by-sender + collapse ----------
-    /**
-     * Inbox layout mode. Defaults to chronological with date buckets;
-     * BySender groups consecutive items per sender with collapsible section
-     * headers. The toggle lives in the top-app-bar.
-     */
-    private val _groupMode = MutableStateFlow(GroupMode.Chronological)
-    val groupMode: StateFlow<GroupMode> = _groupMode.asStateFlow()
-    fun cycleGroupMode() {
-        _groupMode.value = when (_groupMode.value) {
-            GroupMode.Chronological -> GroupMode.BySender
-            GroupMode.BySender -> GroupMode.Chronological
-        }
-    }
-
-    /** Set of senderIds whose group section is collapsed (BySender mode). */
-    private val _collapsedSenders = MutableStateFlow<Set<String>>(emptySet())
-    val collapsedSenders: StateFlow<Set<String>> = _collapsedSenders.asStateFlow()
-    fun toggleSenderCollapse(senderId: String) {
-        _collapsedSenders.value = _collapsedSenders.value.let {
-            if (senderId in it) it - senderId else it + senderId
-        }
-    }
 }
 
-enum class GroupMode { Chronological, BySender }
+/**
+ * Drawer-selectable inbox view. Replaces the previous group-mode toggle +
+ * standalone archive screen — those are now just two of the views the user
+ * can pick from the left nav.
+ */
+enum class InboxView { Unread, All, Archive, Sender }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -285,18 +291,17 @@ fun InboxScreen(
     viewModel: InboxViewModel = hiltViewModel(),
 ) {
     val items by viewModel.items.collectAsState()
-    val refreshing by viewModel.refreshing.collectAsState()
     val selectedId by viewModel.selectedId.collectAsState()
     val readMessageIds by viewModel.readMessageIds.collectAsState()
     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
     val deletedMessageIds by viewModel.deletedMessageIds.collectAsState()
-    val showArchive by viewModel.showArchive.collectAsState()
     val selectedIds by viewModel.selectedIds.collectAsState()
     val selectionMode by viewModel.selectionMode.collectAsState()
-    val groupMode by viewModel.groupMode.collectAsState()
-    val collapsedSenders by viewModel.collapsedSenders.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val searchActive by viewModel.searchActive.collectAsState()
+    val viewMode by viewModel.viewMode.collectAsState()
+    val selectedSenderId by viewModel.selectedSenderId.collectAsState()
+    val sendersInInbox by viewModel.sendersInInbox.collectAsState()
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -305,10 +310,6 @@ fun InboxScreen(
         }
     }
 
-    // Sub-screens stack on top of the inbox: detail view (per item) and
-    // archive list. They handle their own back navigation and return here.
-    // We forward `modifier` (which carries the outer Scaffold's bottom-bar
-    // inset) so sub-screen content doesn't draw under the bottom nav.
     val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
     if (selectedItem != null) {
         DetailScreen(
@@ -322,23 +323,41 @@ fun InboxScreen(
         )
         return
     }
-    if (showArchive) {
-        ArchiveScreen(
-            // Deleted items are hidden EVERYWHERE — archive view too. The
-            // archive screen shows only archived-but-not-deleted.
-            items = items.filter { it.id in archivedMessageIds && it.id !in deletedMessageIds },
-            readMessageIds = readMessageIds,
-            onBack = viewModel::closeArchive,
-            onItemClick = { id -> viewModel.open(id) },
-            modifier = modifier,
-        )
-        return
-    }
 
     // Android back exits selection mode before any other navigation. This is
     // the standard "Gmail / Apple Mail" expectation — back from a selection
     // should clear the selection, not leave the screen.
     BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
+
+    val drawerState = androidx.compose.material3.rememberDrawerState(androidx.compose.material3.DrawerValue.Closed)
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val currentTitle = remember(viewMode, selectedSenderId, sendersInInbox) {
+        when (viewMode) {
+            InboxView.Unread -> "Unread"
+            InboxView.All -> "Inbox"
+            InboxView.Archive -> "Archive"
+            InboxView.Sender -> sendersInInbox.firstOrNull { it.first == selectedSenderId }?.second ?: "Sender"
+        }
+    }
+
+    androidx.compose.material3.ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            InboxDrawer(
+                currentView = viewMode,
+                selectedSenderId = selectedSenderId,
+                senders = sendersInInbox,
+                onPick = { view ->
+                    viewModel.selectView(view)
+                    scope.launch { drawerState.close() }
+                },
+                onPickSender = { senderId ->
+                    viewModel.selectSender(senderId)
+                    scope.launch { drawerState.close() }
+                },
+            )
+        },
+    ) {
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -355,33 +374,15 @@ fun InboxScreen(
                     onClose = { viewModel.setSearchActive(false) },
                 )
                 else -> TopAppBar(
-                    title = { Text("Inbox") },
-                    actions = {
-                        if (refreshing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
-                            )
+                    title = { Text(currentTitle) },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Filled.Menu, contentDescription = "Open navigation drawer")
                         }
+                    },
+                    actions = {
                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
                             Icon(Icons.Filled.Search, contentDescription = "Search")
-                        }
-                        IconButton(onClick = viewModel::cycleGroupMode) {
-                            Icon(
-                                when (groupMode) {
-                                    GroupMode.Chronological -> Icons.AutoMirrored.Filled.Sort
-                                    GroupMode.BySender -> Icons.AutoMirrored.Filled.List
-                                },
-                                contentDescription = when (groupMode) {
-                                    GroupMode.Chronological -> "Group by sender"
-                                    GroupMode.BySender -> "Show chronological"
-                                },
-                            )
-                        }
-                        IconButton(onClick = { viewModel.refresh() }) {
-                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
-                        }
-                        IconButton(onClick = viewModel::openArchive) {
-                            Icon(Icons.Filled.Archive, contentDescription = "Archive")
                         }
                     },
                 )
@@ -389,23 +390,37 @@ fun InboxScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
-            // Active inbox = items minus archived. Search filters this set
-            // by matching the trimmed query against title/subtitle/summary/
-            // searchText/senderName (case-insensitive substring match — host
-            // metadata only; plugin-scoped content search is V1.5).
-            val activeItems = items.filter {
-                it.id !in archivedMessageIds && it.id !in deletedMessageIds
+            // Compute the view's base item set, then optionally apply search.
+            val baseItems = remember(items, viewMode, selectedSenderId, archivedMessageIds, deletedMessageIds, readMessageIds) {
+                when (viewMode) {
+                    InboxView.All -> items.filter {
+                        it.id !in archivedMessageIds && it.id !in deletedMessageIds
+                    }
+                    InboxView.Unread -> items.filter {
+                        it.id !in archivedMessageIds && it.id !in deletedMessageIds && it.id !in readMessageIds
+                    }
+                    InboxView.Archive -> items.filter {
+                        it.id in archivedMessageIds && it.id !in deletedMessageIds
+                    }
+                    InboxView.Sender -> {
+                        val target = selectedSenderId
+                        if (target == null) emptyList()
+                        else items.filter {
+                            it.senderId == target && it.id !in archivedMessageIds && it.id !in deletedMessageIds
+                        }
+                    }
+                }
             }
-            val filtered = remember(activeItems, searchQuery) {
-                if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+            val filtered = remember(baseItems, searchQuery) {
+                if (searchQuery.isBlank()) baseItems else baseItems.filter { matchesQuery(it, searchQuery) }
             }
             val onRowClick: (String) -> Unit = { id ->
                 if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
             }
             val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
             when {
-                activeItems.isEmpty() -> Text(
-                    "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+                baseItems.isEmpty() -> Text(
+                    emptyMessage(viewMode),
                     modifier = Modifier.padding(top = 24.dp),
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -414,16 +429,7 @@ fun InboxScreen(
                     modifier = Modifier.padding(top = 24.dp),
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                groupMode == GroupMode.BySender -> GroupedBySenderList(
-                    items = filtered,
-                    readMessageIds = readMessageIds,
-                    selectedIds = selectedIds,
-                    collapsedSenders = collapsedSenders,
-                    onItemClick = onRowClick,
-                    onItemLongClick = onRowLongClick,
-                    onSenderToggle = viewModel::toggleSenderCollapse,
-                )
-                else -> BucketedInboxList(
+                else -> FlatInboxList(
                     items = filtered,
                     readMessageIds = readMessageIds,
                     selectedIds = selectedIds,
@@ -431,6 +437,106 @@ fun InboxScreen(
                     onItemLongClick = onRowLongClick,
                 )
             }
+        }
+    }
+    }
+}
+
+private fun emptyMessage(view: InboxView): String = when (view) {
+    InboxView.All -> "No cards yet. Pair a sender from the Senders tab and they can push to you."
+    InboxView.Unread -> "No unread cards."
+    InboxView.Archive -> "No archived cards."
+    InboxView.Sender -> "Nothing from this sender."
+}
+
+@Composable
+private fun InboxDrawer(
+    currentView: InboxView,
+    selectedSenderId: String?,
+    senders: List<Pair<String, String>>,
+    onPick: (InboxView) -> Unit,
+    onPickSender: (String) -> Unit,
+) {
+    var groupsExpanded by remember { mutableStateOf(currentView == InboxView.Sender) }
+    androidx.compose.material3.ModalDrawerSheet {
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Syncler",
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+            style = MaterialTheme.typography.titleLarge,
+        )
+        androidx.compose.material3.NavigationDrawerItem(
+            label = { Text("Unread") },
+            icon = { Icon(Icons.Filled.MarkEmailUnread, contentDescription = null) },
+            selected = currentView == InboxView.Unread,
+            onClick = { onPick(InboxView.Unread) },
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        androidx.compose.material3.NavigationDrawerItem(
+            label = { Text("All") },
+            icon = { Icon(Icons.Filled.Inbox, contentDescription = null) },
+            selected = currentView == InboxView.All,
+            onClick = { onPick(InboxView.All) },
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        androidx.compose.material3.NavigationDrawerItem(
+            label = { Text("Archive") },
+            icon = { Icon(Icons.Filled.Archive, contentDescription = null) },
+            selected = currentView == InboxView.Archive,
+            onClick = { onPick(InboxView.Archive) },
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        androidx.compose.material3.NavigationDrawerItem(
+            label = { Text("Groups") },
+            icon = {
+                Icon(
+                    if (groupsExpanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                )
+            },
+            selected = false,
+            onClick = { groupsExpanded = !groupsExpanded },
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        if (groupsExpanded) {
+            if (senders.isEmpty()) {
+                Text(
+                    "No paired senders with messages yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 48.dp, end = 24.dp, top = 4.dp, bottom = 8.dp),
+                )
+            } else {
+                senders.forEach { (senderId, senderName) ->
+                    androidx.compose.material3.NavigationDrawerItem(
+                        label = { Text(senderName) },
+                        selected = currentView == InboxView.Sender && selectedSenderId == senderId,
+                        onClick = { onPickSender(senderId) },
+                        modifier = Modifier.padding(start = 32.dp, end = 12.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlatInboxList(
+    items: List<InboxItem>,
+    readMessageIds: Set<String>,
+    selectedIds: Set<String>,
+    onItemClick: (String) -> Unit,
+    onItemLongClick: (String) -> Unit,
+) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(items, key = { it.id }) { item ->
+            InboxRow(
+                item = item,
+                isRead = item.id in readMessageIds,
+                isSelected = item.id in selectedIds,
+                onClick = { onItemClick(item.id) },
+                onLongClick = { onItemLongClick(item.id) },
+            )
         }
     }
 }
@@ -543,190 +649,6 @@ internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
 }
 
 /**
- * Groups inbox items into Today / Yesterday / Earlier buckets and renders
- * them with sticky-ish section headers. Bucket boundaries are computed
- * against the device's current local date (the row timestamp is the server's
- * `sent_at`, which is UTC; we convert per-row to local for bucketing).
- */
-@Composable
-private fun BucketedInboxList(
-    items: List<InboxItem>,
-    readMessageIds: Set<String>,
-    selectedIds: Set<String>,
-    onItemClick: (String) -> Unit,
-    onItemLongClick: (String) -> Unit,
-) {
-    val today = LocalDate.now()
-    val buckets = remember(items, today) {
-        items.groupBy { item ->
-            bucketFor(item.sentAt, today)
-        }.toSortedMap(compareBy { it.order })
-    }
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        buckets.forEach { (bucket, bucketItems) ->
-            item(key = "header-${bucket.name}") {
-                Text(
-                    text = bucket.label,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
-                )
-            }
-            items(bucketItems, key = { it.id }) { item ->
-                InboxRow(
-                    item = item,
-                    isRead = item.id in readMessageIds,
-                    isSelected = item.id in selectedIds,
-                    onClick = { onItemClick(item.id) },
-                    onLongClick = { onItemLongClick(item.id) },
-                )
-            }
-        }
-    }
-}
-
-/**
- * BySender layout: items grouped by senderId with collapsible section
- * headers. Sections sort by the most-recent sentAt in each group so the
- * most-active sender bubbles to the top. Within a section, items are
- * newest-first (same as chronological).
- */
-@Composable
-private fun GroupedBySenderList(
-    items: List<InboxItem>,
-    readMessageIds: Set<String>,
-    selectedIds: Set<String>,
-    collapsedSenders: Set<String>,
-    onItemClick: (String) -> Unit,
-    onItemLongClick: (String) -> Unit,
-    onSenderToggle: (String) -> Unit,
-) {
-    val groups = remember(items) {
-        InboxRepository.groupItemsBySender(items)
-    }
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        groups.forEach { (senderId, group) ->
-            val collapsed = senderId in collapsedSenders
-            val senderName = group.first().senderName
-            item(key = "sender-header-$senderId") {
-                SenderSectionHeader(
-                    senderName = senderName,
-                    count = group.size,
-                    collapsed = collapsed,
-                    onToggle = { onSenderToggle(senderId) },
-                )
-            }
-            if (!collapsed) {
-                items(group, key = { it.id }) { item ->
-                    InboxRow(
-                        item = item,
-                        isRead = item.id in readMessageIds,
-                        isSelected = item.id in selectedIds,
-                        onClick = { onItemClick(item.id) },
-                        onLongClick = { onItemLongClick(item.id) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SenderSectionHeader(
-    senderName: String,
-    count: Int,
-    collapsed: Boolean,
-    onToggle: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(top = 12.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
-            contentDescription = if (collapsed) "Expand" else "Collapse",
-        )
-        Text(
-            "$senderName  ($count)",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 4.dp),
-        )
-    }
-}
-
-private enum class DateBucket(val order: Int, val label: String) {
-    Today(0, "Today"),
-    Yesterday(1, "Yesterday"),
-    Earlier(2, "Earlier"),
-}
-
-private fun bucketFor(isoSentAt: String, today: LocalDate): DateBucket {
-    // sent_at is server-canonical UTC; project to the device's local date
-    // for bucketing so "Today" matches what the user sees on their clock.
-    val date = runCatching {
-        Instant.parse(isoSentAt).atZone(ZoneId.systemDefault()).toLocalDate()
-    }.getOrNull() ?: return DateBucket.Earlier
-    return when {
-        date == today -> DateBucket.Today
-        date == today.minusDays(1) -> DateBucket.Yesterday
-        else -> DateBucket.Earlier
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ArchiveScreen(
-    items: List<InboxItem>,
-    readMessageIds: Set<String>,
-    onBack: () -> Unit,
-    onItemClick: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    BackHandler(onBack = onBack)
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("Archive") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
-            if (items.isEmpty()) {
-                Text(
-                    "No archived cards.",
-                    modifier = Modifier.padding(top = 24.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(items, key = { it.id }) { item ->
-                        InboxRow(
-                            item = item,
-                            isRead = item.id in readMessageIds,
-                            // V1 archive view doesn't support multi-select —
-                            // unarchive is per-card from the detail view.
-                            isSelected = false,
-                            onClick = { onItemClick(item.id) },
-                            onLongClick = { onItemClick(item.id) },
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
  * Native Compose row — no WebView. The plugin's `render()` runs only in
  * [DetailScreen] when the user taps a row. Senders fill in `hostPreview` via
  * the sdk-python / sdk-plugin contract; rows without it use the generic
@@ -815,7 +737,7 @@ private fun InboxRow(
                         color = MaterialTheme.colorScheme.primary,
                     )
                     Text(
-                    TimestampFormat.relative(item.sentAt),
+                    TimestampFormat.arrival(item.sentAt),
                     style = MaterialTheme.typography.labelSmall,
                 )
                 }

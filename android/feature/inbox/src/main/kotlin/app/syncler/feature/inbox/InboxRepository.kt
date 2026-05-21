@@ -249,19 +249,6 @@ class InboxRepository @Inject constructor(
 
     companion object {
         const val TAG = "InboxRepo"
-
-        /**
-         * Groups inbox items by senderId and sorts the groups by most-recent
-         * activity. Within each group, items are already sorted newest-first
-         * (the [InboxRepository.refresh] sort).
-         */
-        fun groupItemsBySender(items: List<InboxItem>): List<Pair<String, List<InboxItem>>> {
-            return items.groupBy { it.senderId }
-                .toList()
-                .sortedByDescending { (_, list) ->
-                    list.maxOfOrNull { runCatching { Instant.parse(it.sentAt) }.getOrNull()?.toEpochMilli() ?: 0L } ?: 0L
-                }
-        }
     }
 }
 
