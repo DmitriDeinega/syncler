@@ -1,0 +1,34 @@
+**Findings**
+
+1. **Blocker: selection/collapse UI state can survive logout and apply to the next user.**  
+   `InboxScreen` gets its VM via activity-level `hiltViewModel()` in the current app structure, because `MainActivity` switches composables directly rather than using per-route `ViewModelStoreOwner`s. That means `_selectedIds`, `_collapsedSenders`, `groupMode`, search state, archive/detail state can survive the `isUnlocked` branch flipping to `AuthScreen` and back.  
+   Relevant refs: [MainActivity.kt](D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:44), [MainActivity.kt](D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:90), [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:198), [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:242).  
+   I would clear inbox UI state on session lock/user change before rolling this up. At minimum: `clearSelection()`, close detail/archive, clear collapsed senders, probably reset search.
+
+2. **Low severity UX: the selected check icon is constrained to the unread-dot’s 8dp slot.**  
+   The row reserves `UNREAD_DOT_SIZE`, then renders `CheckCircle` inside that same box, so the selection affordance is likely tiny. I’d reserve a 24dp leading slot, center the 8dp unread dot in it, and render the check at normal icon size.  
+   Ref: [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:755).
+
+**Behavior Calls**
+
+Selection over search: the prompt says closing selection drops back to the normal top bar, but the code should return to search because `clearSelection()` does not clear `searchActive`; the top-bar `when` then falls through to `searchActive`. That behavior seems right.
+
+Selection surviving tab switches: acceptable if you want task-preserving tabs, but it becomes dangerous unless logout/user switch clears it.
+
+Group ordering by most recent sender activity is the right default. I would not add header hints yet. Search-then-group is also acceptable for V1.
+
+Delete confirmation yes, archive no: fine.
+
+Unread dot suppressed while selected: fine conceptually, but fix the check icon size.
+
+**Repo Spot Check**
+
+No tracked accidental Gradle wrapper `.zip.lck` / `.zip.part` files showed up via `git ls-files`. `android/.gitignore` includes `.gradle-user-home/`.
+
+Current untracked visible files are `.triad/44-*` review artifacts. Broad `git status` also warns about inaccessible `server/pytest-cache-files-*` directories, but I did not see them tracked.
+
+**Verification**
+
+I attempted `:feature:inbox:compileDebugKotlin --offline`, but Gradle did not reach Kotlin compilation: first the global wrapper cache lock was access-denied, then the project-local ignored Gradle home failed while handling the distribution zip. So no build/test greenlight from me on this pass.
+
+I would not greenlight the rolled-up commit until the logout/user-switch UI-state reset is fixed.

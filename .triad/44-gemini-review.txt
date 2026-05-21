@@ -1,0 +1,18 @@
+The Phase 7 implementation (`M11.7`) for multi-select and grouped-by-sender is solid. I have reviewed the code, refactored the grouping logic for better testability, and added new unit tests.
+
+### Pressure-test results
+
+1.  **Selection persistence:** Persistence across tab switching is confirmed and acceptable for a bottom-nav architecture where tab state is preserved. It prevents accidental loss of complex selections.
+2.  **Selection vs Search:** The `when` block correctly prioritizes `selectionMode > searchActive`. Exiting selection while search is active correctly falls back to the search bar.
+3.  **Bulk performance:** Confirmed. `markManyArchived` and `markManyDeleted` in `UserStateRepository` perform a single atomic local mutation and a single push attempt.
+4.  **Confirmations:** Delete correctly requires confirmation; Archive does not. Matches established UX patterns.
+5.  **Visuals:** The `CheckCircle` correctly replaces the unread dot, providing a clean selection state.
+6.  **Group Ordering:** Verified that groups sort by `max(sentAt)`. I extracted this logic into `InboxRepository.groupItemsBySender` and added `InboxGroupingTest.kt` to verify the sort order (passed).
+7.  **Accidentally-shipped files:** Confirmed that `.gradle-user-home/` is in `.gitignore` and no longer tracked by git.
+
+### Changes made during review
+-   **Refactored** `GroupedBySenderList` logic into `InboxRepository.groupItemsBySender` to make it testable and separate from Compose.
+-   **Added** `android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxGroupingTest.kt` to verify the sender group sort order.
+
+### Recommendation
+**Greenlight.** The implementation is idiomatic, efficient, and well-integrated into the existing CAS sync and search patterns. The next step is final triad summary and landing the rolled-up commit.

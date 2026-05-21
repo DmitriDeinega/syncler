@@ -75,7 +75,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -85,6 +89,7 @@ import org.json.JSONObject
 class InboxViewModel @Inject constructor(
     private val repository: InboxRepository,
     private val userState: UserStateRepository,
+    private val session: app.syncler.core.auth.Session,
 ) : ViewModel() {
 
     private val _refreshing = MutableStateFlow(false)
@@ -131,6 +136,29 @@ class InboxViewModel @Inject constructor(
             userState.pull()
             userState.flushPendingPush()
         }
+
+        // M11.7 fix-up (review 44, Codex BLOCKER): InboxViewModel is
+        // activity-scoped, so selection / collapsed-senders / group mode /
+        // search / archive-open state survives the AuthScreen <-> InboxScreen
+        // switch when the user logs out and a different user logs in. Mirror
+        // the UserStateRepository observer pattern: collect sessionState,
+        // drop the initial emission, clear UI state on transition to locked.
+        session.sessionState
+            .map { it.isUnlocked }
+            .distinctUntilChanged()
+            .drop(1)
+            .onEach { unlocked -> if (!unlocked) clearUiState() }
+            .launchIn(viewModelScope)
+    }
+
+    private fun clearUiState() {
+        _selectedId.value = null
+        _showArchive.value = false
+        _searchQuery.value = ""
+        _searchActive.value = false
+        _selectedIds.value = emptySet()
+        _collapsedSenders.value = emptySet()
+        _groupMode.value = GroupMode.Chronological
     }
 
     fun refresh() {
@@ -574,11 +602,7 @@ private fun GroupedBySenderList(
     onSenderToggle: (String) -> Unit,
 ) {
     val groups = remember(items) {
-        items.groupBy { it.senderId }
-            .toList()
-            .sortedByDescending { (_, list) ->
-                list.maxOfOrNull { runCatching { Instant.parse(it.sentAt) }.getOrNull()?.toEpochMilli() ?: 0L } ?: 0L
-            }
+        InboxRepository.groupItemsBySender(items)
     }
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         groups.forEach { (senderId, group) ->
@@ -749,13 +773,15 @@ private fun InboxRow(
             verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Leading affordance: selection check OR unread dot. Always
-            // reserves the same horizontal slot so row geometry doesn't
-            // jump as selection or read state changes.
+            // Leading affordance: selection check OR unread dot. Reserves
+            // a 24dp slot so the row geometry stays stable across read /
+            // unread / selected transitions, and the check icon renders at
+            // a real Material icon size instead of being crammed into the
+            // 8dp dot footprint (review 44, Codex).
             Box(
                 modifier = Modifier
-                    .padding(top = 6.dp)
-                    .size(UNREAD_DOT_SIZE),
+                    .padding(top = 4.dp)
+                    .size(LEADING_AFFORDANCE_SIZE),
                 contentAlignment = Alignment.Center,
             ) {
                 when {
@@ -1063,3 +1089,4 @@ private fun formatValue(value: Any?): String = when (value) {
 
 private const val POLL_INTERVAL_MS = 15_000L
 private val UNREAD_DOT_SIZE = 8.dp
+private val LEADING_AFFORDANCE_SIZE = 24.dp

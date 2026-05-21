@@ -1,0 +1,2877 @@
+Reading additional input from stdin...
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, C:\Users\Dima\.codex\memories]
+reasoning effort: high
+reasoning summaries: none
+session id: 019e4916-84cf-7cd1-b32a-d6131db25a36
+--------
+user
+# Review 44 — Phase 7: multi-select + group-by-sender
+
+Shipped commit `M11.7` (head). Closes the last two items from the user
+feedback that drove M11.6/M11.7: multi-select via long-press with
+bulk Archive / Delete, and a top-app-bar toggle between chronological
+(date buckets) and grouped-by-sender (collapsible sections).
+
+## What to pressure-test
+
+### Multi-select
+
+1. **Selection state and back nav.** Long-press → enters selection
+   mode. Tap toggles in/out. Cancel button OR system back clears the
+   selection (gated `BackHandler(enabled = selectionMode)`). When the
+   user enters selection mode then taps Senders tab on the bottom
+   nav and returns, selection persists (ViewModel-scoped). Is that
+   the right behavior or should switching tabs clear?
+
+2. **Selection vs the other top-bar modes.** Top-bar precedence in
+   `InboxScreen` is `when { selectionMode -> ...; searchActive ->
+   ...; else -> normal }`. If the user enters search, types a query,
+   then long-presses a filtered row, selection takes over and the
+   search bar disappears. Returning from selection via the close
+   button drops back to the normal top-bar, not back into search.
+   Is that right, or should selection over search return to search?
+
+3. **Bulk push performance.** `markManyArchived` / `markManyDeleted`
+   each do one `mutateLocal` + one `push()`. With 50 selected items
+   the push payload still grows by 50 entries (each ~80 bytes
+   serialized). Within the 2KB cap-free area for that list. Fine.
+
+4. **Confirmation dialog only on delete, not on archive.** Archive
+   is reversible (via the detail-view unarchive icon); delete is
+   not. So no confirm for archive, yes for delete. Matches Gmail/
+   Apple Mail behavior. Confirm OK?
+
+5. **Selected-row visual.** `secondaryContainer` surface tint +
+   selection-check icon in the leading slot. The unread dot is
+   suppressed while selected (the user knows about the read state
+   via the title weight; the dot would compete with the check icon
+   for the same 8dp slot). Acceptable, or should the dot show
+   alongside the check?
+
+### Group-by-sender
+
+6. **Group ordering.** Sections sort by max(sentAt) within the
+   group — most-recently-active sender at the top. Items inside
+   each section are newest-first. Edge case: if a sender's
+   most-recent item is older than another sender's first item,
+   the order can feel inconsistent ("why is Lottery at the top
+   when its only card was 3 days ago and TradingBot just sent one
+   2 minutes ago?"). The implementation IS doing the right thing
+   (TradingBot would be on top in that scenario); the call-out is
+   that the user may not initially understand the section sort.
+   Worth a hint in the section header or an alternate sort
+   (alphabetical by sender name)?
+
+7. **Collapse state.** `_collapsedSenders: Set<String>` lives in
+   the VM. Cleared automatically when the user logs out (via
+   the `UserStateRepository.clearInternal` observer? actually no —
+   the collapsed set is purely UI state in InboxViewModel and
+   doesn't follow the user). New user logs in → empty set. Fine
+   for V1.
+
+8. **Empty/loading/search interactions with group mode.** Search
+   is applied BEFORE grouping (filter then group). If the user
+   has BySender selected and searches, results are grouped by
+   sender within the search results — sections might have only
+   1 item each. Acceptable, or should search force chronological?
+
+### Tests
+
+9. **No new unit tests in this commit.** The bulk repository
+   helpers are thin wrappers around the already-tested single
+   helpers, and the grouping logic is a transient `groupBy +
+   sortBy` in a Composable that's hard to test without
+   Compose-test infrastructure. Is that scope cut acceptable, or
+   would you want a test for `GroupedBySenderList`'s sort order
+   specifically?
+
+### Accidentally-shipped files
+
+10. The M11.6 commit accidentally captured `android/.gradle-user-
+    home/wrapper/dists/...zip.{lck,part}` from Codex's sandbox
+    Gradle attempt. M11.6 amend removed them and added
+    `.gradle-user-home/` to `.gitignore`. Spot check the
+    repository for any other inadvertent additions.
+
+## What's NOT in scope
+
+- Persisted group-mode / collapsed-senders across process restart
+- Per-sender mute (different from archive — "stop showing me cards
+  from this sender entirely")
+- Search-while-grouped UI polish (search-filter-results-then-group
+  is the current behavior; an opt-out to flatten when searching
+  might be nice)
+- Swipe-to-archive gesture for the chronological view
+
+## Output
+
+This is the last user-feedback-driven UX phase. If you greenlight,
+the next thing is just polish + final triad summary across
+M11.6 + M11.7 before this lands as a single rolled-up commit
+in the history.
+codex
+I’ll review this as a code review: first check the M11.7 diff and repo status for stray files, then inspect the selection/grouping implementation paths and any test coverage risk. After that I’ll give findings first, with direct file references.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "selectionMode|selected|BackHandler|GroupedBySender|BySender|collapsedSenders|markManyArchived|markManyDeleted|groupBy|Search" -S .' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline --decorate HEAD' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --name-only --format= HEAD' in D:\Projects\syncler
+ succeeded in 361ms:
+ca010ee (HEAD -> master) M11.7: multi-select + group-by-sender
+ .../app/syncler/feature/inbox/InboxScreen.kt       | 304 +++++++++++++++++++--
+ .../syncler/feature/inbox/UserStateRepository.kt   |  13 +
+ 2 files changed, 298 insertions(+), 19 deletions(-)
+
+ succeeded in 365ms:
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt
+
+ succeeded in 373ms:
+?? .triad/44-codex-review-log.txt
+?? .triad/44-codex-review.txt
+?? .triad/44-phase7-review-prompt.md
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+2026-05-21T05:51:22.026195Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.9 seconds
+Output:
+.\android\app\src\main\kotlin\app\syncler\android\ui\AuthScreen.kt:93:        TabRow(selectedTabIndex = mode.ordinal) {
+.\android\app\src\main\kotlin\app\syncler\android\ui\AuthScreen.kt:96:                    selected = mode == tabMode,
+.\android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:69:                    selected = tab == TopLevelScreen.Inbox,
+.\android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:75:                    selected = tab == TopLevelScreen.Senders,
+.\android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:81:                    selected = tab == TopLevelScreen.Settings,
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:13:class InboxSearchTest {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:127:    suspend fun markManyArchived(messageIds: Collection<String>) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:172:    suspend fun markManyDeleted(messageIds: Collection<String>) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:6:import androidx.activity.compose.BackHandler
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:34:import androidx.compose.material.icons.filled.Search
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:105:    private val _selectedId = MutableStateFlow<String?>(null)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:106:    val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:116:    fun setSearch(q: String) { _searchQuery.value = q }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:120:    fun setSearchActive(active: Boolean) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:150:        _selectedId.value = itemId
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:156:    fun closeDetail() { _selectedId.value = null }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:198:    private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:199:    val selectedIds: StateFlow<Set<String>> = _selectedIds.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:200:    val selectionMode: StateFlow<Boolean> = _selectedIds
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:205:        _selectedIds.value = _selectedIds.value.let {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:210:    fun clearSelection() { _selectedIds.value = emptySet() }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:213:        val ids = _selectedIds.value
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:215:        viewModelScope.launch { userState.markManyArchived(ids) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:220:        val ids = _selectedIds.value
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:222:        viewModelScope.launch { userState.markManyDeleted(ids) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:229:     * BySender groups consecutive items per sender with collapsible section
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:236:            GroupMode.Chronological -> GroupMode.BySender
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:237:            GroupMode.BySender -> GroupMode.Chronological
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:241:    /** Set of senderIds whose group section is collapsed (BySender mode). */
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:242:    private val _collapsedSenders = MutableStateFlow<Set<String>>(emptySet())
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:243:    val collapsedSenders: StateFlow<Set<String>> = _collapsedSenders.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:245:        _collapsedSenders.value = _collapsedSenders.value.let {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:251:enum class GroupMode { Chronological, BySender }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:261:    val selectedId by viewModel.selectedId.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:266:    val selectedIds by viewModel.selectedIds.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:267:    val selectionMode by viewModel.selectionMode.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:269:    val collapsedSenders by viewModel.collapsedSenders.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:284:    val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:285:    if (selectedItem != null) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:287:            item = selectedItem,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:289:            isArchived = selectedItem.id in archivedMessageIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:290:            onArchive = { viewModel.archive(selectedItem.id) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:291:            onUnarchive = { viewModel.unarchive(selectedItem.id) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:292:            onDelete = { viewModel.delete(selectedItem.id) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:313:    BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:318:                selectionMode -> SelectionTopBar(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:319:                    count = selectedIds.size,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:324:                searchActive -> InboxSearchAppBar(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:326:                    onQueryChange = viewModel::setSearch,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:327:                    onClose = { viewModel.setSearchActive(false) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:337:                        IconButton(onClick = { viewModel.setSearchActive(true) }) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:338:                            Icon(Icons.Filled.Search, contentDescription = "Search")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:344:                                    GroupMode.BySender -> Icons.AutoMirrored.Filled.List
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:348:                                    GroupMode.BySender -> "Show chronological"
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:364:            // Active inbox = items minus archived. Search filters this set
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:375:                if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:389:                groupMode == GroupMode.BySender -> GroupedBySenderList(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:392:                    selectedIds = selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:393:                    collapsedSenders = collapsedSenders,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:401:                    selectedIds = selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:436:        title = { Text("$count selected") },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:444:                Icon(Icons.Filled.Archive, contentDescription = "Archive selected")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:447:                Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:455:private fun InboxSearchAppBar(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:467:    BackHandler(onBack = onClose)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:474:                placeholder = { Text("Search inbox") },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:527:    selectedIds: Set<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:533:        items.groupBy { item ->
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:551:                    isSelected = item.id in selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:561: * BySender layout: items grouped by senderId with collapsible section
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:567:private fun GroupedBySenderList(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:570:    selectedIds: Set<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:571:    collapsedSenders: Set<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:577:        items.groupBy { it.senderId }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:585:            val collapsed = senderId in collapsedSenders
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:600:                        isSelected = item.id in selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:665:    BackHandler(onBack = onBack)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:850:    BackHandler(onBack = onBack)
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ exited 1 in 860ms:
+.\android\app\src\main\kotlin\app\syncler\android\ui\AuthScreen.kt:93:        TabRow(selectedTabIndex = mode.ordinal) {
+.\android\app\src\main\kotlin\app\syncler\android\ui\AuthScreen.kt:96:                    selected = mode == tabMode,
+.\android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:69:                    selected = tab == TopLevelScreen.Inbox,
+.\android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:75:                    selected = tab == TopLevelScreen.Senders,
+.\android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:81:                    selected = tab == TopLevelScreen.Settings,
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:13:class InboxSearchTest {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:127:    suspend fun markManyArchived(messageIds: Collection<String>) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:172:    suspend fun markManyDeleted(messageIds: Collection<String>) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:6:import androidx.activity.compose.BackHandler
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:34:import androidx.compose.material.icons.filled.Search
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:105:    private val _selectedId = MutableStateFlow<String?>(null)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:106:    val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:116:    fun setSearch(q: String) { _searchQuery.value = q }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:120:    fun setSearchActive(active: Boolean) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:150:        _selectedId.value = itemId
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:156:    fun closeDetail() { _selectedId.value = null }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:198:    private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:199:    val selectedIds: StateFlow<Set<String>> = _selectedIds.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:200:    val selectionMode: StateFlow<Boolean> = _selectedIds
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:205:        _selectedIds.value = _selectedIds.value.let {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:210:    fun clearSelection() { _selectedIds.value = emptySet() }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:213:        val ids = _selectedIds.value
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:215:        viewModelScope.launch { userState.markManyArchived(ids) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:220:        val ids = _selectedIds.value
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:222:        viewModelScope.launch { userState.markManyDeleted(ids) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:229:     * BySender groups consecutive items per sender with collapsible section
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:236:            GroupMode.Chronological -> GroupMode.BySender
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:237:            GroupMode.BySender -> GroupMode.Chronological
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:241:    /** Set of senderIds whose group section is collapsed (BySender mode). */
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:242:    private val _collapsedSenders = MutableStateFlow<Set<String>>(emptySet())
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:243:    val collapsedSenders: StateFlow<Set<String>> = _collapsedSenders.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:245:        _collapsedSenders.value = _collapsedSenders.value.let {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:251:enum class GroupMode { Chronological, BySender }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:261:    val selectedId by viewModel.selectedId.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:266:    val selectedIds by viewModel.selectedIds.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:267:    val selectionMode by viewModel.selectionMode.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:269:    val collapsedSenders by viewModel.collapsedSenders.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:284:    val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:285:    if (selectedItem != null) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:287:            item = selectedItem,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:289:            isArchived = selectedItem.id in archivedMessageIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:290:            onArchive = { viewModel.archive(selectedItem.id) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:291:            onUnarchive = { viewModel.unarchive(selectedItem.id) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:292:            onDelete = { viewModel.delete(selectedItem.id) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:313:    BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:318:                selectionMode -> SelectionTopBar(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:319:                    count = selectedIds.size,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:324:                searchActive -> InboxSearchAppBar(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:326:                    onQueryChange = viewModel::setSearch,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:327:                    onClose = { viewModel.setSearchActive(false) },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:337:                        IconButton(onClick = { viewModel.setSearchActive(true) }) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:338:                            Icon(Icons.Filled.Search, contentDescription = "Search")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:344:                                    GroupMode.BySender -> Icons.AutoMirrored.Filled.List
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:348:                                    GroupMode.BySender -> "Show chronological"
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:364:            // Active inbox = items minus archived. Search filters this set
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:375:                if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:389:                groupMode == GroupMode.BySender -> GroupedBySenderList(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:392:                    selectedIds = selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:393:                    collapsedSenders = collapsedSenders,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:401:                    selectedIds = selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:436:        title = { Text("$count selected") },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:444:                Icon(Icons.Filled.Archive, contentDescription = "Archive selected")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:447:                Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:455:private fun InboxSearchAppBar(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:467:    BackHandler(onBack = onClose)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:474:                placeholder = { Text("Search inbox") },
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:527:    selectedIds: Set<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:533:        items.groupBy { item ->
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:551:                    isSelected = item.id in selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:561: * BySender layout: items grouped by senderId with collapsible section
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:567:private fun GroupedBySenderList(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:570:    selectedIds: Set<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:571:    collapsedSenders: Set<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:577:        items.groupBy { it.senderId }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:585:            val collapsed = senderId in collapsedSenders
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:600:                        isSelected = item.id in selectedIds,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:665:    BackHandler(onBack = onBack)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:850:    BackHandler(onBack = onBack)
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+codex
+The head commit only touches `InboxScreen.kt` and `UserStateRepository.kt`. I also see three untracked `.triad/44-*` review artifacts and a set of inaccessible `server/pytest-cache-files-*` directories affecting broad searches; I’ll separate those from tracked commit review and check whether anything generated is tracked.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff HEAD''^ HEAD -- android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff HEAD''^ HEAD -- android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git ls-files | rg "(''^|/)('"\\.gradle-user-home|\\.gradle|build|\\.zip\\.(lck|part)"'$|wrapper/dists)"' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path .gitignore' in D:\Projects\syncler
+ succeeded in 299ms:
+diff --git a/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt b/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
+index 2ac975e..f6a63b9 100644
+--- a/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
++++ b/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
+@@ -5,6 +5,8 @@ import android.webkit.WebSettings
+ import android.webkit.WebView
+ import androidx.activity.compose.BackHandler
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -20,9 +22,14 @@ import androidx.compose.foundation.lazy.items
+ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.ArrowBack
++import androidx.compose.material.icons.automirrored.filled.List
++import androidx.compose.material.icons.automirrored.filled.Sort
+ import androidx.compose.material.icons.filled.Archive
++import androidx.compose.material.icons.filled.CheckCircle
+ import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.Delete
++import androidx.compose.material.icons.filled.KeyboardArrowDown
++import androidx.compose.material.icons.filled.KeyboardArrowRight
+ import androidx.compose.material.icons.filled.Refresh
+ import androidx.compose.material.icons.filled.Search
+ import androidx.compose.material.icons.filled.Unarchive
+@@ -180,8 +187,69 @@ class InboxViewModel @Inject constructor(
+     val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
+     fun openArchive() { _showArchive.value = true }
+     fun closeArchive() { _showArchive.value = false }
++
++    // ---------- M11.7: multi-select ----------
++    /**
++     * Selection mode is entered by long-pressing a row. While active, rows
++     * toggle on tap (instead of opening detail), the top-app-bar swaps to
++     * a selection bar with bulk actions, and back exits selection without
++     * navigating away.
++     */
++    private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
++    val selectedIds: StateFlow<Set<String>> = _selectedIds.asStateFlow()
++    val selectionMode: StateFlow<Boolean> = _selectedIds
++        .map { it.isNotEmpty() }
++        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
++
++    fun toggleSelect(itemId: String) {
++        _selectedIds.value = _selectedIds.value.let {
++            if (itemId in it) it - itemId else it + itemId
++        }
++    }
++
++    fun clearSelection() { _selectedIds.value = emptySet() }
++
++    fun archiveSelected() {
++        val ids = _selectedIds.value
++        if (ids.isEmpty()) return
++        viewModelScope.launch { userState.markManyArchived(ids) }
++        clearSelection()
++    }
++
++    fun deleteSelected() {
++        val ids = _selectedIds.value
++        if (ids.isEmpty()) return
++        viewModelScope.launch { userState.markManyDeleted(ids) }
++        clearSelection()
++    }
++
++    // ---------- M11.7: group-by-sender + collapse ----------
++    /**
++     * Inbox layout mode. Defaults to chronological with date buckets;
++     * BySender groups consecutive items per sender with collapsible section
++     * headers. The toggle lives in the top-app-bar.
++     */
++    private val _groupMode = MutableStateFlow(GroupMode.Chronological)
++    val groupMode: StateFlow<GroupMode> = _groupMode.asStateFlow()
++    fun cycleGroupMode() {
++        _groupMode.value = when (_groupMode.value) {
++            GroupMode.Chronological -> GroupMode.BySender
++            GroupMode.BySender -> GroupMode.Chronological
++        }
++    }
++
++    /** Set of senderIds whose group section is collapsed (BySender mode). */
++    private val _collapsedSenders = MutableStateFlow<Set<String>>(emptySet())
++    val collapsedSenders: StateFlow<Set<String>> = _collapsedSenders.asStateFlow()
++    fun toggleSenderCollapse(senderId: String) {
++        _collapsedSenders.value = _collapsedSenders.value.let {
++            if (senderId in it) it - senderId else it + senderId
++        }
++    }
+ }
+ 
++enum class GroupMode { Chronological, BySender }
++
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+ fun InboxScreen(
+@@ -195,6 +263,10 @@ fun InboxScreen(
+     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
+     val deletedMessageIds by viewModel.deletedMessageIds.collectAsState()
+     val showArchive by viewModel.showArchive.collectAsState()
++    val selectedIds by viewModel.selectedIds.collectAsState()
++    val selectionMode by viewModel.selectionMode.collectAsState()
++    val groupMode by viewModel.groupMode.collectAsState()
++    val collapsedSenders by viewModel.collapsedSenders.collectAsState()
+     val searchQuery by viewModel.searchQuery.collectAsState()
+     val searchActive by viewModel.searchActive.collectAsState()
+ 
+@@ -235,17 +307,26 @@ fun InboxScreen(
+         return
+     }
+ 
++    // Android back exits selection mode before any other navigation. This is
++    // the standard "Gmail / Apple Mail" expectation — back from a selection
++    // should clear the selection, not leave the screen.
++    BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
+     Scaffold(
+         modifier = modifier,
+         topBar = {
+-            if (searchActive) {
+-                InboxSearchAppBar(
++            when {
++                selectionMode -> SelectionTopBar(
++                    count = selectedIds.size,
++                    onClose = viewModel::clearSelection,
++                    onArchive = viewModel::archiveSelected,
++                    onDelete = viewModel::deleteSelected,
++                )
++                searchActive -> InboxSearchAppBar(
+                     query = searchQuery,
+                     onQueryChange = viewModel::setSearch,
+                     onClose = { viewModel.setSearchActive(false) },
+                 )
+-            } else {
+-                TopAppBar(
++                else -> TopAppBar(
+                     title = { Text("Inbox") },
+                     actions = {
+                         if (refreshing) {
+@@ -256,6 +337,18 @@ fun InboxScreen(
+                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
+                             Icon(Icons.Filled.Search, contentDescription = "Search")
+                         }
++                        IconButton(onClick = viewModel::cycleGroupMode) {
++                            Icon(
++                                when (groupMode) {
++                                    GroupMode.Chronological -> Icons.AutoMirrored.Filled.Sort
++                                    GroupMode.BySender -> Icons.AutoMirrored.Filled.List
++                                },
++                                contentDescription = when (groupMode) {
++                                    GroupMode.Chronological -> "Group by sender"
++                                    GroupMode.BySender -> "Show chronological"
++                                },
++                            )
++                        }
+                         IconButton(onClick = { viewModel.refresh() }) {
+                             Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                         }
+@@ -278,6 +371,10 @@ fun InboxScreen(
+             val filtered = remember(activeItems, searchQuery) {
+                 if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+             }
++            val onRowClick: (String) -> Unit = { id ->
++                if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
++            }
++            val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
+             when {
+                 activeItems.isEmpty() -> Text(
+                     "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+@@ -289,16 +386,70 @@ fun InboxScreen(
+                     modifier = Modifier.padding(top = 24.dp),
+                     style = MaterialTheme.typography.bodyMedium,
+                 )
++                groupMode == GroupMode.BySender -> GroupedBySenderList(
++                    items = filtered,
++                    readMessageIds = readMessageIds,
++                    selectedIds = selectedIds,
++                    collapsedSenders = collapsedSenders,
++                    onItemClick = onRowClick,
++                    onItemLongClick = onRowLongClick,
++                    onSenderToggle = viewModel::toggleSenderCollapse,
++                )
+                 else -> BucketedInboxList(
+                     items = filtered,
+                     readMessageIds = readMessageIds,
+-                    onItemClick = viewModel::open,
++                    selectedIds = selectedIds,
++                    onItemClick = onRowClick,
++                    onItemLongClick = onRowLongClick,
+                 )
+             }
+         }
+     }
+ }
+ 
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++private fun SelectionTopBar(
++    count: Int,
++    onClose: () -> Unit,
++    onArchive: () -> Unit,
++    onDelete: () -> Unit,
++) {
++    var confirmDelete by remember { mutableStateOf(false) }
++    if (confirmDelete) {
++        AlertDialog(
++            onDismissRequest = { confirmDelete = false },
++            title = { Text("Delete $count message${if (count == 1) "" else "s"}?") },
++            text = { Text("They'll disappear from inbox and archive on all your devices. This can't be undone.") },
++            confirmButton = {
++                Button(onClick = {
++                    confirmDelete = false
++                    onDelete()
++                }) { Text("Delete") }
++            },
++            dismissButton = {
++                OutlinedButton(onClick = { confirmDelete = false }) { Text("Cancel") }
++            },
++        )
++    }
++    TopAppBar(
++        title = { Text("$count selected") },
++        navigationIcon = {
++            IconButton(onClick = onClose) {
++                Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
++            }
++        },
++        actions = {
++            IconButton(onClick = onArchive) {
++                Icon(Icons.Filled.Archive, contentDescription = "Archive selected")
++            }
++            IconButton(onClick = { confirmDelete = true }) {
++                Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
++            }
++        },
++    )
++}
++
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+ private fun InboxSearchAppBar(
+@@ -373,7 +524,9 @@ internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
+ private fun BucketedInboxList(
+     items: List<InboxItem>,
+     readMessageIds: Set<String>,
++    selectedIds: Set<String>,
+     onItemClick: (String) -> Unit,
++    onItemLongClick: (String) -> Unit,
+ ) {
+     val today = LocalDate.now()
+     val buckets = remember(items, today) {
+@@ -395,13 +548,92 @@ private fun BucketedInboxList(
+                 InboxRow(
+                     item = item,
+                     isRead = item.id in readMessageIds,
++                    isSelected = item.id in selectedIds,
+                     onClick = { onItemClick(item.id) },
++                    onLongClick = { onItemLongClick(item.id) },
++                )
++            }
++        }
++    }
++}
++
++/**
++ * BySender layout: items grouped by senderId with collapsible section
++ * headers. Sections sort by the most-recent sentAt in each group so the
++ * most-active sender bubbles to the top. Within a section, items are
++ * newest-first (same as chronological).
++ */
++@Composable
++private fun GroupedBySenderList(
++    items: List<InboxItem>,
++    readMessageIds: Set<String>,
++    selectedIds: Set<String>,
++    collapsedSenders: Set<String>,
++    onItemClick: (String) -> Unit,
++    onItemLongClick: (String) -> Unit,
++    onSenderToggle: (String) -> Unit,
++) {
++    val groups = remember(items) {
++        items.groupBy { it.senderId }
++            .toList()
++            .sortedByDescending { (_, list) ->
++                list.maxOfOrNull { runCatching { Instant.parse(it.sentAt) }.getOrNull()?.toEpochMilli() ?: 0L } ?: 0L
++            }
++    }
++    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
++        groups.forEach { (senderId, group) ->
++            val collapsed = senderId in collapsedSenders
++            val senderName = group.first().senderName
++            item(key = "sender-header-$senderId") {
++                SenderSectionHeader(
++                    senderName = senderName,
++                    count = group.size,
++                    collapsed = collapsed,
++                    onToggle = { onSenderToggle(senderId) },
+                 )
+             }
++            if (!collapsed) {
++                items(group, key = { it.id }) { item ->
++                    InboxRow(
++                        item = item,
++                        isRead = item.id in readMessageIds,
++                        isSelected = item.id in selectedIds,
++                        onClick = { onItemClick(item.id) },
++                        onLongClick = { onItemLongClick(item.id) },
++                    )
++                }
++            }
+         }
+     }
+ }
+ 
++@Composable
++private fun SenderSectionHeader(
++    senderName: String,
++    count: Int,
++    collapsed: Boolean,
++    onToggle: () -> Unit,
++) {
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .clickable(onClick = onToggle)
++            .padding(top = 12.dp, bottom = 4.dp),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        Icon(
++            if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
++            contentDescription = if (collapsed) "Expand" else "Collapse",
++        )
++        Text(
++            "$senderName  ($count)",
++            style = MaterialTheme.typography.titleSmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(start = 4.dp),
++        )
++    }
++}
++
+ private enum class DateBucket(val order: Int, val label: String) {
+     Today(0, "Today"),
+     Yesterday(1, "Yesterday"),
+@@ -457,7 +689,11 @@ private fun ArchiveScreen(
+                         InboxRow(
+                             item = item,
+                             isRead = item.id in readMessageIds,
++                            // V1 archive view doesn't support multi-select —
++                            // unarchive is per-card from the detail view.
++                            isSelected = false,
+                             onClick = { onItemClick(item.id) },
++                            onLongClick = { onItemClick(item.id) },
+                         )
+                     }
+                 }
+@@ -477,37 +713,67 @@ private fun ArchiveScreen(
+  * blob — opening on one phone marks the row read on every device on the
+  * next pull.
+  */
++@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+ @Composable
+-private fun InboxRow(item: InboxItem, isRead: Boolean, onClick: () -> Unit) {
++private fun InboxRow(
++    item: InboxItem,
++    isRead: Boolean,
++    isSelected: Boolean,
++    onClick: () -> Unit,
++    onLongClick: () -> Unit,
++) {
+     val preview = item.hostPreview
+     val titleStyle = if (isRead) {
+         MaterialTheme.typography.titleMedium
+     } else {
+         MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+     }
++    val cardColors = if (isSelected) {
++        androidx.compose.material3.CardDefaults.cardColors(
++            containerColor = MaterialTheme.colorScheme.secondaryContainer,
++        )
++    } else {
++        androidx.compose.material3.CardDefaults.cardColors()
++    }
+     Card(
+-        modifier = Modifier.fillMaxWidth(),
+-        onClick = onClick,
++        modifier = Modifier
++            .fillMaxWidth()
++            .combinedClickable(
++                onClick = onClick,
++                onLongClick = onLongClick,
++            ),
++        colors = cardColors,
+     ) {
+         Row(
+             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+             verticalAlignment = Alignment.Top,
+             horizontalArrangement = Arrangement.spacedBy(12.dp),
+         ) {
+-            // Unread dot: leading affordance, reserves space when read so the
+-            // row geometry stays stable across the state transition.
++            // Leading affordance: selection check OR unread dot. Always
++            // reserves the same horizontal slot so row geometry doesn't
++            // jump as selection or read state changes.
+             Box(
+                 modifier = Modifier
+                     .padding(top = 6.dp)
+-                    .size(UNREAD_DOT_SIZE)
+-                    .then(
+-                        if (isRead) Modifier
+-                        else Modifier.background(
+-                            color = MaterialTheme.colorScheme.primary,
+-                            shape = CircleShape,
+-                        )
+-                    ),
+-            )
++                    .size(UNREAD_DOT_SIZE),
++                contentAlignment = Alignment.Center,
++            ) {
++                when {
++                    isSelected -> Icon(
++                        Icons.Filled.CheckCircle,
++                        contentDescription = "Selected",
++                        tint = MaterialTheme.colorScheme.primary,
++                    )
++                    !isRead -> Box(
++                        modifier = Modifier
++                            .size(UNREAD_DOT_SIZE)
++                            .background(
++                                color = MaterialTheme.colorScheme.primary,
++                                shape = CircleShape,
++                            ),
++                    )
++                }
++            }
+             Column(
+                 modifier = Modifier.weight(1f),
+                 verticalArrangement = Arrangement.spacedBy(2.dp),
+
+ succeeded in 299ms:
+diff --git a/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt b/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt
+index 0565e74..b846583 100644
+--- a/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt
++++ b/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt
+@@ -123,6 +123,19 @@ class UserStateRepository @Inject constructor(
+         markDirtyAndPush()
+     }
+ 
++    /** Bulk archive for multi-select. Single mutation + single push. */
++    suspend fun markManyArchived(messageIds: Collection<String>) {
++        if (messageIds.isEmpty()) return
++        val now = Instant.now(clock).toString()
++        val ids = messageIds.toSet()
++        mutateLocal { current ->
++            val keep = current.archivedMessages.filterNot { it.messageId in ids }
++            val newEntries = ids.map { ArchivedMessageEntry(it, now) }
++            current.copy(archivedMessages = keep + newEntries)
++        }
++        markDirtyAndPush()
++    }
++
+     /**
+      * Removes the message from the archive set, returning it to the active
+      * inbox. Note: this is a local "forget the archive mark" operation, not
+
+ succeeded in 310ms:
+# Claude Code local state
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+dist/
+
+# Android / Gradle
+.gradle/
+build/
+captures/
+*.iml
+*.ipr
+*.iws
+local.properties
+*.jks
+*.keystore
+release/
+
+# IDE / editor
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+*.swp
+*.swo
+*~
+.fleet/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / env
+.env
+.env.local
+*.pem
+*.key
+!*.example.pem
+!*.example.key
+
+# Misc
+*.log
+*.tmp
+*.bak
+.cache/
+
+ succeeded in 354ms:
+android/app/build.gradle.kts
+android/build.gradle.kts
+android/core/auth/build.gradle.kts
+android/core/crypto/build.gradle.kts
+android/core/network/build.gradle.kts
+android/core/push/build.gradle.kts
+android/core/storage/build.gradle.kts
+android/feature/inbox/build.gradle.kts
+android/feature/pairing/build.gradle.kts
+android/feature/plugin-host/build.gradle.kts
+android/feature/settings/build.gradle.kts
+sdk-plugin/examples/minimal/build.sh
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 1 -and $i -le 230) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if (($i -ge 80 -and $i -le 260) -or ($i -ge 300 -and $i -le 410) -or ($i -ge 520 -and $i -le 625) -or ($i -ge 713 -and $i -le 790)) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path android -Force | Select-Object Name,Mode,Length' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-ChildItem -Path android -Recurse -Force -Filter '.gitignore' | ForEach-Object { "'$_.FullName }' in D:\Projects\syncler
+ succeeded in 283ms:
+   1: package app.syncler.feature.inbox
+   2: 
+   3: import android.content.Context
+   4: import android.content.SharedPreferences
+   5: import android.util.Base64
+   6: import androidx.security.crypto.EncryptedSharedPreferences
+   7: import androidx.security.crypto.MasterKey
+   8: import app.syncler.core.auth.Session
+   9: import app.syncler.core.crypto.Aead
+  10: import app.syncler.core.network.StatePutRequestDto
+  11: import app.syncler.core.network.SynclerApi
+  12: import app.syncler.core.storage.ArchivedMessageEntry
+  13: import app.syncler.core.storage.DeletedMessageEntry
+  14: import app.syncler.core.storage.EncryptedUserState
+  15: import app.syncler.core.storage.ReadMessageEntry
+  16: import app.syncler.core.storage.StateMerger
+  17: import dagger.hilt.android.qualifiers.ApplicationContext
+  18: import java.time.Clock
+  19: import java.time.Instant
+  20: import javax.inject.Inject
+  21: import javax.inject.Singleton
+  22: import kotlinx.coroutines.CoroutineScope
+  23: import kotlinx.coroutines.Dispatchers
+  24: import kotlinx.coroutines.SupervisorJob
+  25: import kotlinx.coroutines.flow.MutableStateFlow
+  26: import kotlinx.coroutines.flow.StateFlow
+  27: import kotlinx.coroutines.flow.asStateFlow
+  28: import kotlinx.coroutines.flow.distinctUntilChanged
+  29: import kotlinx.coroutines.flow.drop
+  30: import kotlinx.coroutines.flow.map
+  31: import kotlinx.coroutines.flow.onEach
+  32: import kotlinx.coroutines.flow.launchIn
+  33: import kotlinx.coroutines.sync.Mutex
+  34: import kotlinx.coroutines.sync.withLock
+  35: import retrofit2.HttpException
+  36: import timber.log.Timber
+  37: 
+  38: /**
+  39:  * Owns the user's [EncryptedUserState] across the app lifecycle.
+  40:  *
+  41:  *  - **Local-first:** writes go to disk immediately (encrypted at rest via
+  42:  *    EncryptedSharedPreferences); UI reactions don't wait for the network.
+  43:  *  - **M7 CAS sync:** [pull] fetches the server blob, decrypts with the
+  44:  *    user's master key, merges with local via [StateMerger], persists, and
+  45:  *    rewrites the local state. [push] encrypts the local state, PUTs to
+  46:  *    `/v1/state` with the last-known version, and on 409 conflict pulls
+  47:  *    the freshest blob, re-merges, and retries once.
+  48:  *  - **Master-key dependence:** sync no-ops when the session is locked
+  49:  *    (no master key in memory). Local writes still proceed ג€” the app
+  50:  *    works offline; pushes happen when the user next unlocks.
+  51:  *
+  52:  * Read state is the V1 primary use case. Archived state is wired through
+  53:  * the same channel for Phase 3.
+  54:  */
+  55: @Singleton
+  56: class UserStateRepository @Inject constructor(
+  57:     @ApplicationContext context: Context,
+  58:     private val api: SynclerApi,
+  59:     private val session: Session,
+  60: ) {
+  61:     // Not injected: the @Singleton has no Hilt provider for Clock. Tests use
+  62:     // the secondary constructor below to inject a fake.
+  63:     private val clock: Clock = Clock.systemUTC()
+  64:     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  65: 
+  66:     init {
+  67:         // Auto-clear local state when the session locks (logout, JWT expiry,
+  68:         // process restart without password). Without this, a subsequent
+  69:         // login on the same device would inherit the previous user's read
+  70:         // marks AND push them up to the new user's server account.
+  71:         //
+  72:         // We drop(1) so the initial Locked-at-startup emission (before any
+  73:         // login) doesn't trigger a redundant clear of the disk state we
+  74:         // just loaded ג€” clear only runs on a *transition* away from
+  75:         // unlocked.
+  76:         session.sessionState
+  77:             .map { it.isUnlocked }
+  78:             .distinctUntilChanged()
+  79:             .drop(1)
+  80:             .onEach { unlocked -> if (!unlocked) clearInternal() }
+  81:             .launchIn(scope)
+  82:     }
+  83:     private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
+  84:         context,
+  85:         PREFS_NAME,
+  86:         MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+  87:         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+  88:         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+  89:     )
+  90: 
+  91:     private val _state = MutableStateFlow(loadFromDisk())
+  92:     val state: StateFlow<EncryptedUserState> = _state.asStateFlow()
+  93: 
+  94:     private val syncMutex = Mutex()
+  95: 
+  96:     /**
+  97:      * Marks the message as read locally (immediate) and schedules a push.
+  98:      * Idempotent ג€” re-marking an already-read message refreshes the
+  99:      * timestamp, which is harmless and lets future "most-recent device"
+ 100:      * conflict resolution pick the right winner.
+ 101:      *
+ 102:      * The local mutation is atomic via [MutableStateFlow.update]: two
+ 103:      * concurrent calls cannot lose each other's entries. The disk write
+ 104:      * happens inside the same critical section as the in-memory update so
+ 105:      * a process kill mid-write doesn't expose an inconsistent state.
+ 106:      */
+ 107:     suspend fun markRead(messageId: String) {
+ 108:         val now = Instant.now(clock).toString()
+ 109:         mutateLocal { current ->
+ 110:             val others = current.readMessages.filterNot { it.messageId == messageId }
+ 111:             current.copy(readMessages = others + ReadMessageEntry(messageId, now))
+ 112:         }
+ 113:         markDirtyAndPush()
+ 114:     }
+ 115: 
+ 116:     /** Archives a message locally; pushes asynchronously. */
+ 117:     suspend fun markArchived(messageId: String) {
+ 118:         val now = Instant.now(clock).toString()
+ 119:         mutateLocal { current ->
+ 120:             val others = current.archivedMessages.filterNot { it.messageId == messageId }
+ 121:             current.copy(archivedMessages = others + ArchivedMessageEntry(messageId, now))
+ 122:         }
+ 123:         markDirtyAndPush()
+ 124:     }
+ 125: 
+ 126:     /** Bulk archive for multi-select. Single mutation + single push. */
+ 127:     suspend fun markManyArchived(messageIds: Collection<String>) {
+ 128:         if (messageIds.isEmpty()) return
+ 129:         val now = Instant.now(clock).toString()
+ 130:         val ids = messageIds.toSet()
+ 131:         mutateLocal { current ->
+ 132:             val keep = current.archivedMessages.filterNot { it.messageId in ids }
+ 133:             val newEntries = ids.map { ArchivedMessageEntry(it, now) }
+ 134:             current.copy(archivedMessages = keep + newEntries)
+ 135:         }
+ 136:         markDirtyAndPush()
+ 137:     }
+ 138: 
+ 139:     /**
+ 140:      * Removes the message from the archive set, returning it to the active
+ 141:      * inbox. Note: this is a local "forget the archive mark" operation, not
+ 142:      * a tombstone ג€” if another device has a still-current archive entry for
+ 143:      * the same message and we re-pull before pushing, the merge's
+ 144:      * max(archivedAt)-wins rule will resurrect the archive locally. V1
+ 145:      * accepts that tiny race in exchange for not encoding tombstones
+ 146:      * (which would need a separate tombstones list and explicit GC).
+ 147:      */
+ 148:     suspend fun markUnarchived(messageId: String) {
+ 149:         mutateLocal { current ->
+ 150:             current.copy(
+ 151:                 archivedMessages = current.archivedMessages.filterNot { it.messageId == messageId },
+ 152:             )
+ 153:         }
+ 154:         markDirtyAndPush()
+ 155:     }
+ 156: 
+ 157:     /**
+ 158:      * M11.6: marks a message deleted. Distinct from archive ג€” deleted
+ 159:      * messages are hidden from BOTH the inbox and the archive screen.
+ 160:      * Merge semantics are monotone (no undelete in V1) so this entry
+ 161:      * permanently wins across devices.
+ 162:      */
+ 163:     suspend fun markDeleted(messageId: String) {
+ 164:         val now = Instant.now(clock).toString()
+ 165:         mutateLocal { current ->
+ 166:             val others = current.deletedMessages.filterNot { it.messageId == messageId }
+ 167:             current.copy(deletedMessages = others + DeletedMessageEntry(messageId, now))
+ 168:         }
+ 169:         markDirtyAndPush()
+ 170:     }
+ 171: 
+ 172:     suspend fun markManyDeleted(messageIds: Collection<String>) {
+ 173:         if (messageIds.isEmpty()) return
+ 174:         val now = Instant.now(clock).toString()
+ 175:         val ids = messageIds.toSet()
+ 176:         mutateLocal { current ->
+ 177:             val keep = current.deletedMessages.filterNot { it.messageId in ids }
+ 178:             val newEntries = ids.map { DeletedMessageEntry(it, now) }
+ 179:             current.copy(deletedMessages = keep + newEntries)
+ 180:         }
+ 181:         markDirtyAndPush()
+ 182:     }
+ 183: 
+ 184:     /**
+ 185:      * Atomic local-state mutation. Holds [syncMutex] so a concurrent [pull]
+ 186:      * cannot interleave its merge between the read and the write here, and
+ 187:      * so disk persistence is also serialized.
+ 188:      */
+ 189:     private suspend fun mutateLocal(transform: (EncryptedUserState) -> EncryptedUserState) {
+ 190:         syncMutex.withLock {
+ 191:             val next = transform(_state.value)
+ 192:             _state.value = next
+ 193:             persist(next)
+ 194:         }
+ 195:     }
+ 196: 
+ 197:     private fun markDirty() {
+ 198:         prefs.edit().putBoolean(KEY_DIRTY, true).apply()
+ 199:     }
+ 200: 
+ 201:     private fun clearDirty() {
+ 202:         prefs.edit().putBoolean(KEY_DIRTY, false).apply()
+ 203:     }
+ 204: 
+ 205:     private fun isDirty(): Boolean = prefs.getBoolean(KEY_DIRTY, false)
+ 206: 
+ 207:     private suspend fun markDirtyAndPush() {
+ 208:         markDirty()
+ 209:         runCatching { push() }.onFailure {
+ 210:             // Local change still on disk + flagged dirty; flushPendingPush on
+ 211:             // next foreground/refresh will retry.
+ 212:             Timber.tag(TAG).w(it, "push failed; flagged dirty for retry")
+ 213:         }
+ 214:     }
+ 215: 
+ 216:     /**
+ 217:      * Attempts to push the local state if dirty. Called by [InboxViewModel]
+ 218:      * on init and on refresh, so a push that 409'd or hit network failure
+ 219:      * gets retried without requiring another user action.
+ 220:      */
+ 221:     suspend fun flushPendingPush(): Result<Unit> {
+ 222:         if (!isDirty()) return Result.success(Unit)
+ 223:         return push()
+ 224:     }
+ 225: 
+ 226:     /**
+ 227:      * Fetches the remote state, merges with local, persists. Safe to call
+ 228:      * on app foreground / inbox refresh. No-op when the session is locked.
+ 229:      *
+ 230:      * The entire fetch-merge-persist runs inside [syncMutex] so concurrent
+
+ succeeded in 304ms:
+  80: import kotlinx.coroutines.launch
+  81: import org.json.JSONArray
+  82: import org.json.JSONObject
+  83: 
+  84: @HiltViewModel
+  85: class InboxViewModel @Inject constructor(
+  86:     private val repository: InboxRepository,
+  87:     private val userState: UserStateRepository,
+  88: ) : ViewModel() {
+  89: 
+  90:     private val _refreshing = MutableStateFlow(false)
+  91:     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+  92:     val items: StateFlow<List<InboxItem>> = repository.items
+  93: 
+  94:     // Derived: set of message IDs already read on any of the user's devices.
+  95:     // Collected from UserStateRepository.state and exposed as a snapshot the
+  96:     // UI can pick from directly.
+  97:     val readMessageIds: StateFlow<Set<String>> = userState.state
+  98:         .map { st -> st.readMessages.map { it.messageId }.toSet() }
+  99:         .stateIn(
+ 100:             scope = viewModelScope,
+ 101:             started = SharingStarted.WhileSubscribed(5_000),
+ 102:             initialValue = userState.state.value.readMessages.map { it.messageId }.toSet(),
+ 103:         )
+ 104: 
+ 105:     private val _selectedId = MutableStateFlow<String?>(null)
+ 106:     val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+ 107: 
+ 108:     /**
+ 109:      * Host-side metadata search (M11.5). Substring match against
+ 110:      * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
+ 111:      * entirely client-side ג€” the server is content-blind. Plugin-scoped
+ 112:      * content search is V1.5 (per the consultation 35 federated-search plan).
+ 113:      */
+ 114:     private val _searchQuery = MutableStateFlow("")
+ 115:     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+ 116:     fun setSearch(q: String) { _searchQuery.value = q }
+ 117: 
+ 118:     private val _searchActive = MutableStateFlow(false)
+ 119:     val searchActive: StateFlow<Boolean> = _searchActive.asStateFlow()
+ 120:     fun setSearchActive(active: Boolean) {
+ 121:         _searchActive.value = active
+ 122:         if (!active) _searchQuery.value = ""
+ 123:     }
+ 124: 
+ 125:     init {
+ 126:         // Pull cross-device state, then retry any push that failed previously
+ 127:         // (network blip, 409 conflict that couldn't resolve in one retry,
+ 128:         // session was locked when the mark was issued, etc.). No-ops if
+ 129:         // currently locked or if no dirty changes are pending.
+ 130:         viewModelScope.launch {
+ 131:             userState.pull()
+ 132:             userState.flushPendingPush()
+ 133:         }
+ 134:     }
+ 135: 
+ 136:     fun refresh() {
+ 137:         viewModelScope.launch {
+ 138:             _refreshing.value = true
+ 139:             repository.refresh()
+ 140:             // Opportunistically pull state ג€” cheap, catches read marks
+ 141:             // pushed from another device between polls ג€” and flush any
+ 142:             // dirty local change that hasn't been pushed yet.
+ 143:             userState.pull()
+ 144:             userState.flushPendingPush()
+ 145:             _refreshing.value = false
+ 146:         }
+ 147:     }
+ 148: 
+ 149:     fun open(itemId: String) {
+ 150:         _selectedId.value = itemId
+ 151:         // Mark-read trigger: opening the detail view (the conservative trigger
+ 152:         // both Codex and Gemini argued for in review 35 ג€” scanning the list
+ 153:         // alone should not punish unread state).
+ 154:         viewModelScope.launch { userState.markRead(itemId) }
+ 155:     }
+ 156:     fun closeDetail() { _selectedId.value = null }
+ 157: 
+ 158:     val archivedMessageIds: StateFlow<Set<String>> = userState.state
+ 159:         .map { st -> st.archivedMessages.map { it.messageId }.toSet() }
+ 160:         .stateIn(
+ 161:             scope = viewModelScope,
+ 162:             started = SharingStarted.WhileSubscribed(5_000),
+ 163:             initialValue = userState.state.value.archivedMessages.map { it.messageId }.toSet(),
+ 164:         )
+ 165: 
+ 166:     val deletedMessageIds: StateFlow<Set<String>> = userState.state
+ 167:         .map { st -> st.deletedMessages.map { it.messageId }.toSet() }
+ 168:         .stateIn(
+ 169:             scope = viewModelScope,
+ 170:             started = SharingStarted.WhileSubscribed(5_000),
+ 171:             initialValue = userState.state.value.deletedMessages.map { it.messageId }.toSet(),
+ 172:         )
+ 173: 
+ 174:     fun archive(itemId: String) {
+ 175:         viewModelScope.launch { userState.markArchived(itemId) }
+ 176:     }
+ 177: 
+ 178:     fun unarchive(itemId: String) {
+ 179:         viewModelScope.launch { userState.markUnarchived(itemId) }
+ 180:     }
+ 181: 
+ 182:     fun delete(itemId: String) {
+ 183:         viewModelScope.launch { userState.markDeleted(itemId) }
+ 184:     }
+ 185: 
+ 186:     private val _showArchive = MutableStateFlow(false)
+ 187:     val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
+ 188:     fun openArchive() { _showArchive.value = true }
+ 189:     fun closeArchive() { _showArchive.value = false }
+ 190: 
+ 191:     // ---------- M11.7: multi-select ----------
+ 192:     /**
+ 193:      * Selection mode is entered by long-pressing a row. While active, rows
+ 194:      * toggle on tap (instead of opening detail), the top-app-bar swaps to
+ 195:      * a selection bar with bulk actions, and back exits selection without
+ 196:      * navigating away.
+ 197:      */
+ 198:     private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
+ 199:     val selectedIds: StateFlow<Set<String>> = _selectedIds.asStateFlow()
+ 200:     val selectionMode: StateFlow<Boolean> = _selectedIds
+ 201:         .map { it.isNotEmpty() }
+ 202:         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+ 203: 
+ 204:     fun toggleSelect(itemId: String) {
+ 205:         _selectedIds.value = _selectedIds.value.let {
+ 206:             if (itemId in it) it - itemId else it + itemId
+ 207:         }
+ 208:     }
+ 209: 
+ 210:     fun clearSelection() { _selectedIds.value = emptySet() }
+ 211: 
+ 212:     fun archiveSelected() {
+ 213:         val ids = _selectedIds.value
+ 214:         if (ids.isEmpty()) return
+ 215:         viewModelScope.launch { userState.markManyArchived(ids) }
+ 216:         clearSelection()
+ 217:     }
+ 218: 
+ 219:     fun deleteSelected() {
+ 220:         val ids = _selectedIds.value
+ 221:         if (ids.isEmpty()) return
+ 222:         viewModelScope.launch { userState.markManyDeleted(ids) }
+ 223:         clearSelection()
+ 224:     }
+ 225: 
+ 226:     // ---------- M11.7: group-by-sender + collapse ----------
+ 227:     /**
+ 228:      * Inbox layout mode. Defaults to chronological with date buckets;
+ 229:      * BySender groups consecutive items per sender with collapsible section
+ 230:      * headers. The toggle lives in the top-app-bar.
+ 231:      */
+ 232:     private val _groupMode = MutableStateFlow(GroupMode.Chronological)
+ 233:     val groupMode: StateFlow<GroupMode> = _groupMode.asStateFlow()
+ 234:     fun cycleGroupMode() {
+ 235:         _groupMode.value = when (_groupMode.value) {
+ 236:             GroupMode.Chronological -> GroupMode.BySender
+ 237:             GroupMode.BySender -> GroupMode.Chronological
+ 238:         }
+ 239:     }
+ 240: 
+ 241:     /** Set of senderIds whose group section is collapsed (BySender mode). */
+ 242:     private val _collapsedSenders = MutableStateFlow<Set<String>>(emptySet())
+ 243:     val collapsedSenders: StateFlow<Set<String>> = _collapsedSenders.asStateFlow()
+ 244:     fun toggleSenderCollapse(senderId: String) {
+ 245:         _collapsedSenders.value = _collapsedSenders.value.let {
+ 246:             if (senderId in it) it - senderId else it + senderId
+ 247:         }
+ 248:     }
+ 249: }
+ 250: 
+ 251: enum class GroupMode { Chronological, BySender }
+ 252: 
+ 253: @OptIn(ExperimentalMaterial3Api::class)
+ 254: @Composable
+ 255: fun InboxScreen(
+ 256:     modifier: Modifier = Modifier,
+ 257:     viewModel: InboxViewModel = hiltViewModel(),
+ 258: ) {
+ 259:     val items by viewModel.items.collectAsState()
+ 260:     val refreshing by viewModel.refreshing.collectAsState()
+ 300:             // archive screen shows only archived-but-not-deleted.
+ 301:             items = items.filter { it.id in archivedMessageIds && it.id !in deletedMessageIds },
+ 302:             readMessageIds = readMessageIds,
+ 303:             onBack = viewModel::closeArchive,
+ 304:             onItemClick = { id -> viewModel.open(id) },
+ 305:             modifier = modifier,
+ 306:         )
+ 307:         return
+ 308:     }
+ 309: 
+ 310:     // Android back exits selection mode before any other navigation. This is
+ 311:     // the standard "Gmail / Apple Mail" expectation ג€” back from a selection
+ 312:     // should clear the selection, not leave the screen.
+ 313:     BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
+ 314:     Scaffold(
+ 315:         modifier = modifier,
+ 316:         topBar = {
+ 317:             when {
+ 318:                 selectionMode -> SelectionTopBar(
+ 319:                     count = selectedIds.size,
+ 320:                     onClose = viewModel::clearSelection,
+ 321:                     onArchive = viewModel::archiveSelected,
+ 322:                     onDelete = viewModel::deleteSelected,
+ 323:                 )
+ 324:                 searchActive -> InboxSearchAppBar(
+ 325:                     query = searchQuery,
+ 326:                     onQueryChange = viewModel::setSearch,
+ 327:                     onClose = { viewModel.setSearchActive(false) },
+ 328:                 )
+ 329:                 else -> TopAppBar(
+ 330:                     title = { Text("Inbox") },
+ 331:                     actions = {
+ 332:                         if (refreshing) {
+ 333:                             CircularProgressIndicator(
+ 334:                                 modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
+ 335:                             )
+ 336:                         }
+ 337:                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
+ 338:                             Icon(Icons.Filled.Search, contentDescription = "Search")
+ 339:                         }
+ 340:                         IconButton(onClick = viewModel::cycleGroupMode) {
+ 341:                             Icon(
+ 342:                                 when (groupMode) {
+ 343:                                     GroupMode.Chronological -> Icons.AutoMirrored.Filled.Sort
+ 344:                                     GroupMode.BySender -> Icons.AutoMirrored.Filled.List
+ 345:                                 },
+ 346:                                 contentDescription = when (groupMode) {
+ 347:                                     GroupMode.Chronological -> "Group by sender"
+ 348:                                     GroupMode.BySender -> "Show chronological"
+ 349:                                 },
+ 350:                             )
+ 351:                         }
+ 352:                         IconButton(onClick = { viewModel.refresh() }) {
+ 353:                             Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+ 354:                         }
+ 355:                         IconButton(onClick = viewModel::openArchive) {
+ 356:                             Icon(Icons.Filled.Archive, contentDescription = "Archive")
+ 357:                         }
+ 358:                     },
+ 359:                 )
+ 360:             }
+ 361:         },
+ 362:     ) { padding ->
+ 363:         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+ 364:             // Active inbox = items minus archived. Search filters this set
+ 365:             // by matching the trimmed query against title/subtitle/summary/
+ 366:             // searchText/senderName (case-insensitive substring match ג€” host
+ 367:             // metadata only; plugin-scoped content search is V1.5).
+ 368:             val activeItems = items.filter {
+ 369:                 it.id !in archivedMessageIds && it.id !in deletedMessageIds
+ 370:             }
+ 371:             val filtered = remember(activeItems, searchQuery) {
+ 372:                 if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+ 373:             }
+ 374:             val onRowClick: (String) -> Unit = { id ->
+ 375:                 if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
+ 376:             }
+ 377:             val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
+ 378:             when {
+ 379:                 activeItems.isEmpty() -> Text(
+ 380:                     "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+ 381:                     modifier = Modifier.padding(top = 24.dp),
+ 382:                     style = MaterialTheme.typography.bodyMedium,
+ 383:                 )
+ 384:                 searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+ 385:                     "No cards match \"$searchQuery\".",
+ 386:                     modifier = Modifier.padding(top = 24.dp),
+ 387:                     style = MaterialTheme.typography.bodyMedium,
+ 388:                 )
+ 389:                 groupMode == GroupMode.BySender -> GroupedBySenderList(
+ 390:                     items = filtered,
+ 391:                     readMessageIds = readMessageIds,
+ 392:                     selectedIds = selectedIds,
+ 393:                     collapsedSenders = collapsedSenders,
+ 394:                     onItemClick = onRowClick,
+ 395:                     onItemLongClick = onRowLongClick,
+ 396:                     onSenderToggle = viewModel::toggleSenderCollapse,
+ 397:                 )
+ 398:                 else -> BucketedInboxList(
+ 399:                     items = filtered,
+ 400:                     readMessageIds = readMessageIds,
+ 401:                     selectedIds = selectedIds,
+ 402:                     onItemClick = onRowClick,
+ 403:                     onItemLongClick = onRowLongClick,
+ 404:                 )
+ 405:             }
+ 406:         }
+ 407:     }
+ 408: }
+ 409: 
+ 410: @OptIn(ExperimentalMaterial3Api::class)
+ 520:  * against the device's current local date (the row timestamp is the server's
+ 521:  * `sent_at`, which is UTC; we convert per-row to local for bucketing).
+ 522:  */
+ 523: @Composable
+ 524: private fun BucketedInboxList(
+ 525:     items: List<InboxItem>,
+ 526:     readMessageIds: Set<String>,
+ 527:     selectedIds: Set<String>,
+ 528:     onItemClick: (String) -> Unit,
+ 529:     onItemLongClick: (String) -> Unit,
+ 530: ) {
+ 531:     val today = LocalDate.now()
+ 532:     val buckets = remember(items, today) {
+ 533:         items.groupBy { item ->
+ 534:             bucketFor(item.sentAt, today)
+ 535:         }.toSortedMap(compareBy { it.order })
+ 536:     }
+ 537:     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+ 538:         buckets.forEach { (bucket, bucketItems) ->
+ 539:             item(key = "header-${bucket.name}") {
+ 540:                 Text(
+ 541:                     text = bucket.label,
+ 542:                     style = MaterialTheme.typography.titleSmall,
+ 543:                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+ 544:                     modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+ 545:                 )
+ 546:             }
+ 547:             items(bucketItems, key = { it.id }) { item ->
+ 548:                 InboxRow(
+ 549:                     item = item,
+ 550:                     isRead = item.id in readMessageIds,
+ 551:                     isSelected = item.id in selectedIds,
+ 552:                     onClick = { onItemClick(item.id) },
+ 553:                     onLongClick = { onItemLongClick(item.id) },
+ 554:                 )
+ 555:             }
+ 556:         }
+ 557:     }
+ 558: }
+ 559: 
+ 560: /**
+ 561:  * BySender layout: items grouped by senderId with collapsible section
+ 562:  * headers. Sections sort by the most-recent sentAt in each group so the
+ 563:  * most-active sender bubbles to the top. Within a section, items are
+ 564:  * newest-first (same as chronological).
+ 565:  */
+ 566: @Composable
+ 567: private fun GroupedBySenderList(
+ 568:     items: List<InboxItem>,
+ 569:     readMessageIds: Set<String>,
+ 570:     selectedIds: Set<String>,
+ 571:     collapsedSenders: Set<String>,
+ 572:     onItemClick: (String) -> Unit,
+ 573:     onItemLongClick: (String) -> Unit,
+ 574:     onSenderToggle: (String) -> Unit,
+ 575: ) {
+ 576:     val groups = remember(items) {
+ 577:         items.groupBy { it.senderId }
+ 578:             .toList()
+ 579:             .sortedByDescending { (_, list) ->
+ 580:                 list.maxOfOrNull { runCatching { Instant.parse(it.sentAt) }.getOrNull()?.toEpochMilli() ?: 0L } ?: 0L
+ 581:             }
+ 582:     }
+ 583:     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+ 584:         groups.forEach { (senderId, group) ->
+ 585:             val collapsed = senderId in collapsedSenders
+ 586:             val senderName = group.first().senderName
+ 587:             item(key = "sender-header-$senderId") {
+ 588:                 SenderSectionHeader(
+ 589:                     senderName = senderName,
+ 590:                     count = group.size,
+ 591:                     collapsed = collapsed,
+ 592:                     onToggle = { onSenderToggle(senderId) },
+ 593:                 )
+ 594:             }
+ 595:             if (!collapsed) {
+ 596:                 items(group, key = { it.id }) { item ->
+ 597:                     InboxRow(
+ 598:                         item = item,
+ 599:                         isRead = item.id in readMessageIds,
+ 600:                         isSelected = item.id in selectedIds,
+ 601:                         onClick = { onItemClick(item.id) },
+ 602:                         onLongClick = { onItemLongClick(item.id) },
+ 603:                     )
+ 604:                 }
+ 605:             }
+ 606:         }
+ 607:     }
+ 608: }
+ 609: 
+ 610: @Composable
+ 611: private fun SenderSectionHeader(
+ 612:     senderName: String,
+ 613:     count: Int,
+ 614:     collapsed: Boolean,
+ 615:     onToggle: () -> Unit,
+ 616: ) {
+ 617:     Row(
+ 618:         modifier = Modifier
+ 619:             .fillMaxWidth()
+ 620:             .clickable(onClick = onToggle)
+ 621:             .padding(top = 12.dp, bottom = 4.dp),
+ 622:         verticalAlignment = Alignment.CenterVertically,
+ 623:     ) {
+ 624:         Icon(
+ 625:             if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
+ 713:  * blob ג€” opening on one phone marks the row read on every device on the
+ 714:  * next pull.
+ 715:  */
+ 716: @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+ 717: @Composable
+ 718: private fun InboxRow(
+ 719:     item: InboxItem,
+ 720:     isRead: Boolean,
+ 721:     isSelected: Boolean,
+ 722:     onClick: () -> Unit,
+ 723:     onLongClick: () -> Unit,
+ 724: ) {
+ 725:     val preview = item.hostPreview
+ 726:     val titleStyle = if (isRead) {
+ 727:         MaterialTheme.typography.titleMedium
+ 728:     } else {
+ 729:         MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+ 730:     }
+ 731:     val cardColors = if (isSelected) {
+ 732:         androidx.compose.material3.CardDefaults.cardColors(
+ 733:             containerColor = MaterialTheme.colorScheme.secondaryContainer,
+ 734:         )
+ 735:     } else {
+ 736:         androidx.compose.material3.CardDefaults.cardColors()
+ 737:     }
+ 738:     Card(
+ 739:         modifier = Modifier
+ 740:             .fillMaxWidth()
+ 741:             .combinedClickable(
+ 742:                 onClick = onClick,
+ 743:                 onLongClick = onLongClick,
+ 744:             ),
+ 745:         colors = cardColors,
+ 746:     ) {
+ 747:         Row(
+ 748:             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+ 749:             verticalAlignment = Alignment.Top,
+ 750:             horizontalArrangement = Arrangement.spacedBy(12.dp),
+ 751:         ) {
+ 752:             // Leading affordance: selection check OR unread dot. Always
+ 753:             // reserves the same horizontal slot so row geometry doesn't
+ 754:             // jump as selection or read state changes.
+ 755:             Box(
+ 756:                 modifier = Modifier
+ 757:                     .padding(top = 6.dp)
+ 758:                     .size(UNREAD_DOT_SIZE),
+ 759:                 contentAlignment = Alignment.Center,
+ 760:             ) {
+ 761:                 when {
+ 762:                     isSelected -> Icon(
+ 763:                         Icons.Filled.CheckCircle,
+ 764:                         contentDescription = "Selected",
+ 765:                         tint = MaterialTheme.colorScheme.primary,
+ 766:                     )
+ 767:                     !isRead -> Box(
+ 768:                         modifier = Modifier
+ 769:                             .size(UNREAD_DOT_SIZE)
+ 770:                             .background(
+ 771:                                 color = MaterialTheme.colorScheme.primary,
+ 772:                                 shape = CircleShape,
+ 773:                             ),
+ 774:                     )
+ 775:                 }
+ 776:             }
+ 777:             Column(
+ 778:                 modifier = Modifier.weight(1f),
+ 779:                 verticalArrangement = Arrangement.spacedBy(2.dp),
+ 780:             ) {
+ 781:                 Row(
+ 782:                     modifier = Modifier.fillMaxWidth(),
+ 783:                     horizontalArrangement = Arrangement.SpaceBetween,
+ 784:                     verticalAlignment = Alignment.CenterVertically,
+ 785:                 ) {
+ 786:                     Text(
+ 787:                         item.senderName,
+ 788:                         style = MaterialTheme.typography.labelMedium,
+ 789:                         color = MaterialTheme.colorScheme.primary,
+ 790:                     )
+
+ succeeded in 302ms:
+
+Name                Mode   Length
+----                ----   ------
+.gradle             d-----       
+.gradle-user-home   d-----       
+.kotlin             d-----       
+app                 d-----       
+build               d-----       
+core                d-----       
+feature             d-----       
+gradle              d-----       
+.gitignore          -a---- 120   
+build.gradle.kts    -a---- 344   
+gradle.properties   -a---- 626   
+gradlew             -a---- 8762  
+gradlew.bat         -a---- 2966  
+local.properties    -a---- 104   
+settings.gradle.kts -a---- 841   
+
+
+
+ succeeded in 516ms:
+D:\Projects\syncler\android\.gitignore
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/.gitignore' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git ls-files android/.gradle-user-home android/.gradle android/.kotlin android/build android/local.properties' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short --untracked-files=all android/.gradle-user-home android/.gradle android/.kotlin android/build android/local.properties .triad' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 610 -and $i -le 690) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+ succeeded in 253ms:
+ succeeded in 261ms:
+.gradle/
+.gradle-user-home/
+build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+*.apk
+*.aab
+output.json
+
+ succeeded in 243ms:
+?? .triad/44-codex-review-log.txt
+?? .triad/44-codex-review.txt
+?? .triad/44-gemini-review-log.txt
+?? .triad/44-gemini-review.txt
+?? .triad/44-phase7-review-prompt.md
+
+ succeeded in 289ms:
+ 610: @Composable
+ 611: private fun SenderSectionHeader(
+ 612:     senderName: String,
+ 613:     count: Int,
+ 614:     collapsed: Boolean,
+ 615:     onToggle: () -> Unit,
+ 616: ) {
+ 617:     Row(
+ 618:         modifier = Modifier
+ 619:             .fillMaxWidth()
+ 620:             .clickable(onClick = onToggle)
+ 621:             .padding(top = 12.dp, bottom = 4.dp),
+ 622:         verticalAlignment = Alignment.CenterVertically,
+ 623:     ) {
+ 624:         Icon(
+ 625:             if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
+ 626:             contentDescription = if (collapsed) "Expand" else "Collapse",
+ 627:         )
+ 628:         Text(
+ 629:             "$senderName  ($count)",
+ 630:             style = MaterialTheme.typography.titleSmall,
+ 631:             color = MaterialTheme.colorScheme.onSurfaceVariant,
+ 632:             modifier = Modifier.padding(start = 4.dp),
+ 633:         )
+ 634:     }
+ 635: }
+ 636: 
+ 637: private enum class DateBucket(val order: Int, val label: String) {
+ 638:     Today(0, "Today"),
+ 639:     Yesterday(1, "Yesterday"),
+ 640:     Earlier(2, "Earlier"),
+ 641: }
+ 642: 
+ 643: private fun bucketFor(isoSentAt: String, today: LocalDate): DateBucket {
+ 644:     // sent_at is server-canonical UTC; project to the device's local date
+ 645:     // for bucketing so "Today" matches what the user sees on their clock.
+ 646:     val date = runCatching {
+ 647:         Instant.parse(isoSentAt).atZone(ZoneId.systemDefault()).toLocalDate()
+ 648:     }.getOrNull() ?: return DateBucket.Earlier
+ 649:     return when {
+ 650:         date == today -> DateBucket.Today
+ 651:         date == today.minusDays(1) -> DateBucket.Yesterday
+ 652:         else -> DateBucket.Earlier
+ 653:     }
+ 654: }
+ 655: 
+ 656: @OptIn(ExperimentalMaterial3Api::class)
+ 657: @Composable
+ 658: private fun ArchiveScreen(
+ 659:     items: List<InboxItem>,
+ 660:     readMessageIds: Set<String>,
+ 661:     onBack: () -> Unit,
+ 662:     onItemClick: (String) -> Unit,
+ 663:     modifier: Modifier = Modifier,
+ 664: ) {
+ 665:     BackHandler(onBack = onBack)
+ 666:     Scaffold(
+ 667:         modifier = modifier,
+ 668:         topBar = {
+ 669:             TopAppBar(
+ 670:                 title = { Text("Archive") },
+ 671:                 navigationIcon = {
+ 672:                     IconButton(onClick = onBack) {
+ 673:                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+ 674:                     }
+ 675:                 },
+ 676:             )
+ 677:         },
+ 678:     ) { padding ->
+ 679:         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+ 680:             if (items.isEmpty()) {
+ 681:                 Text(
+ 682:                     "No archived cards.",
+ 683:                     modifier = Modifier.padding(top = 24.dp),
+ 684:                     style = MaterialTheme.typography.bodyMedium,
+ 685:                 )
+ 686:             } else {
+ 687:                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+ 688:                     items(items, key = { it.id }) { item ->
+ 689:                         InboxRow(
+ 690:                             item = item,
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 1 -and $i -le 85) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path .triad -Force | Select-Object Name,Mode,Length,LastWriteTime' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "data class InboxItem|class InboxRepository|sentAt|ORDER BY|order by" android/feature/inbox android/core -S' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show HEAD''^:android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt | Select-String -Pattern "LazyColumn|items'"\\(|sorted|sentAt|InboxRepository|repository.items\" -Context 1,2" in D:\Projects\syncler
+ succeeded in 247ms:
+android/feature/inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:28:        sentAt = "2026-05-21T00:00:00Z",
+android/feature/inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:80:            sentAt = "2026-05-21T00:00:00Z", expiresAt = "2026-06-20T00:00:00Z",
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:38:class InboxRepository @Inject constructor(
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:114:                    compareByDescending<InboxItem> { parseInstantOrNull(it.sentAt) }
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:235:            sentAt = dto.sentAt,
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:253:data class InboxItem(
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:260:    val sentAt: String,
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:534:            bucketFor(item.sentAt, today)
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:562: * headers. Sections sort by the most-recent sentAt in each group so the
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:580:                list.maxOfOrNull { runCatching { Instant.parse(it.sentAt) }.getOrNull()?.toEpochMilli() ?: 0L } ?: 0L
+android/feature/inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:792:                    TimestampFormat.relative(item.sentAt),
+android/core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:185:    @Json(name = "sent_at") val sentAt: String,
+
+ succeeded in 294ms:
+   1: package app.syncler.feature.inbox
+   2: 
+   3: import android.annotation.SuppressLint
+   4: import android.webkit.WebSettings
+   5: import android.webkit.WebView
+   6: import androidx.activity.compose.BackHandler
+   7: import androidx.compose.foundation.background
+   8: import androidx.compose.foundation.clickable
+   9: import androidx.compose.foundation.combinedClickable
+  10: import androidx.compose.foundation.layout.Arrangement
+  11: import androidx.compose.foundation.layout.Box
+  12: import androidx.compose.foundation.layout.Column
+  13: import androidx.compose.foundation.layout.Row
+  14: import androidx.compose.foundation.layout.Spacer
+  15: import androidx.compose.foundation.layout.fillMaxSize
+  16: import androidx.compose.foundation.layout.fillMaxWidth
+  17: import androidx.compose.foundation.layout.height
+  18: import androidx.compose.foundation.layout.padding
+  19: import androidx.compose.foundation.layout.size
+  20: import androidx.compose.foundation.lazy.LazyColumn
+  21: import androidx.compose.foundation.lazy.items
+  22: import androidx.compose.foundation.shape.CircleShape
+  23: import androidx.compose.material.icons.Icons
+  24: import androidx.compose.material.icons.automirrored.filled.ArrowBack
+  25: import androidx.compose.material.icons.automirrored.filled.List
+  26: import androidx.compose.material.icons.automirrored.filled.Sort
+  27: import androidx.compose.material.icons.filled.Archive
+  28: import androidx.compose.material.icons.filled.CheckCircle
+  29: import androidx.compose.material.icons.filled.Close
+  30: import androidx.compose.material.icons.filled.Delete
+  31: import androidx.compose.material.icons.filled.KeyboardArrowDown
+  32: import androidx.compose.material.icons.filled.KeyboardArrowRight
+  33: import androidx.compose.material.icons.filled.Refresh
+  34: import androidx.compose.material.icons.filled.Search
+  35: import androidx.compose.material.icons.filled.Unarchive
+  36: import androidx.compose.material3.AlertDialog
+  37: import androidx.compose.material3.Button
+  38: import androidx.compose.material3.Card
+  39: import androidx.compose.material3.CircularProgressIndicator
+  40: import androidx.compose.material3.ExperimentalMaterial3Api
+  41: import androidx.compose.material3.Icon
+  42: import androidx.compose.material3.IconButton
+  43: import androidx.compose.material3.MaterialTheme
+  44: import androidx.compose.material3.OutlinedButton
+  45: import androidx.compose.material3.Scaffold
+  46: import androidx.compose.material3.Text
+  47: import androidx.compose.material3.TopAppBar
+  48: import androidx.compose.runtime.Composable
+  49: import androidx.compose.runtime.LaunchedEffect
+  50: import androidx.compose.runtime.collectAsState
+  51: import androidx.compose.runtime.getValue
+  52: import androidx.compose.runtime.mutableStateOf
+  53: import androidx.compose.runtime.remember
+  54: import androidx.compose.runtime.setValue
+  55: import androidx.compose.ui.Alignment
+  56: import androidx.compose.ui.Modifier
+  57: import androidx.compose.ui.focus.FocusRequester
+  58: import androidx.compose.ui.focus.focusRequester
+  59: import androidx.compose.ui.text.font.FontFamily
+  60: import androidx.compose.ui.text.font.FontWeight
+  61: import androidx.compose.ui.text.style.TextOverflow
+  62: import androidx.compose.ui.unit.dp
+  63: import androidx.compose.ui.viewinterop.AndroidView
+  64: import androidx.hilt.navigation.compose.hiltViewModel
+  65: import androidx.lifecycle.ViewModel
+  66: import androidx.lifecycle.viewModelScope
+  67: import dagger.hilt.android.lifecycle.HiltViewModel
+  68: import java.time.Instant
+  69: import java.time.LocalDate
+  70: import java.time.ZoneId
+  71: import java.util.Locale
+  72: import javax.inject.Inject
+  73: import kotlinx.coroutines.delay
+  74: import kotlinx.coroutines.flow.MutableStateFlow
+  75: import kotlinx.coroutines.flow.SharingStarted
+  76: import kotlinx.coroutines.flow.StateFlow
+  77: import kotlinx.coroutines.flow.asStateFlow
+  78: import kotlinx.coroutines.flow.map
+  79: import kotlinx.coroutines.flow.stateIn
+  80: import kotlinx.coroutines.launch
+  81: import org.json.JSONArray
+  82: import org.json.JSONObject
+  83: 
+  84: @HiltViewModel
+  85: class InboxViewModel @Inject constructor(
+
+ succeeded in 327ms:
+
+  import androidx.compose.foundation.layout.size
+> import androidx.compose.foundation.lazy.LazyColumn
+  import androidx.compose.foundation.lazy.items
+  import androidx.compose.foundation.shape.CircleShape
+  class InboxViewModel @Inject constructor(
+>     private val repository: InboxRepository,
+      private val userState: UserStateRepository,
+  ) : ViewModel() {
+      val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+>     val items: StateFlow<List<InboxItem>> = repository.items
+  
+      // Derived: set of message IDs already read on any of the user's devices.
+          items.groupBy { item ->
+>             bucketFor(item.sentAt, today)
+>         }.toSortedMap(compareBy { it.order })
+      }
+>     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          buckets.forEach { (bucket, bucketItems) ->
+              item(key = "header-${bucket.name}") {
+              }
+>             items(bucketItems, key = { it.id }) { item ->
+                  InboxRow(
+                      item = item,
+  
+> private fun bucketFor(isoSentAt: String, today: LocalDate): DateBucket {
+      // sent_at is server-canonical UTC; project to the device's local date
+      // for bucketing so "Today" matches what the user sees on their clock.
+      val date = runCatching {
+>         Instant.parse(isoSentAt).atZone(ZoneId.systemDefault()).toLocalDate()
+      }.getOrNull() ?: return DateBucket.Earlier
+      return when {
+              } else {
+>                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+>                     items(items, key = { it.id }) { item ->
+                          InboxRow(
+                              item = item,
+                      Text(
+>                     TimestampFormat.relative(item.sentAt),
+                      style = MaterialTheme.typography.labelSmall,
+                  )
+                  item.revocationReason == "compromised" -> {
+>                     // Refuse to execute. The InboxRepository's fetchPluginByRow
+                      // path already null'd out bundleJs for compromised rows,
+                      // but we also block here as a belt-and-braces defense in
+
+
+
+ succeeded in 351ms:
+
+Name                              Mode    Length LastWriteTime        
+----                              ----    ------ -------------        
+01-brief.md                       -a----   16144 20/05/2026 1:13:28 AM
+01-claude-vote.md                 -a----    2729 20/05/2026 1:15:27 AM
+01-codex-log.txt                  -a----   43125 20/05/2026 1:15:05 AM
+01-codex-out.txt                  -a----    1914 20/05/2026 1:15:05 AM
+01-combined.txt                   -a----   20415 20/05/2026 1:14:37 AM
+01-gemini-out.txt                 -a----    2745 20/05/2026 1:15:32 AM
+01-meta-prompt.md                 -a----    4020 20/05/2026 1:13:54 AM
+02-codex-log.txt                  -a----    9447 20/05/2026 1:18:07 AM
+02-codex-out.txt                  -a----    2772 20/05/2026 1:18:07 AM
+02-gemini-fresh-input.txt         -a----   23769 20/05/2026 1:19:43 AM
+02-gemini-out.txt                 -a----    4214 20/05/2026 1:21:40 AM
+02-merged-questions.md            -a----    4839 20/05/2026 1:23:05 AM
+02-round2-prompt.md               -a----    3035 20/05/2026 1:17:07 AM
+03-codex-log.txt                  -a----   10101 20/05/2026 1:34:04 AM
+03-codex-out.txt                  -a----    2457 20/05/2026 1:34:04 AM
+03-gemini-out.txt                 -a----    3509 20/05/2026 1:34:24 AM
+03-merged-batch2.md               -a----    3565 20/05/2026 1:35:29 AM
+03-round3-prompt.md               -a----    4290 20/05/2026 1:33:42 AM
+04-codex-log.txt                  -a----   10468 20/05/2026 2:00:17 AM
+04-codex-out.txt                  -a----    2237 20/05/2026 2:00:17 AM
+04-gemini-fresh-input.txt         -a----    6182 20/05/2026 2:00:47 AM
+04-gemini-out.txt                 -a----    3076 20/05/2026 2:01:42 AM
+04-merged-batch3.md               -a----    2974 20/05/2026 2:05:07 AM
+04-pivot-brief.md                 -a----    5087 20/05/2026 1:59:56 AM
+05-codex-log.txt                  -a----    8251 20/05/2026 2:13:24 AM
+05-codex-out.txt                  -a----    1643 20/05/2026 2:13:24 AM
+05-gemini-out.txt                 -a----    1225 20/05/2026 2:17:37 AM
+05-triad-vote.md                  -a----    4102 20/05/2026 2:12:18 AM
+06-codex-log.txt                  -a----    7733 20/05/2026 2:31:36 AM
+06-codex-out.txt                  -a----    1586 20/05/2026 2:31:36 AM
+06-gemini-fresh-input.txt         -a----    2883 20/05/2026 2:32:17 AM
+06-gemini-out.txt                 -a----    2187 20/05/2026 2:33:18 AM
+06-multidevice-pivot.md           -a----    3704 20/05/2026 2:31:08 AM
+07-gemini-attack-prompt.md        -a----    2736 20/05/2026 2:46:27 AM
+07-gemini-attack.txt              -a----    9458 20/05/2026 2:48:51 AM
+07-gemini-input.txt               -a----   15482 20/05/2026 2:46:50 AM
+07-plan-draft-by-claude.md        -a----   12250 20/05/2026 2:46:01 AM
+08-codex-arbitrate-prompt.md      -a----    2150 20/05/2026 2:49:22 AM
+08-codex-final-plan.txt           -a----   17740 20/05/2026 2:51:31 AM
+08-codex-input.txt                -a----   24411 20/05/2026 2:49:45 AM
+08-codex-log.txt                  -a----   61839 20/05/2026 2:51:31 AM
+09-buildphase-vote.md             -a----    2104 20/05/2026 3:14:47 AM
+09-codex-log.txt                  -a----    5035 20/05/2026 3:15:30 AM
+09-codex-vote.txt                 -a----    1058 20/05/2026 3:15:30 AM
+09-gemini-vote.txt                -a----    1391 20/05/2026 3:15:37 AM
+10-claude-vote.md                 -a----    1014 20/05/2026 3:17:39 AM
+10-codex-log.txt                  -a----    2554 20/05/2026 3:18:02 AM
+10-codex-vote.txt                 -a----     392 20/05/2026 3:18:02 AM
+10-gemini-vote.txt                -a----     984 20/05/2026 3:18:11 AM
+10-practical-vote.md              -a----     999 20/05/2026 3:17:50 AM
+11-codex-m1-1-log.txt             -a----   31497 20/05/2026 3:27:52 AM
+11-codex-m1-1-out.txt             -a----     587 20/05/2026 3:27:52 AM
+11-m1-1-prompt.md                 -a----    3819 20/05/2026 3:25:59 AM
+12-codex-log.txt                  -a----  551951 20/05/2026 3:41:06 AM
+12-codex-out.txt                  -a----     870 20/05/2026 3:41:06 AM
+12-m1-2-3-prompt.md               -a----    5543 20/05/2026 3:32:29 AM
+13-codex-log.txt                  -a---- 1933772 20/05/2026 3:48:52 AM
+13-codex-out.txt                  -a----    1321 20/05/2026 3:48:52 AM
+13-m1-4-5-prompt.md               -a----    5878 20/05/2026 3:36:09 AM
+14-codex-log.txt                  -a----  405221 20/05/2026 3:55:36 AM
+14-codex-out.txt                  -a----    1156 20/05/2026 3:55:36 AM
+14-m1-6-7-prompt.md               -a----    5166 20/05/2026 3:40:35 AM
+15-codex-log.txt                  -a----  352238 20/05/2026 4:01:13 AM
+15-codex-out.txt                  -a----    1311 20/05/2026 4:01:13 AM
+15-m1-8-prompt.md                 -a----    3004 20/05/2026 3:40:57 AM
+16-codex-log.txt                  -a----  769247 20/05/2026 4:08:09 AM
+16-codex-out.txt                  -a----    2171 20/05/2026 4:08:09 AM
+16-m2-prompt.md                   -a----    6832 20/05/2026 3:41:42 AM
+17-codex-log.txt                  -a---- 3879821 20/05/2026 4:35:45 AM
+17-codex-out.txt                  -a----    1901 20/05/2026 4:35:45 AM
+17-m3-prompt.md                   -a----    7689 20/05/2026 3:42:38 AM
+18-codex-log.txt                  -a---- 3113490 20/05/2026 4:21:23 AM
+18-codex-out.txt                  -a----    1163 20/05/2026 4:21:23 AM
+18-m4a-prompt.md                  -a----    8056 20/05/2026 3:51:57 AM
+19-codex-log.txt                  -a---- 2149075 20/05/2026 4:46:35 AM
+19-codex-out.txt                  -a----    2970 20/05/2026 4:46:35 AM
+19-m4b-prompt.md                  -a----    7530 20/05/2026 3:52:47 AM
+20-codex-log.txt                  -a----    6951 20/05/2026 5:52:31 AM
+20-m5-prompt.md                   -a----    6235 20/05/2026 3:53:29 AM
+21-m6-prompt.md                   -a----    6262 20/05/2026 3:56:57 AM
+22-m7-prompt.md                   -a----    7125 20/05/2026 3:57:44 AM
+23-m8-prompt.md                   -a----    3842 20/05/2026 3:58:12 AM
+24-m9-prompt.md                   -a----    6069 20/05/2026 3:58:51 AM
+25-claude-review-m1-m4b.md        -a----    7289 20/05/2026 4:51:47 AM
+25-gemini-review-prompt.md        -a----    5969 20/05/2026 4:52:32 AM
+25-gemini-review.txt              -a----    7448 20/05/2026 4:57:24 AM
+25-review-synthesis.md            -a----    3832 20/05/2026 4:58:37 AM
+26-codex-log.txt                  -a---- 2273779 20/05/2026 5:10:25 AM
+26-codex-out.txt                  -a----    2715 20/05/2026 5:10:25 AM
+26-m4b1-fix-prompt.md             -a----    9465 20/05/2026 4:59:47 AM
+27-codex-availability.txt         -a----       4 20/05/2026 7:41:47 AM
+27-codex-ping-log.txt             -a----     327 20/05/2026 7:41:47 AM
+27-codex-review-log.txt           -a----  651798 20/05/2026 7:45:38 AM
+27-codex-review.txt               -a----    4306 20/05/2026 7:45:38 AM
+27-gemini-review.txt              -a----    4347 20/05/2026 7:42:55 AM
+27-review-m5-prompt.md            -a----    5936 20/05/2026 7:41:33 AM
+27-review-synthesis.md            -a----    2505 20/05/2026 7:46:25 AM
+28-codex-review-log.txt           -a----  263885 20/05/2026 8:02:36 AM
+28-codex-review.txt               -a----    2956 20/05/2026 8:02:36 AM
+28-gemini-review.txt              -a----    1121 20/05/2026 8:00:46 AM
+28-review-m51-prompt.md           -a----    3418 20/05/2026 7:59:26 AM
+29-codex-review-log.txt           -a----  239388 20/05/2026 8:26:46 AM
+29-codex-review.txt               -a----    5193 20/05/2026 8:26:46 AM
+29-gemini-review-retry.md         -a----    1689 20/05/2026 8:32:54 AM
+29-gemini-review-v2.txt           -a----    1779 20/05/2026 8:34:31 AM
+29-gemini-review.txt              -a----    5886 20/05/2026 8:34:12 AM
+29-review-m6-prompt.md            -a----    3912 20/05/2026 8:23:11 AM
+30-codex-review-log.txt           -a----  316567 20/05/2026 8:52:06 AM
+30-codex-review.txt               -a----    4340 20/05/2026 8:52:06 AM
+30-gemini-review.txt              -a----    4963 20/05/2026 8:49:00 AM
+30-review-m61-prompt.md           -a----    2542 20/05/2026 8:46:51 AM
+31-codex-review-log.txt           -a----  242365 20/05/2026 9:07:10 AM
+31-codex-review.txt               -a----    4567 20/05/2026 9:07:10 AM
+31-gemini-review.txt              -a----    8818 20/05/2026 9:06:52 AM
+31-review-m7-prompt.md            -a----    2505 20/05/2026 9:04:44 AM
+32-codex-review-log.txt           -a----  234198 20/05/2026 9:22:01 AM
+32-codex-review.txt               -a----    3486 20/05/2026 9:22:01 AM
+32-gemini-review.txt              -a----    5174 20/05/2026 9:19:43 AM
+32-review-m8-prompt.md            -a----    1647 20/05/2026 9:18:12 AM
+33-codex-review-log.txt           -a----  366897 20/05/2026 5:40:02 PM
+33-codex-review.txt               -a----    2988 20/05/2026 5:40:02 PM
+33-gemini-review.txt              -a----    2946 20/05/2026 5:37:21 PM
+33-review-m9-prompt.md            -a----    1357 20/05/2026 5:36:15 PM
+34-codex-review-log.txt           -a----  423628 21/05/2026 2:14:10 AM
+34-codex-review.txt               -a----    4829 21/05/2026 2:14:10 AM
+34-gemini-review-log.txt          -a----     685 21/05/2026 2:10:45 AM
+34-gemini-review.txt              -a----    4345 21/05/2026 2:11:13 AM
+34-review-m11-dogfood-prompt.md   -a----   13779 21/05/2026 2:09:35 AM
+35-codex-ux-log.txt               -a----   39304 21/05/2026 4:54:51 AM
+35-codex-ux.txt                   -a----   16916 21/05/2026 4:54:51 AM
+35-gemini-ux-log.txt              -a----     659 21/05/2026 4:55:07 AM
+35-gemini-ux.txt                  -a----   10162 21/05/2026 4:56:27 AM
+35-ux-direction-prompt.md         -a----    5406 21/05/2026 4:52:51 AM
+36-codex-contract-log.txt         -a----    6295 21/05/2026 5:27:04 AM
+36-codex-contract.txt             -a----    3166 21/05/2026 5:27:04 AM
+36-gemini-contract-log.txt        -a----     325 21/05/2026 5:26:43 AM
+36-gemini-contract.txt            -a----    4236 21/05/2026 5:27:19 AM
+36-hostpreview-contract-prompt.md -a----    2745 21/05/2026 5:26:29 AM
+37-codex-review-log.txt           -a----  201139 21/05/2026 5:49:47 AM
+37-codex-review.txt               -a----    5347 21/05/2026 5:49:47 AM
+37-gemini-review-log.txt          -a----     588 21/05/2026 5:46:39 AM
+37-gemini-review.txt              -a----    4685 21/05/2026 5:47:15 AM
+37-phase1-review-prompt.md        -a----    4852 21/05/2026 5:44:34 AM
+38-codex-review-log.txt           -a----  186274 21/05/2026 6:27:53 AM
+38-codex-review.txt               -a----    4311 21/05/2026 6:27:53 AM
+38-gemini-review-log.txt          -a----     589 21/05/2026 6:25:22 AM
+38-gemini-review.txt              -a----    4656 21/05/2026 6:26:16 AM
+38-phase2-review-prompt.md        -a----    7093 21/05/2026 6:23:24 AM
+39-codex-review-log.txt           -a----  272007 21/05/2026 7:09:29 AM
+39-codex-review.txt               -a----    4655 21/05/2026 7:09:29 AM
+39-gemini-review-log.txt          -a----     519 21/05/2026 7:07:04 AM
+39-gemini-review.txt              -a----    4141 21/05/2026 7:07:58 AM
+39-phase3-review-prompt.md        -a----    4977 21/05/2026 7:06:09 AM
+40-codex-review-log.txt           -a----  244580 21/05/2026 7:27:32 AM
+40-codex-review.txt               -a----    4040 21/05/2026 7:27:32 AM
+40-gemini-review-log.txt          -a----     659 21/05/2026 7:25:11 AM
+40-gemini-review.txt              -a----    3848 21/05/2026 7:26:05 AM
+40-phase4-review-prompt.md        -a----    4584 21/05/2026 7:24:36 AM
+41-codex-review-log.txt           -a----  117734 21/05/2026 7:47:46 AM
+41-codex-review.txt               -a----    1657 21/05/2026 7:47:46 AM
+41-gemini-review-log.txt          -a----    2335 21/05/2026 7:49:16 AM
+41-gemini-review.txt              -a----    2517 21/05/2026 7:49:22 AM
+41-phase5-review-prompt.md        -a----    3795 21/05/2026 7:45:57 AM
+42-m11-final-summary.md           -a----    7192 21/05/2026 7:52:25 AM
+43-codex-review-log.txt           -a----  208731 21/05/2026 8:16:12 AM
+43-codex-review.txt               -a----    1842 21/05/2026 8:16:12 AM
+43-gemini-review-log.txt          -a----    4811 21/05/2026 8:16:45 AM
+43-gemini-review.txt              -a----    2394 21/05/2026 8:16:53 AM
+43-phase6-review-prompt.md        -a----    5061 21/05/2026 8:12:09 AM
+44-codex-review-log.txt           -a----      39 21/05/2026 8:51:11 AM
+44-codex-review.txt               -a----       0 21/05/2026 8:51:11 AM
+44-gemini-review-log.txt          -a----       0 21/05/2026 8:51:25 AM
+44-gemini-review.txt              -a----       0 21/05/2026 8:51:25 AM
+44-phase7-review-prompt.md        -a----    4758 21/05/2026 8:49:03 AM
+uvicorn.log                       -a----     571 20/05/2026 9:19:19 PM
+
+
+
+codex
+The list source is already newest-first from `InboxRepository`, so preserving item order inside each sender group is likely intentional. I’m checking lifecycle edge cases now, especially selection state surviving archive/detail/tab transitions and whether stale selected IDs can be acted on.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 90 -and $i -le 125) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/app/src/main/kotlin/app/syncler/android/MainActivity.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 45 -and $i -le 95) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxSearchTest.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 1 -and $i -le 130) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "clearSelection|setSearchActive|openArchive|closeArchive|archiveSelected|deleteSelected|toggleSelect|selectedIds" android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt -S' in D:\Projects\syncler
+ succeeded in 225ms:
+120:    fun setSearchActive(active: Boolean) {
+188:    fun openArchive() { _showArchive.value = true }
+189:    fun closeArchive() { _showArchive.value = false }
+198:    private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
+199:    val selectedIds: StateFlow<Set<String>> = _selectedIds.asStateFlow()
+200:    val selectionMode: StateFlow<Boolean> = _selectedIds
+204:    fun toggleSelect(itemId: String) {
+205:        _selectedIds.value = _selectedIds.value.let {
+210:    fun clearSelection() { _selectedIds.value = emptySet() }
+212:    fun archiveSelected() {
+213:        val ids = _selectedIds.value
+216:        clearSelection()
+219:    fun deleteSelected() {
+220:        val ids = _selectedIds.value
+223:        clearSelection()
+266:    val selectedIds by viewModel.selectedIds.collectAsState()
+303:            onBack = viewModel::closeArchive,
+313:    BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
+319:                    count = selectedIds.size,
+320:                    onClose = viewModel::clearSelection,
+321:                    onArchive = viewModel::archiveSelected,
+322:                    onDelete = viewModel::deleteSelected,
+327:                    onClose = { viewModel.setSearchActive(false) },
+337:                        IconButton(onClick = { viewModel.setSearchActive(true) }) {
+355:                        IconButton(onClick = viewModel::openArchive) {
+375:                if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
+377:            val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
+392:                    selectedIds = selectedIds,
+401:                    selectedIds = selectedIds,
+527:    selectedIds: Set<String>,
+551:                    isSelected = item.id in selectedIds,
+570:    selectedIds: Set<String>,
+600:                        isSelected = item.id in selectedIds,
+
+ succeeded in 273ms:
+  90:                 val decrypted = decrypt(dto, userId = userId, pairingKey = sender.pairingKey, senderName = sender.senderName)
+  91:                     ?: return@mapNotNull null
+  92:                 // Resolve plugin bundle by historical row UUID (NOT by current
+  93:                 // /latest) so old messages render against the exact bundle
+  94:                 // they were validated for. Codex review 40: a sender publishing
+  95:                 // v2 must not retroactively change v1 messages' render output.
+  96:                 val plugin = fetchPluginByRowOrNull(dto.pluginId)
+  97:                 decrypted.copy(
+  98:                     bundleJs = plugin?.bundleJs,
+  99:                     declaredEndpoints = plugin?.endpoints.orEmpty(),
+ 100:                     bundleHash = plugin?.bundleHashHex,
+ 101:                     revocationReason = plugin?.revocationReason,
+ 102:                 )
+ 103:             }
+ 104: 
+ 105:             if (newDecrypted.isNotEmpty()) {
+ 106:                 val merged = (newDecrypted + _items.value).distinctBy { it.id }
+ 107:                 // Sort by parsed Instant, not by raw string. ISO timestamps
+ 108:                 // with variable fractional seconds sort lexically the wrong
+ 109:                 // way ("ג€¦10:00:00Z" > "ג€¦10:00:00.500Z") and would put older
+ 110:                 // messages above newer ones in the feed. Items that fail to
+ 111:                 // parse fall to the bottom so a corrupt timestamp can't
+ 112:                 // hijack the top of the inbox.
+ 113:                 _items.value = merged.sortedWith(
+ 114:                     compareByDescending<InboxItem> { parseInstantOrNull(it.sentAt) }
+ 115:                         .thenByDescending { it.id },
+ 116:                 )
+ 117:             }
+ 118:             response.nextSince?.let { lastSince = it }
+ 119:             newDecrypted.size
+ 120:         }.onFailure { Timber.tag(TAG).w(it, "refresh failed") }
+ 121:     }
+ 122: 
+ 123:     /**
+ 124:      * Fetches the historical manifest for `pluginRowId` via the by-id
+ 125:      * endpoint, verifies the bundle, caches bytes BY HASH. The row UUID
+
+ succeeded in 275ms:
+  45:                     if (!isUnlocked) {
+  46:                         AuthScreen(viewModel = authViewModel)
+  47:                     } else {
+  48:                         UnlockedApp(
+  49:                             mainViewModel = mainViewModel,
+  50:                             devicesViewModel = devicesViewModel,
+  51:                         )
+  52:                     }
+  53:                 }
+  54:             }
+  55:         }
+  56:     }
+  57: }
+  58: 
+  59: @Composable
+  60: private fun UnlockedApp(
+  61:     mainViewModel: MainViewModel,
+  62:     devicesViewModel: DevicesViewModel,
+  63: ) {
+  64:     val tab by mainViewModel.screen.collectAsStateWithLifecycle()
+  65:     Scaffold(
+  66:         bottomBar = {
+  67:             NavigationBar {
+  68:                 NavigationBarItem(
+  69:                     selected = tab == TopLevelScreen.Inbox,
+  70:                     onClick = { mainViewModel.select(TopLevelScreen.Inbox) },
+  71:                     icon = { Icon(Icons.Filled.Email, contentDescription = null) },
+  72:                     label = { Text("Inbox") },
+  73:                 )
+  74:                 NavigationBarItem(
+  75:                     selected = tab == TopLevelScreen.Senders,
+  76:                     onClick = { mainViewModel.select(TopLevelScreen.Senders) },
+  77:                     icon = { Icon(Icons.Filled.Person, contentDescription = null) },
+  78:                     label = { Text("Senders") },
+  79:                 )
+  80:                 NavigationBarItem(
+  81:                     selected = tab == TopLevelScreen.Settings,
+  82:                     onClick = { mainViewModel.select(TopLevelScreen.Settings) },
+  83:                     icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+  84:                     label = { Text("Settings") },
+  85:                 )
+  86:             }
+  87:         },
+  88:     ) { padding ->
+  89:         when (tab) {
+  90:             TopLevelScreen.Inbox -> InboxScreen(modifier = Modifier.padding(padding))
+  91:             TopLevelScreen.Senders -> PairingScreen(
+  92:                 onDone = {},
+  93:                 modifier = Modifier.padding(padding),
+  94:             )
+  95:             TopLevelScreen.Settings -> SettingsScreen(
+
+ succeeded in 269ms:
+   1: package app.syncler.feature.inbox
+   2: 
+   3: import org.junit.Assert.assertFalse
+   4: import org.junit.Assert.assertTrue
+   5: import org.junit.Test
+   6: 
+   7: /**
+   8:  * Locks host-side metadata search to the contract documented in ֲ§2 of the
+   9:  * integration guide: substring match across title / subtitle / summary /
+  10:  * searchText / senderName, case-insensitive, blank query is a no-op
+  11:  * (returns true for all items so the UI shows the unfiltered set).
+  12:  */
+  13: class InboxSearchTest {
+  14: 
+  15:     private fun item(
+  16:         sender: String = "Sender",
+  17:         title: String = "Title",
+  18:         subtitle: String? = null,
+  19:         summary: String? = null,
+  20:         searchText: List<String> = emptyList(),
+  21:     ) = InboxItem(
+  22:         id = "id-1",
+  23:         senderId = "s",
+  24:         senderName = sender,
+  25:         pluginId = "p",
+  26:         pluginIdentifier = "com.x",
+  27:         payloadJson = "{}",
+  28:         sentAt = "2026-05-21T00:00:00Z",
+  29:         expiresAt = "2026-06-20T00:00:00Z",
+  30:         bundleJs = null,
+  31:         declaredEndpoints = emptyList(),
+  32:         bundleHash = null,
+  33:         revocationReason = null,
+  34:         hostPreview = HostPreview(title, subtitle, summary, searchText),
+  35:     )
+  36: 
+  37:     @Test fun `blank query matches everything`() {
+  38:         val it = item(title = "Anything")
+  39:         assertTrue(matchesQuery(it, ""))
+  40:         assertTrue(matchesQuery(it, "   "))
+  41:     }
+  42: 
+  43:     @Test fun `title substring match`() {
+  44:         val it = item(title = "Mega Millions draw results")
+  45:         assertTrue(matchesQuery(it, "millions"))
+  46:         assertTrue(matchesQuery(it, "MEGA"))
+  47:         assertFalse(matchesQuery(it, "powerball"))
+  48:     }
+  49: 
+  50:     @Test fun `subtitle and summary participate`() {
+  51:         val it = item(
+  52:             title = "Alert",
+  53:             subtitle = "Account 8KQ-193",
+  54:             summary = "Threshold exceeded by 12 percent",
+  55:         )
+  56:         assertTrue(matchesQuery(it, "8kq"))
+  57:         assertTrue(matchesQuery(it, "threshold"))
+  58:     }
+  59: 
+  60:     @Test fun `searchText tokens participate`() {
+  61:         val it = item(
+  62:             title = "Alert",
+  63:             searchText = listOf("ticker:AAPL", "trade", "buy"),
+  64:         )
+  65:         assertTrue(matchesQuery(it, "aapl"))
+  66:         assertTrue(matchesQuery(it, "buy"))
+  67:         assertFalse(matchesQuery(it, "sell"))
+  68:     }
+  69: 
+  70:     @Test fun `sender name participates`() {
+  71:         val it = item(sender = "Pais Lotto")
+  72:         assertTrue(matchesQuery(it, "pais"))
+  73:         assertTrue(matchesQuery(it, "LOTTO"))
+  74:     }
+  75: 
+  76:     @Test fun `fallback items without hostPreview still searchable by sender`() {
+  77:         val it = InboxItem(
+  78:             id = "x", senderId = "s", senderName = "FallbackBot",
+  79:             pluginId = "p", pluginIdentifier = "com.x", payloadJson = "{}",
+  80:             sentAt = "2026-05-21T00:00:00Z", expiresAt = "2026-06-20T00:00:00Z",
+  81:             bundleJs = null, declaredEndpoints = emptyList(),
+  82:             bundleHash = null, revocationReason = null,
+  83:             hostPreview = null,
+  84:         )
+  85:         assertTrue(matchesQuery(it, "fallback"))
+  86:         assertFalse(matchesQuery(it, "anything-else"))
+  87:     }
+  88: }
+
+codex
+One important mismatch is emerging: because these Compose screens are not under a navigation back stack, `hiltViewModel()` is effectively activity-scoped here. That means UI state in `InboxViewModel` can survive logout/login, not just tab switches, so I’m going to verify compile next and then write that up with the exact scope lines.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command ".\\gradlew.bat :feature:inbox:compileDebugKotlin --offline" in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$path='"'android/app/src/main/kotlin/app/syncler/android/MainActivity.kt'; "'$i=0; Get-Content $path | ForEach-Object { $i++; if ($i -ge 1 -and $i -le 115) { '"'{0,4}: {1}' -f "'$i, $_ } }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"hiltViewModel\\(|ViewModelStoreOwner|NavHost|rememberNavController|sessionState|isUnlocked\" android -S" in D:\Projects\syncler
+ succeeded in 236ms:
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:44:                    val isUnlocked by mainViewModel.isUnlocked.collectAsStateWithLifecycle(initialValue = false)
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:45:                    if (!isUnlocked) {
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:25:    val isUnlocked = session.isUnlocked
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:134:    viewModel: PairingViewModel = hiltViewModel(),
+android\core\auth\src\test\kotlin\app\syncler\core\auth\SessionTest.kt:24:        session.isUnlocked.test {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:257:    viewModel: InboxViewModel = hiltViewModel(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:76:        session.sessionState
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:77:            .map { it.isUnlocked }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:235:        val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:251:        val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:22:    val isUnlocked: Boolean = !token.isNullOrBlank() && masterKey != null
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:31:    val sessionState: StateFlow<SessionState> = state.asStateFlow()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:32:    val isUnlocked = sessionState.map { it.isUnlocked }
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:59:     * paired-sender store, archives, ...) observe [sessionState] and
+
+ succeeded in 264ms:
+   1: package app.syncler.android
+   2: 
+   3: import android.os.Bundle
+   4: import androidx.activity.ComponentActivity
+   5: import androidx.activity.compose.setContent
+   6: import androidx.activity.viewModels
+   7: import androidx.compose.foundation.layout.padding
+   8: import androidx.compose.material.icons.Icons
+   9: import androidx.compose.material.icons.filled.Email
+  10: import androidx.compose.material.icons.filled.Person
+  11: import androidx.compose.material.icons.filled.Settings
+  12: import androidx.compose.material3.Icon
+  13: import androidx.compose.material3.MaterialTheme
+  14: import androidx.compose.material3.NavigationBar
+  15: import androidx.compose.material3.NavigationBarItem
+  16: import androidx.compose.material3.Scaffold
+  17: import androidx.compose.material3.Surface
+  18: import androidx.compose.material3.Text
+  19: import androidx.compose.runtime.Composable
+  20: import androidx.compose.runtime.getValue
+  21: import androidx.compose.ui.Modifier
+  22: import androidx.lifecycle.compose.collectAsStateWithLifecycle
+  23: import app.syncler.android.ui.AuthScreen
+  24: import app.syncler.android.ui.AuthViewModel
+  25: import app.syncler.android.ui.DevicesViewModel
+  26: import app.syncler.android.ui.MainViewModel
+  27: import app.syncler.android.ui.SettingsScreen
+  28: import app.syncler.android.ui.TopLevelScreen
+  29: import app.syncler.feature.inbox.InboxScreen
+  30: import app.syncler.feature.pairing.PairingScreen
+  31: import dagger.hilt.android.AndroidEntryPoint
+  32: 
+  33: @AndroidEntryPoint
+  34: class MainActivity : ComponentActivity() {
+  35:     private val mainViewModel by viewModels<MainViewModel>()
+  36:     private val authViewModel by viewModels<AuthViewModel>()
+  37:     private val devicesViewModel by viewModels<DevicesViewModel>()
+  38: 
+  39:     override fun onCreate(savedInstanceState: Bundle?) {
+  40:         super.onCreate(savedInstanceState)
+  41:         setContent {
+  42:             MaterialTheme {
+  43:                 Surface {
+  44:                     val isUnlocked by mainViewModel.isUnlocked.collectAsStateWithLifecycle(initialValue = false)
+  45:                     if (!isUnlocked) {
+  46:                         AuthScreen(viewModel = authViewModel)
+  47:                     } else {
+  48:                         UnlockedApp(
+  49:                             mainViewModel = mainViewModel,
+  50:                             devicesViewModel = devicesViewModel,
+  51:                         )
+  52:                     }
+  53:                 }
+  54:             }
+  55:         }
+  56:     }
+  57: }
+  58: 
+  59: @Composable
+  60: private fun UnlockedApp(
+  61:     mainViewModel: MainViewModel,
+  62:     devicesViewModel: DevicesViewModel,
+  63: ) {
+  64:     val tab by mainViewModel.screen.collectAsStateWithLifecycle()
+  65:     Scaffold(
+  66:         bottomBar = {
+  67:             NavigationBar {
+  68:                 NavigationBarItem(
+  69:                     selected = tab == TopLevelScreen.Inbox,
+  70:                     onClick = { mainViewModel.select(TopLevelScreen.Inbox) },
+  71:                     icon = { Icon(Icons.Filled.Email, contentDescription = null) },
+  72:                     label = { Text("Inbox") },
+  73:                 )
+  74:                 NavigationBarItem(
+  75:                     selected = tab == TopLevelScreen.Senders,
+  76:                     onClick = { mainViewModel.select(TopLevelScreen.Senders) },
+  77:                     icon = { Icon(Icons.Filled.Person, contentDescription = null) },
+  78:                     label = { Text("Senders") },
+  79:                 )
+  80:                 NavigationBarItem(
+  81:                     selected = tab == TopLevelScreen.Settings,
+  82:                     onClick = { mainViewModel.select(TopLevelScreen.Settings) },
+  83:                     icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+  84:                     label = { Text("Settings") },
+  85:                 )
+  86:             }
+  87:         },
+  88:     ) { padding ->
+  89:         when (tab) {
+  90:             TopLevelScreen.Inbox -> InboxScreen(modifier = Modifier.padding(padding))
+  91:             TopLevelScreen.Senders -> PairingScreen(
+  92:                 onDone = {},
+  93:                 modifier = Modifier.padding(padding),
+  94:             )
+  95:             TopLevelScreen.Settings -> SettingsScreen(
+  96:                 devicesViewModel = devicesViewModel,
+  97:                 onLogout = mainViewModel::logout,
+  98:                 modifier = Modifier.padding(padding),
+  99:             )
+ 100:         }
+ 101:     }
+ 102: }
+
+2026-05-21T05:52:39.592467Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck (Access is denied)
+	at java.base/java.io.IoOverNioFileSystem.convertNioToIoExceptionInStreams(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamsUsingNio0(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamUsingNio(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.newFileChannel(Unknown Source)
+	... 5 more
+
+ exited 1 in 383ms:
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck (Access is denied)
+	at java.base/java.io.IoOverNioFileSystem.convertNioToIoExceptionInStreams(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamsUsingNio0(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamUsingNio(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.newFileChannel(Unknown Source)
+	... 5 more
+
+codex
+The first Gradle attempt hit the user-level wrapper lock under `C:\Users\Dima\.gradle`, so it didn’t compile anything. I’ll rerun with the project-local ignored Gradle home (`android/.gradle-user-home`) to avoid touching the global cache.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$env:GRADLE_USER_HOME=(Resolve-Path '"'.\\.gradle-user-home').Path; .\\gradlew.bat :feature:inbox:compileDebugKotlin --offline" in D:\Projects\syncler\android
+2026-05-21T05:52:49.849753Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 4.1 seconds
+Output:
+Downloading https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+.............10%.............20%.............30%.............40%.............50%.............60%.............70%.............80%.............90%.............100%
+Could not unzip D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip to D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c.
+Reason: D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip
+Exception in thread "main" java.nio.file.NoSuchFileException: D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileAttributeViews$Basic.readAttributes(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileAttributeViews$Basic.readAttributes(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.readAttributes(Unknown Source)
+	at java.base/java.nio.file.Files.readAttributes(Unknown Source)
+	at java.base/java.util.zip.ZipFile$Source.get(Unknown Source)
+	at java.base/java.util.zip.ZipFile$CleanableResource.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at org.gradle.wrapper.Install.unzip(SourceFile)
+	at org.gradle.wrapper.Install.unzipLocal(SourceFile)
+	at org.gradle.wrapper.Install$1.call(SourceFile:12)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+
+ exited 1 in 4087ms:
+Downloading https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+.............10%.............20%.............30%.............40%.............50%.............60%.............70%.............80%.............90%.............100%
+Could not unzip D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip to D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c.
+Reason: D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip
+Exception in thread "main" java.nio.file.NoSuchFileException: D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileAttributeViews$Basic.readAttributes(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileAttributeViews$Basic.readAttributes(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.readAttributes(Unknown Source)
+	at java.base/java.nio.file.Files.readAttributes(Unknown Source)
+	at java.base/java.util.zip.ZipFile$Source.get(Unknown Source)
+	at java.base/java.util.zip.ZipFile$CleanableResource.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at org.gradle.wrapper.Install.unzip(SourceFile)
+	at org.gradle.wrapper.Install.unzipLocal(SourceFile)
+	at org.gradle.wrapper.Install$1.call(SourceFile:12)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c -Force -ErrorAction SilentlyContinue | Select-Object Name,Mode,Length' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "object Sort|val Sort|SortKt|AutoMirrored.*Sort|material.icons.*Sort" android/.gradle-user-home .gradle -S -g "*.kt" -g "*.java" -g "*.class"' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path android/.gradle-user-home/caches/modules-2/files-2.1/androidx.compose.material -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '"'icons' } | Select-Object -First 40 FullName,Name,Length" in D:\Projects\syncler
+2026-05-21T05:52:59.445035Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.2 seconds
+Output:
+rg: .gradle: The system cannot find the file specified. (os error 2)
+
+ exited 1 in 237ms:
+rg: .gradle: The system cannot find the file specified. (os error 2)
+
+2026-05-21T05:52:59.485718Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+
+ exited 1 in 260ms:
+ succeeded in 283ms:
+
+Name                       Mode      Length
+----                       ----      ------
+gradle-8.11.1-bin.zip.lck  -a----         0
+gradle-8.11.1-bin.zip.part -a---- 136920070
+
+
+
+codex
+The project-local Gradle home produced the same wrapper `.lck`/`.part` pair under an ignored directory and still failed before Kotlin compilation. Since those two files came from this review attempt, I’m removing just those generated lock/partial files so they don’t muddy the spot check.
+2026-05-21T05:53:08.014302Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$dir = Resolve-Path '"'android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c'; Remove-Item -LiteralPath (Join-Path "'$dir '"'gradle-8.11.1-bin.zip.lck') -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path "'$dir '"'gradle-8.11.1-bin.zip.part') -Force -ErrorAction SilentlyContinue; Get-ChildItem -Path "'$dir -Force -ErrorAction SilentlyContinue | Select-Object Name,Mode,Length'` rejected: blocked by policy
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$dir = Resolve-Path '"'android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c'; Remove-Item -LiteralPath (Join-Path "'$dir '"'gradle-8.11.1-bin.zip.lck') -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path "'$dir '"'gradle-8.11.1-bin.zip.part') -Force -ErrorAction SilentlyContinue; Get-ChildItem -Path "'$dir -Force -ErrorAction SilentlyContinue | Select-Object Name,Mode,Length' in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$dir = Resolve-Path '"'android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c'; Remove-Item -LiteralPath (Join-Path "'$dir '"'gradle-8.11.1-bin.zip.lck') -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path "'$dir '"'gradle-8.11.1-bin.zip.part') -Force -ErrorAction SilentlyContinue; Get-ChildItem -Path "'$dir -Force -ErrorAction SilentlyContinue | Select-Object Name,Mode,Length'` rejected: blocked by policy
+2026-05-21T05:53:13.276982Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Remove-Item -LiteralPath 'D:\\Projects\\syncler\\android\\.gradle-user-home\\wrapper\\dists\\gradle-8.11.1-bin\\bpt9gzteqjrbo1mjrsomdt32c\\gradle-8.11.1-bin.zip.lck' -Force -ErrorAction SilentlyContinue"` rejected: blocked by policy
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Remove-Item -LiteralPath 'D:\\Projects\\syncler\\android\\.gradle-user-home\\wrapper\\dists\\gradle-8.11.1-bin\\bpt9gzteqjrbo1mjrsomdt32c\\gradle-8.11.1-bin.zip.lck' -Force -ErrorAction SilentlyContinue" in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Remove-Item -LiteralPath 'D:\\Projects\\syncler\\android\\.gradle-user-home\\wrapper\\dists\\gradle-8.11.1-bin\\bpt9gzteqjrbo1mjrsomdt32c\\gradle-8.11.1-bin.zip.lck' -Force -ErrorAction SilentlyContinue"` rejected: blocked by policy
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short --untracked-files=all' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git check-ignore -v android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c/gradle-8.11.1-bin.zip.part android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c/gradle-8.11.1-bin.zip.lck' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "git ls-files | rg \"(\\.gradle-user-home|\\.gradle/|\\.zip\\.(lck|part)"'$|pytest-cache-files|uvicorn'"\\.log|\\.triad/44-)\"" in D:\Projects\syncler
+ succeeded in 242ms:
+android/.gitignore:2:.gradle-user-home/	android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c/gradle-8.11.1-bin.zip.part
+android/.gitignore:2:.gradle-user-home/	android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin/bpt9gzteqjrbo1mjrsomdt32c/gradle-8.11.1-bin.zip.lck
+
+ succeeded in 245ms:
+?? .triad/44-codex-review-log.txt
+?? .triad/44-codex-review.txt
+?? .triad/44-gemini-review-log.txt
+?? .triad/44-gemini-review.txt
+?? .triad/44-phase7-review-prompt.md
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+2026-05-21T05:53:21.024375Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+
+ exited 1 in 293ms:
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'where.exe gradle' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path android/.gradle-user-home/wrapper/dists/gradle-8.11.1-bin -Recurse -Force -ErrorAction SilentlyContinue | Select-Object FullName,Name,Length | Select-Object -First 20' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-ChildItem -Path C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { "'$_.Name -match '"'material-icons' } | Select-Object -First 40 FullName,Name,Length" in D:\Projects\syncler
+2026-05-21T05:53:27.336843Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+INFO: Could not find files for the given pattern(s).
+
+ exited 1 in 276ms:
+INFO: Could not find files for the given pattern(s).
+
+ succeeded in 292ms:
+
+FullName                                                                                                               
+--------                                                                                                               
+D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c                
+D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11....
+D:\Projects\syncler\android\.gradle-user-home\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11....
+
+
+
+ succeeded in 350ms:
+
+FullName                                                                                                               
+--------                                                                                                               
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core                         
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android                 
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended                     
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android             
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core\1.7.5\6a423633dd298dc...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core\1.7.5\e7c05035fb6ed2f...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.3\cb95084...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\334b6de...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5c1be32...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5ef972b...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.8\e7c6d6e...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended\1.7.5\19ba2f579c6...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended\1.7.5\84346418a40...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.3\9e9...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.5\126...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.5\45d...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.5\7f9...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.8\749...
+
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-ChildItem -Path C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-extended-android -Recurse -Force -Filter '*.aar' -ErrorAction SilentlyContinue | Select-Object FullName,Length" in D:\Projects\syncler
+ succeeded in 269ms:
+
+FullName                                                                                                               
+--------                                                                                                               
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.3\9e9...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.5\7f9...
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.8\749...
+
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-ChildItem -Path C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-extended-android -Recurse -Force -Filter '*.aar' -ErrorAction SilentlyContinue | ForEach-Object { "'$_.FullName }' in D:\Projects\syncler
+ succeeded in 221ms:
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.3\9e94a917464e95d00ef4a0409014469c2da3faba\material-icons-extended-release.aar
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.5\7f99672e6beef9c5e5a6627671a139fe6aad57ed\material-icons-extended-release.aar
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-extended-android\1.7.8\7499b6142a798c77a178b1098319c0b90595ab84\material-icons-extended-release.aar
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "jar tf C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-extended-android\\1.7.5\\7f99672e6beef9c5e5a6627671a139fe6aad57ed\\material-icons-extended-release.aar | Select-String -Pattern \"Sort|List\"" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "jar tf C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-core-android\\1.7.5\\5c1be32*\\material-icons-core-release.aar" in D:\Projects\syncler
+2026-05-21T05:53:42.334962Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+java.io.IOException: java.nio.file.InvalidPathException: Illegal char <*> at index 116: C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5c1be32*\material-icons-core-release.aar
+	at java.base/java.util.zip.ZipFile$Source.get(Unknown Source)
+	at java.base/java.util.zip.ZipFile$CleanableResource.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at jdk.jartool/sun.tools.jar.Main.list(Unknown Source)
+	at jdk.jartool/sun.tools.jar.Main.run(Unknown Source)
+	at jdk.jartool/sun.tools.jar.Main.main(Unknown Source)
+Caused by: java.nio.file.InvalidPathException: Illegal char <*> at index 116: C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5c1be32*\material-icons-core-release.aar
+	at java.base/sun.nio.fs.WindowsPathParser.normalize(Unknown Source)
+	at java.base/sun.nio.fs.WindowsPathParser.parse(Unknown Source)
+	at java.base/sun.nio.fs.WindowsPathParser.parse(Unknown Source)
+	at java.base/sun.nio.fs.WindowsPath.parse(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystem.getPath(Unknown Source)
+	... 8 more
+
+ exited 1 in 390ms:
+java.io.IOException: java.nio.file.InvalidPathException: Illegal char <*> at index 116: C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5c1be32*\material-icons-core-release.aar
+	at java.base/java.util.zip.ZipFile$Source.get(Unknown Source)
+	at java.base/java.util.zip.ZipFile$CleanableResource.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at java.base/java.util.zip.ZipFile.<init>(Unknown Source)
+	at jdk.jartool/sun.tools.jar.Main.list(Unknown Source)
+	at jdk.jartool/sun.tools.jar.Main.run(Unknown Source)
+	at jdk.jartool/sun.tools.jar.Main.main(Unknown Source)
+Caused by: java.nio.file.InvalidPathException: Illegal char <*> at index 116: C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5c1be32*\material-icons-core-release.aar
+	at java.base/sun.nio.fs.WindowsPathParser.normalize(Unknown Source)
+	at java.base/sun.nio.fs.WindowsPathParser.parse(Unknown Source)
+	at java.base/sun.nio.fs.WindowsPathParser.parse(Unknown Source)
+	at java.base/sun.nio.fs.WindowsPath.parse(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystem.getPath(Unknown Source)
+	... 8 more
+
+ succeeded in 402ms:
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$aar='"'C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-extended-android\\1.7.5\\7f99672e6beef9c5e5a6627671a139fe6aad57ed\\material-icons-extended-release.aar'; Add-Type -AssemblyName System.IO.Compression.FileSystem; "'$za=[System.IO.Compression.ZipFile]::OpenRead($aar); $entry=$za.GetEntry('"'classes.jar'); "'$ms=New-Object System.IO.MemoryStream; $stream=$entry.Open(); $stream.CopyTo($ms); $stream.Close(); $za.Dispose(); $ms.Position=0; $jar=New-Object System.IO.Compression.ZipArchive($ms,[System.IO.Compression.ZipArchiveMode]::Read); $jar.Entries | Where-Object { $_.FullName -match '"'Sort|List' } | Select-Object -First 100 -ExpandProperty FullName; "'$jar.Dispose(); $ms.Dispose()' in D:\Projects\syncler
+ succeeded in 839ms:
+androidx/compose/material/icons/automirrored/filled/FeaturedPlayListKt.class
+androidx/compose/material/icons/automirrored/filled/FormatListBulletedKt.class
+androidx/compose/material/icons/automirrored/filled/ListAltKt.class
+androidx/compose/material/icons/automirrored/filled/NotListedLocationKt.class
+androidx/compose/material/icons/automirrored/filled/PlaylistAddCheckKt.class
+androidx/compose/material/icons/automirrored/filled/PlaylistAddKt.class
+androidx/compose/material/icons/automirrored/filled/PlaylistPlayKt.class
+androidx/compose/material/icons/automirrored/filled/SortKt.class
+androidx/compose/material/icons/automirrored/filled/ViewListKt.class
+androidx/compose/material/icons/automirrored/outlined/FeaturedPlayListKt.class
+androidx/compose/material/icons/automirrored/outlined/FormatListBulletedKt.class
+androidx/compose/material/icons/automirrored/outlined/ListAltKt.class
+androidx/compose/material/icons/automirrored/outlined/NotListedLocationKt.class
+androidx/compose/material/icons/automirrored/outlined/PlaylistAddCheckKt.class
+androidx/compose/material/icons/automirrored/outlined/PlaylistAddKt.class
+androidx/compose/material/icons/automirrored/outlined/PlaylistPlayKt.class
+androidx/compose/material/icons/automirrored/outlined/SortKt.class
+androidx/compose/material/icons/automirrored/outlined/ViewListKt.class
+androidx/compose/material/icons/automirrored/rounded/FeaturedPlayListKt.class
+androidx/compose/material/icons/automirrored/rounded/FormatListBulletedKt.class
+androidx/compose/material/icons/automirrored/rounded/ListAltKt.class
+androidx/compose/material/icons/automirrored/rounded/NotListedLocationKt.class
+androidx/compose/material/icons/automirrored/rounded/PlaylistAddCheckKt.class
+androidx/compose/material/icons/automirrored/rounded/PlaylistAddKt.class
+androidx/compose/material/icons/automirrored/rounded/PlaylistPlayKt.class
+androidx/compose/material/icons/automirrored/rounded/SortKt.class
+androidx/compose/material/icons/automirrored/rounded/ViewListKt.class
+androidx/compose/material/icons/automirrored/sharp/FeaturedPlayListKt.class
+androidx/compose/material/icons/automirrored/sharp/FormatListBulletedKt.class
+androidx/compose/material/icons/automirrored/sharp/ListAltKt.class
+androidx/compose/material/icons/automirrored/sharp/NotListedLocationKt.class
+androidx/compose/material/icons/automirrored/sharp/PlaylistAddCheckKt.class
+androidx/compose/material/icons/automirrored/sharp/PlaylistAddKt.class
+androidx/compose/material/icons/automirrored/sharp/PlaylistPlayKt.class
+androidx/compose/material/icons/automirrored/sharp/SortKt.class
+androidx/compose/material/icons/automirrored/sharp/ViewListKt.class
+androidx/compose/material/icons/automirrored/twotone/FeaturedPlayListKt.class
+androidx/compose/material/icons/automirrored/twotone/FormatListBulletedKt.class
+androidx/compose/material/icons/automirrored/twotone/ListAltKt.class
+androidx/compose/material/icons/automirrored/twotone/NotListedLocationKt.class
+androidx/compose/material/icons/automirrored/twotone/PlaylistAddCheckKt.class
+androidx/compose/material/icons/automirrored/twotone/PlaylistAddKt.class
+androidx/compose/material/icons/automirrored/twotone/PlaylistPlayKt.class
+androidx/compose/material/icons/automirrored/twotone/SortKt.class
+androidx/compose/material/icons/automirrored/twotone/ViewListKt.class
+androidx/compose/material/icons/filled/ChecklistKt.class
+androidx/compose/material/icons/filled/ChecklistRtlKt.class
+androidx/compose/material/icons/filled/FeaturedPlayListKt.class
+androidx/compose/material/icons/filled/FilterListKt.class
+androidx/compose/material/icons/filled/FilterListOffKt.class
+androidx/compose/material/icons/filled/FormatListBulletedKt.class
+androidx/compose/material/icons/filled/FormatListNumberedKt.class
+androidx/compose/material/icons/filled/FormatListNumberedRtlKt.class
+androidx/compose/material/icons/filled/ListAltKt.class
+androidx/compose/material/icons/filled/NotListedLocationKt.class
+androidx/compose/material/icons/filled/PlaylistAddCheckCircleKt.class
+androidx/compose/material/icons/filled/PlaylistAddCheckKt.class
+androidx/compose/material/icons/filled/PlaylistAddCircleKt.class
+androidx/compose/material/icons/filled/PlaylistAddKt.class
+androidx/compose/material/icons/filled/PlaylistPlayKt.class
+androidx/compose/material/icons/filled/PlaylistRemoveKt.class
+androidx/compose/material/icons/filled/SortByAlphaKt.class
+androidx/compose/material/icons/filled/SortKt.class
+androidx/compose/material/icons/filled/ViewListKt.class
+androidx/compose/material/icons/outlined/ChecklistKt.class
+androidx/compose/material/icons/outlined/ChecklistRtlKt.class
+androidx/compose/material/icons/outlined/FeaturedPlayListKt.class
+androidx/compose/material/icons/outlined/FilterListKt.class
+androidx/compose/material/icons/outlined/FilterListOffKt.class
+androidx/compose/material/icons/outlined/FormatListBulletedKt.class
+androidx/compose/material/icons/outlined/FormatListNumberedKt.class
+androidx/compose/material/icons/outlined/FormatListNumberedRtlKt.class
+androidx/compose/material/icons/outlined/ListAltKt.class
+androidx/compose/material/icons/outlined/NotListedLocationKt.class
+androidx/compose/material/icons/outlined/PlaylistAddCheckCircleKt.class
+androidx/compose/material/icons/outlined/PlaylistAddCheckKt.class
+androidx/compose/material/icons/outlined/PlaylistAddCircleKt.class
+androidx/compose/material/icons/outlined/PlaylistAddKt.class
+androidx/compose/material/icons/outlined/PlaylistPlayKt.class
+androidx/compose/material/icons/outlined/PlaylistRemoveKt.class
+androidx/compose/material/icons/outlined/SortByAlphaKt.class
+androidx/compose/material/icons/outlined/SortKt.class
+androidx/compose/material/icons/outlined/ViewListKt.class
+androidx/compose/material/icons/rounded/ChecklistKt.class
+androidx/compose/material/icons/rounded/ChecklistRtlKt.class
+androidx/compose/material/icons/rounded/FeaturedPlayListKt.class
+androidx/compose/material/icons/rounded/FilterListKt.class
+androidx/compose/material/icons/rounded/FilterListOffKt.class
+androidx/compose/material/icons/rounded/FormatListBulletedKt.class
+androidx/compose/material/icons/rounded/FormatListNumberedKt.class
+androidx/compose/material/icons/rounded/FormatListNumberedRtlKt.class
+androidx/compose/material/icons/rounded/ListAltKt.class
+androidx/compose/material/icons/rounded/NotListedLocationKt.class
+androidx/compose/material/icons/rounded/PlaylistAddCheckCircleKt.class
+androidx/compose/material/icons/rounded/PlaylistAddCheckKt.class
+androidx/compose/material/icons/rounded/PlaylistAddCircleKt.class
+androidx/compose/material/icons/rounded/PlaylistAddKt.class
+androidx/compose/material/icons/rounded/PlaylistPlayKt.class
+androidx/compose/material/icons/rounded/PlaylistRemoveKt.class
+androidx/compose/material/icons/rounded/SortByAlphaKt.class
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$roots=@('"'C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-core-android','C:\\Users\\Dima\\.gradle\\caches\\modules-2\\files-2.1\\androidx.compose.material\\material-icons-extended-android'); foreach("'$root in $roots){ Get-ChildItem -Path $root -Recurse -Force -Filter '"'*.aar' -ErrorAction SilentlyContinue | ForEach-Object { "'$aar=$_.FullName; Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue; $za=[System.IO.Compression.ZipFile]::OpenRead($aar); $entry=$za.GetEntry('"'classes.jar'); if("'$entry){$ms=New-Object System.IO.MemoryStream; $s=$entry.Open(); $s.CopyTo($ms); $s.Close(); $ms.Position=0; $jar=New-Object System.IO.Compression.ZipArchive($ms,[System.IO.Compression.ZipArchiveMode]::Read); $matches=$jar.Entries | Where-Object { $_.FullName -eq '"'androidx/compose/material/icons/automirrored/filled/ListKt.class' -or "'$_.FullName -eq '"'androidx/compose/material/icons/filled/ListKt.class' }; if("'$matches){ Write-Output $aar; $matches | ForEach-Object { $_.FullName } }; $jar.Dispose(); $ms.Dispose()}; $za.Dispose() } }' in D:\Projects\syncler
+ succeeded in 1749ms:
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.3\cb9508434637670c8bba5044fb96234a2757f438\material-icons-core-release.aar
+androidx/compose/material/icons/automirrored/filled/ListKt.class
+androidx/compose/material/icons/filled/ListKt.class
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.5\5c1be323cc5970f4c761ee4bc04a4a03c55e673a\material-icons-core-release.aar
+androidx/compose/material/icons/automirrored/filled/ListKt.class
+androidx/compose/material/icons/filled/ListKt.class
+C:\Users\Dima\.gradle\caches\modules-2\files-2.1\androidx.compose.material\material-icons-core-android\1.7.8\e7c6d6e090689228ba336dae014ce884c5f71436\material-icons-core-release.aar
+androidx/compose/material/icons/automirrored/filled/ListKt.class
+androidx/compose/material/icons/filled/ListKt.class
+
+codex
+**Findings**
+
+1. **Blocker: selection/collapse UI state can survive logout and apply to the next user.**  
+   `InboxScreen` gets its VM via activity-level `hiltViewModel()` in the current app structure, because `MainActivity` switches composables directly rather than using per-route `ViewModelStoreOwner`s. That means `_selectedIds`, `_collapsedSenders`, `groupMode`, search state, archive/detail state can survive the `isUnlocked` branch flipping to `AuthScreen` and back.  
+   Relevant refs: [MainActivity.kt](D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:44), [MainActivity.kt](D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:90), [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:198), [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:242).  
+   I would clear inbox UI state on session lock/user change before rolling this up. At minimum: `clearSelection()`, close detail/archive, clear collapsed senders, probably reset search.
+
+2. **Low severity UX: the selected check icon is constrained to the unread-dot’s 8dp slot.**  
+   The row reserves `UNREAD_DOT_SIZE`, then renders `CheckCircle` inside that same box, so the selection affordance is likely tiny. I’d reserve a 24dp leading slot, center the 8dp unread dot in it, and render the check at normal icon size.  
+   Ref: [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:755).
+
+**Behavior Calls**
+
+Selection over search: the prompt says closing selection drops back to the normal top bar, but the code should return to search because `clearSelection()` does not clear `searchActive`; the top-bar `when` then falls through to `searchActive`. That behavior seems right.
+
+Selection surviving tab switches: acceptable if you want task-preserving tabs, but it becomes dangerous unless logout/user switch clears it.
+
+Group ordering by most recent sender activity is the right default. I would not add header hints yet. Search-then-group is also acceptable for V1.
+
+Delete confirmation yes, archive no: fine.
+
+Unread dot suppressed while selected: fine conceptually, but fix the check icon size.
+
+**Repo Spot Check**
+
+No tracked accidental Gradle wrapper `.zip.lck` / `.zip.part` files showed up via `git ls-files`. `android/.gitignore` includes `.gradle-user-home/`.
+
+Current untracked visible files are `.triad/44-*` review artifacts. Broad `git status` also warns about inaccessible `server/pytest-cache-files-*` directories, but I did not see them tracked.
+
+**Verification**
+
+I attempted `:feature:inbox:compileDebugKotlin --offline`, but Gradle did not reach Kotlin compilation: first the global wrapper cache lock was access-denied, then the project-local ignored Gradle home failed while handling the distribution zip. So no build/test greenlight from me on this pass.
+
+I would not greenlight the rolled-up commit until the logout/user-switch UI-state reset is fixed.
+tokens used
+78,398
