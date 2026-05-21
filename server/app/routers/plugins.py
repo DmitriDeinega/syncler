@@ -27,6 +27,7 @@ from app.services.plugins import (
     PluginNotFoundError,
     VersionRegressionError,
     get_latest_for_plugin,
+    get_plugin_by_id,
     publish_plugin,
     revoke_plugin_row,
 )
@@ -153,6 +154,55 @@ async def latest(
         capabilities=plugin.capabilities,
         endpoints=plugin.endpoints,
         created_at=plugin.created_at,
+        # Active rows by definition have revoked_at IS NULL; surface the
+        # fields anyway so clients that consume both endpoints don't need
+        # different code paths.
+        revoked_at=plugin.revoked_at,
+        revocation_reason=plugin.revocation_reason,
+    )
+
+
+@router.get("/by-id/{plugin_row_id}", response_model=PluginLatestResponse)
+async def by_id(
+    plugin_row_id: uuid.UUID,
+    # IP-based bucket: /by-id is unauthenticated and has no sender_id in
+    # the path for the per-sender bucket to key off. message_send_ip is
+    # the cheap pre-auth bucket we use for the same shape elsewhere.
+    _: None = Depends(rate_limit("message_send_ip")),
+    db: AsyncSession = Depends(get_db),
+) -> PluginLatestResponse:
+    """Resolve a plugin manifest by its exact row UUID.
+
+    Devices use this for historical lookups (an inbox message carries the
+    plugin_row_id it was originally validated against; resolving by row
+    UUID guarantees the device renders against the EXACT bundle that was
+    in effect at message-send time, even after the sender publishes a
+    newer or revoked version under the same plugin_identifier).
+
+    Unlike `/latest`, this endpoint returns revoked rows too — with
+    `revoked_at` and `revocation_reason` populated so the device can
+    apply differentiated UX (refuse-to-execute for `compromised`,
+    neutral fallback for `sender_disabled`, etc.).
+    """
+    try:
+        plugin = await get_plugin_by_id(db, plugin_row_id=plugin_row_id)
+    except PluginNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="plugin not found") from exc
+
+    return PluginLatestResponse(
+        plugin_row_id=plugin.id,
+        sender_id=plugin.sender_id,
+        plugin_identifier=plugin.plugin_identifier,
+        version=plugin.version,
+        signed_bundle_url=plugin.signed_bundle_url,
+        manifest_hash=_b64(plugin.manifest_hash),
+        bundle_hash=_b64(plugin.bundle_hash),
+        signature=_b64(plugin.signature),
+        capabilities=plugin.capabilities,
+        endpoints=plugin.endpoints,
+        created_at=plugin.created_at,
+        revoked_at=plugin.revoked_at,
+        revocation_reason=plugin.revocation_reason,
     )
 
 

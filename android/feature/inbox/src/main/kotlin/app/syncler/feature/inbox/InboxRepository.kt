@@ -89,11 +89,16 @@ class InboxRepository @Inject constructor(
                 }
                 val decrypted = decrypt(dto, userId = userId, pairingKey = sender.pairingKey, senderName = sender.senderName)
                     ?: return@mapNotNull null
-                val plugin = fetchPluginOrNull(dto.senderId, dto.pluginIdentifier)
+                // Resolve plugin bundle by historical row UUID (NOT by current
+                // /latest) so old messages render against the exact bundle
+                // they were validated for. Codex review 40: a sender publishing
+                // v2 must not retroactively change v1 messages' render output.
+                val plugin = fetchPluginByRowOrNull(dto.pluginId)
                 decrypted.copy(
                     bundleJs = plugin?.bundleJs,
                     declaredEndpoints = plugin?.endpoints.orEmpty(),
                     bundleHash = plugin?.bundleHashHex,
+                    revocationReason = plugin?.revocationReason,
                 )
             }
 
@@ -116,31 +121,45 @@ class InboxRepository @Inject constructor(
     }
 
     /**
-     * Fetches the latest manifest for `senderId/pluginIdentifier`, verifies
-     * the bundle, caches the bundle bytes BY HASH (not by identifier), and
-     * returns the resolved cache entry. The returned object carries the
-     * bundle's SHA-256 in hex — the caller stores this on the InboxItem so
-     * future renders look up by hash, surviving plugin version churn.
+     * Fetches the historical manifest for `pluginRowId` via the by-id
+     * endpoint, verifies the bundle, caches bytes BY HASH. The row UUID
+     * resolves to the exact bundle that was active when the message was
+     * sent — survives later sender publishes AND surfaces revocation
+     * state (silent for ``superseded``, alert for ``compromised``, etc.).
      *
-     * Already-cached hashes short-circuit: if a previous call resolved this
-     * `(sender, identifier)` to a hash we already hold bundle bytes for, we
-     * skip the network and return the cached entry. New plugin versions
-     * naturally produce new hashes, which fall through to the download path
-     * and populate a new cache slot — old hashes remain rendered correctly.
+     * Already-cached hashes short-circuit. If the row's revocation_reason
+     * is ``compromised``, refuse to load the bundle — the render path
+     * shows the security warning instead.
      */
-    private suspend fun fetchPluginOrNull(senderId: String, pluginIdentifier: String): CachedBundle? {
+    private suspend fun fetchPluginByRowOrNull(pluginRowId: String): CachedBundle? {
         return runCatching {
-            val latest = api.getPluginLatest(senderId = senderId, pluginIdentifier = pluginIdentifier)
-            val expectedHashBytes = runCatching { latest.bundleHash.base64ToBytes() }.getOrNull()
+            val manifest = api.getPluginById(pluginRowId = pluginRowId)
+
+            // Hard refusal: compromised plugins MUST NOT execute regardless
+            // of cache state. Surface the reason on the InboxItem; the UI
+            // shows a security banner instead of the WebView.
+            if (manifest.revocationReason == "compromised") {
+                return@runCatching CachedBundle(
+                    bundleJs = null,
+                    endpoints = emptyList(),
+                    bundleHashHex = null,
+                    revocationReason = manifest.revocationReason,
+                )
+            }
+
+            val expectedHashBytes = runCatching { manifest.bundleHash.base64ToBytes() }.getOrNull()
                 ?: error("plugin bundle_hash is not valid base64")
             val expectedHashHex = expectedHashBytes.joinToString("") { "%02x".format(it) }
 
             // Cache hit by hash — same plugin version we already verified.
-            pluginMutex.withLock { bundleByHash[expectedHashHex] }?.let { return@runCatching it }
+            pluginMutex.withLock { bundleByHash[expectedHashHex] }?.let { existing ->
+                // Refresh revocation_reason on cache hit so a newly-revoked
+                // plugin gets its banner even if its bytes were cached previously.
+                return@runCatching existing.copy(revocationReason = manifest.revocationReason)
+            }
 
-            // Scheme check. Release: HTTPS only. Debug: any HTTP allowed for
-            // LAN dev hosting. Mirrors :feature:plugin-host PluginLoader.requireHttps.
-            val url = latest.signedBundleUrl
+            // Scheme check. Release: HTTPS only. Debug: any HTTP for LAN dev.
+            val url = manifest.signedBundleUrl
             val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
             if (!schemeOk) error("plugin bundle URL must be HTTPS (got $url)")
 
@@ -150,11 +169,7 @@ class InboxRepository @Inject constructor(
                     resp.body?.bytes() ?: error("empty plugin bundle body")
                 }
             }
-            // Hash check: SHA-256(bundle) must equal the server-published
-            // bundle_hash. The publish endpoint verified the sender's Ed25519
-            // signature over (canonical_manifest || bundle_hash) at upload
-            // time, so a matching hash is sufficient evidence that this is
-            // the bundle the sender published.
+            // SHA-256(bundle) must equal the server-published bundle_hash.
             val actualHash = MessageDigest.getInstance("SHA-256").digest(bundleBytes)
             if (!actualHash.contentEquals(expectedHashBytes)) {
                 error("plugin bundle hash mismatch (CDN/MITM substitution?)")
@@ -162,29 +177,27 @@ class InboxRepository @Inject constructor(
 
             val cached = CachedBundle(
                 bundleJs = bundleBytes.toString(Charsets.UTF_8),
-                endpoints = latest.endpoints,
+                endpoints = manifest.endpoints,
                 bundleHashHex = expectedHashHex,
+                revocationReason = manifest.revocationReason,
             )
             pluginMutex.withLock { bundleByHash[expectedHashHex] = cached }
             cached
         }.onFailure {
-            Timber.tag(TAG).w(it, "plugin fetch failed for %s/%s", senderId, pluginIdentifier)
+            Timber.tag(TAG).w(it, "plugin fetch failed for row %s", pluginRowId)
         }.getOrNull()
     }
 
     /**
-     * Resolves a previously-cached bundle by its SHA-256 hash (hex). Used
-     * by the detail-view path to render an old message against the EXACT
-     * bundle bytes that were validated when the message arrived, even if
-     * the sender has since published a render-incompatible newer version.
+     * The cache entry for a verified plugin bundle. `bundleJs` is null when
+     * the bundle is refused (compromised revocation); the UI uses
+     * `revocationReason` to decide what banner to show in that case.
      */
-    suspend fun bundleByHash(hashHex: String): CachedBundle? =
-        pluginMutex.withLock { bundleByHash[hashHex] }
-
     data class CachedBundle(
-        val bundleJs: String,
+        val bundleJs: String?,
         val endpoints: List<String>,
-        val bundleHashHex: String,
+        val bundleHashHex: String?,
+        val revocationReason: String?,
     )
 
     private fun decrypt(
@@ -224,6 +237,7 @@ class InboxRepository @Inject constructor(
             bundleJs = null,
             declaredEndpoints = emptyList(),
             bundleHash = null,
+            revocationReason = null,
             hostPreview = HostPreviewParser.parse(plaintextString),
         )
     }.onFailure { Timber.tag(TAG).w(it, "decrypt failed for message %s", dto.id) }.getOrNull()
@@ -259,13 +273,21 @@ data class InboxItem(
     val declaredEndpoints: List<String>,
     /**
      * SHA-256 (lowercase hex) of the bundle this message was originally
-     * validated against (M11.4). Null until a successful fetch. The detail
-     * view looks the bundle up by THIS hash, not by the current /latest,
-     * so old messages keep rendering against the bundle they were verified
-     * for even after the plugin author publishes a render-incompatible new
-     * version. See [InboxRepository.bundleByHash].
+     * validated against (M11.4). Null until a successful fetch. The render
+     * path uses this hash to look up the cached bundle, so old messages keep
+     * rendering against the bundle they were verified for even after the
+     * plugin author publishes a render-incompatible new version.
      */
     val bundleHash: String?,
+    /**
+     * Revocation classification when the plugin row this message references
+     * has been pulled. One of: ``superseded`` (silent — UX may show subdued
+     * banner), ``compromised`` (refuse to render; show security warning),
+     * ``sender_disabled`` (render with "no longer available" banner),
+     * ``unspecified`` (pre-M11.4 legacy revoke — treat conservatively).
+     * Null on active rows.
+     */
+    val revocationReason: String?,
     /**
      * Structured row metadata extracted from the decrypted payload's reserved
      * `hostPreview` key. Null when the sender didn't supply one or the block

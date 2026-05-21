@@ -202,48 +202,137 @@ async def test_publish_with_only_body_sender_id_succeeds(app_client: AsyncClient
 
 
 @pytest.mark.asyncio
-async def test_revoke_records_reason_when_provided(app_client: AsyncClient) -> None:
-    """M11.4: revoke endpoint accepts an optional ``reason`` enum that's
-    persisted with the row so devices can render differentiated UX
-    (silent for ``superseded``, alert for ``compromised``, neutral
-    "unavailable" for ``sender_disabled``).
+async def test_revoke_records_and_promotes_reason(app_client: AsyncClient) -> None:
+    """M11.4: revoke endpoint accepts an optional classified ``reason`` so
+    devices can render differentiated UX. The reason is persisted with the
+    row AND is monotonic — a higher-severity reason can overwrite a lower
+    one (so ``superseded`` -> ``compromised`` works when a vuln surfaces
+    in an already-superseded version), but the reverse silently no-ops.
+    The ``revoked_at`` timestamp is also stable — re-revoking does NOT
+    push the original revocation time forward.
     """
-    from app.models import Plugin
-    from sqlalchemy import select as sql_select
-
     sender_id, private_key = await _register_sender(app_client)
     publish = await app_client.post(
         "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
     )
     plugin_row_id = uuid.UUID(publish.json()["plugin_row_id"])
 
-    # Revoke WITHOUT reason — legacy path; row gets revoked_at but null reason.
-    sig_no_reason = _sign_revoke(private_key, sender_id=sender_id, plugin_row_id=plugin_row_id)
-    no_reason = await app_client.post(
+    # First revoke: superseded. Row gets revoked_at + reason persisted.
+    sig_super = _sign_revoke(
+        private_key, sender_id=sender_id, plugin_row_id=plugin_row_id, reason="superseded",
+    )
+    r1 = await app_client.post(
         "/v1/plugins/revoke",
         json={
             "sender_id": str(sender_id),
             "plugin_row_id": str(plugin_row_id),
-            "sender_signature": sig_no_reason,
+            "sender_signature": sig_super,
+            "reason": "superseded",
         },
     )
-    assert no_reason.status_code == 204
+    assert r1.status_code == 204
 
-    # Re-revoke with reason — service is idempotent on revoked_at but
-    # updates reason if a new one is supplied.
-    sig_with = _sign_revoke(
+    by_id_1 = await app_client.get(f"/v1/plugins/by-id/{plugin_row_id}")
+    assert by_id_1.status_code == 200
+    body1 = by_id_1.json()
+    assert body1["revocation_reason"] == "superseded"
+    revoked_at_first = body1["revoked_at"]
+    assert revoked_at_first is not None
+
+    # Promote to compromised. Reason MUST change; revoked_at MUST be pinned.
+    sig_compromised = _sign_revoke(
         private_key, sender_id=sender_id, plugin_row_id=plugin_row_id, reason="compromised",
     )
-    with_reason = await app_client.post(
+    r2 = await app_client.post(
         "/v1/plugins/revoke",
         json={
             "sender_id": str(sender_id),
             "plugin_row_id": str(plugin_row_id),
-            "sender_signature": sig_with,
+            "sender_signature": sig_compromised,
             "reason": "compromised",
         },
     )
-    assert with_reason.status_code == 204
+    assert r2.status_code == 204
+
+    by_id_2 = await app_client.get(f"/v1/plugins/by-id/{plugin_row_id}")
+    body2 = by_id_2.json()
+    assert body2["revocation_reason"] == "compromised"
+    assert body2["revoked_at"] == revoked_at_first, "revoked_at must be pinned across re-revokes"
+
+    # Downgrade attempt: re-revoke with superseded MUST be a silent no-op.
+    # A leaked sender key cannot rewrite a security revoke down to a
+    # harmless one.
+    sig_downgrade = _sign_revoke(
+        private_key, sender_id=sender_id, plugin_row_id=plugin_row_id, reason="superseded",
+    )
+    r3 = await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_id),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig_downgrade,
+            "reason": "superseded",
+        },
+    )
+    assert r3.status_code == 204
+
+    by_id_3 = await app_client.get(f"/v1/plugins/by-id/{plugin_row_id}")
+    assert by_id_3.json()["revocation_reason"] == "compromised", (
+        "downgrade attempt must be silently ignored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_by_id_returns_revoked_with_reason(app_client: AsyncClient) -> None:
+    """M11.4: the /v1/plugins/by-id/{row_id} endpoint returns historical
+    manifests (active OR revoked) so the device can render an old message
+    against the EXACT bundle it was originally validated for. Revoked
+    rows surface ``revoked_at`` and ``revocation_reason``."""
+    sender_id, private_key = await _register_sender(app_client)
+    publish = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
+    )
+    plugin_row_id = uuid.UUID(publish.json()["plugin_row_id"])
+
+    # Active row: by-id returns manifest with revocation fields null.
+    active = await app_client.get(f"/v1/plugins/by-id/{plugin_row_id}")
+    assert active.status_code == 200
+    assert active.json()["revoked_at"] is None
+    assert active.json()["revocation_reason"] is None
+
+    # Revoke + re-fetch.
+    sig = _sign_revoke(
+        private_key, sender_id=sender_id, plugin_row_id=plugin_row_id, reason="sender_disabled",
+    )
+    await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_id),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig,
+            "reason": "sender_disabled",
+        },
+    )
+
+    revoked = await app_client.get(f"/v1/plugins/by-id/{plugin_row_id}")
+    assert revoked.status_code == 200
+    body = revoked.json()
+    assert body["revoked_at"] is not None
+    assert body["revocation_reason"] == "sender_disabled"
+    assert body["plugin_row_id"] == str(plugin_row_id)
+    assert "signed_bundle_url" in body
+    assert "bundle_hash" in body
+
+    # /latest still 404s — it filters revoked rows out by design.
+    latest = await app_client.get(f"/v1/plugins/{sender_id}/com.lottery.app/latest")
+    assert latest.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_by_id_404_for_unknown_row(app_client: AsyncClient) -> None:
+    unknown = uuid.uuid4()
+    resp = await app_client.get(f"/v1/plugins/by-id/{unknown}")
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio

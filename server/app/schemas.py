@@ -364,6 +364,14 @@ class PluginLatestResponse(BaseModel):
     capabilities: list[str]
     endpoints: list[str]
     created_at: datetime
+    # M11.4: when the row is revoked, surface why so devices can render
+    # differentiated UX (silent for ``superseded``, security alert for
+    # ``compromised``, neutral "unavailable" for ``sender_disabled``).
+    # The /latest endpoint filters revoked rows out so these are always
+    # null there; the /by-id endpoint (used for historical lookups by
+    # plugin_row_id) returns whatever the row's current revoke state is.
+    revoked_at: datetime | None = None
+    revocation_reason: str | None = None
 
 
 # M11.4: classified revocation reasons. Devices use this to decide UX:

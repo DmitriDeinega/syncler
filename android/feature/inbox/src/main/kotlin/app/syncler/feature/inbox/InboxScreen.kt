@@ -494,7 +494,35 @@ private fun DetailScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            // Revocation banner — non-null reason rendered above the plugin
+            // (or in place of it for compromised). M11.4 introduced the
+            // classified reasons; UI uses them to drive differentiated
+            // affordances per Codex review 38.
+            item.revocationReason?.let { reason -> RevocationBanner(reason) }
             when {
+                item.revocationReason == "compromised" -> {
+                    // Refuse to execute. The InboxRepository's fetchPluginByRow
+                    // path already null'd out bundleJs for compromised rows,
+                    // but we also block here as a belt-and-braces defense in
+                    // case bundleJs was populated by an earlier (pre-revoke)
+                    // cache hit.
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "Plugin execution blocked",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            "This plugin has been marked compromised by its sender " +
+                                "and will not be loaded. The raw decrypted payload is " +
+                                "shown below for diagnostics.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        PayloadFallbackView(item.payloadJson)
+                    }
+                }
                 item.bundleJs != null -> PluginRenderView(
                     bundleJs = item.bundleJs,
                     payloadJson = item.payloadJson,
@@ -517,6 +545,28 @@ private fun DetailScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RevocationBanner(reason: String) {
+    val (text, color) = when (reason) {
+        "compromised" -> "Security: this plugin was marked compromised by its sender." to
+            MaterialTheme.colorScheme.errorContainer
+        "sender_disabled" -> "This sender is no longer available." to
+            MaterialTheme.colorScheme.surfaceVariant
+        "superseded" -> "A newer version of this plugin is available." to
+            MaterialTheme.colorScheme.surfaceVariant
+        else -> "This plugin was revoked by its sender." to
+            MaterialTheme.colorScheme.surfaceVariant
+    }
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.bodySmall)
     }
 }
 

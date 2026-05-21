@@ -66,6 +66,18 @@ interface SynclerApi {
         @Path("sender_id") senderId: String,
         @Path("plugin_identifier") pluginIdentifier: String,
     ): PluginLatestDto
+
+    /**
+     * Historical lookup by exact plugin row UUID. Returns active OR
+     * revoked rows so the device can render an old message against the
+     * exact bundle it was validated against, with the revocation reason
+     * if it's been pulled since. Use this — not `getPluginLatest` —
+     * when resolving the manifest for an inbox message.
+     */
+    @GET("/v1/plugins/by-id/{plugin_row_id}")
+    suspend fun getPluginById(
+        @Path("plugin_row_id") pluginRowId: String,
+    ): PluginLatestDto
 }
 
 @JsonClass(generateAdapter = true)
@@ -81,6 +93,14 @@ data class PluginLatestDto(
     val capabilities: List<String>,
     val endpoints: List<String>,
     @Json(name = "created_at") val createdAt: String,
+    /** Non-null when the row has been revoked (server omits these on /latest). */
+    @Json(name = "revoked_at") val revokedAt: String? = null,
+    /**
+     * One of: ``superseded``, ``compromised``, ``sender_disabled``,
+     * ``unspecified``. Drives client UX (refuse-to-execute, neutral
+     * banner, etc.). Null on active rows or pre-M11.4 revoked rows.
+     */
+    @Json(name = "revocation_reason") val revocationReason: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

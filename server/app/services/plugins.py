@@ -126,6 +126,38 @@ async def get_latest_for_plugin(
     return rows[0]
 
 
+async def get_plugin_by_id(
+    db: AsyncSession, *, plugin_row_id: uuid.UUID
+) -> Plugin:
+    """Returns the plugin row whether or not it's revoked. Used by the
+    device's historical lookup path so an old message can re-resolve the
+    exact bundle it was originally validated against, even after the
+    sender published a newer (or a revoked) version under the same
+    plugin_identifier.
+
+    Raises PluginNotFoundError if the row doesn't exist at all.
+    """
+    result = await db.execute(select(Plugin).where(Plugin.id == plugin_row_id))
+    plugin = result.scalar_one_or_none()
+    if plugin is None:
+        raise PluginNotFoundError(f"no plugin row {plugin_row_id}")
+    return plugin
+
+
+# M11.4: severity ordering for monotonic revocation-reason updates. Only an
+# UP-traversal of this list is allowed once a row is revoked, so a sender
+# (or a compromised sender's key) cannot later silently downgrade a
+# `compromised` revoke to `superseded` and trick devices into running
+# untrusted code.
+_REASON_SEVERITY = {
+    None: 0,
+    "superseded": 1,
+    "sender_disabled": 2,
+    "unspecified": 2,
+    "compromised": 3,
+}
+
+
 async def revoke_plugin_row(
     db: AsyncSession,
     plugin_row_id: uuid.UUID,
@@ -133,9 +165,12 @@ async def revoke_plugin_row(
 ) -> Plugin:
     """Mark a plugin row revoked, optionally with a classification reason.
 
-    Idempotent: if the row is already revoked, the reason is updated only
-    if a new one was supplied (so a sender can upgrade ``superseded`` to
-    ``compromised`` later if a security issue surfaces in an old version).
+    Idempotent on `revoked_at` — re-revoking does NOT push the timestamp
+    forward. The reason field is monotonic: a higher-severity reason can
+    overwrite a lower one (so `superseded` → `compromised` works when a
+    vuln surfaces in an already-superseded version), but the reverse
+    silently no-ops so a leaked sender key can't downgrade a security
+    revoke into a harmless one.
     """
     result = await db.execute(select(Plugin).where(Plugin.id == plugin_row_id))
     plugin = result.scalar_one_or_none()
@@ -145,9 +180,12 @@ async def revoke_plugin_row(
     if plugin.revoked_at is None:
         plugin.revoked_at = datetime.now(UTC)
         changed = True
-    if reason is not None and plugin.revocation_reason != reason:
-        plugin.revocation_reason = reason
-        changed = True
+    if reason is not None:
+        current_sev = _REASON_SEVERITY.get(plugin.revocation_reason, 0)
+        new_sev = _REASON_SEVERITY.get(reason, 0)
+        if new_sev > current_sev:
+            plugin.revocation_reason = reason
+            changed = True
     if changed:
         await db.commit()
         await db.refresh(plugin)
