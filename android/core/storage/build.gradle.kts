@@ -43,4 +43,7 @@ dependencies {
     ksp(libs.hilt.compiler)
 
     testImplementation(libs.junit)
+    // Android stubs org.json in unit tests; we use real JSON parsing in
+    // EncryptedUserState. Pull the real impl so the tests don't NoSuchMethod.
+    testImplementation("org.json:json:20240303")
 }

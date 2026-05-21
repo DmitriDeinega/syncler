@@ -1,11 +1,17 @@
 package app.syncler.core.storage
 
 /**
- * Two-way merge over [EncryptedUserState] (M7.1 — refined per Codex review):
+ * Two-way merge over [EncryptedUserState] (M7.1 — refined per Codex review;
+ * M11.2 — added readMessages and archivedMessages):
  *
  *   - installedPlugins: merge by plugin_id, newer installedAt wins.
- *   - dismissedMessages: union (a dismissal anywhere is final).
+ *   - dismissedMessages: union by message_id (a dismissal anywhere is final;
+ *     no "un-dismiss" path in V1, so first dismissedAt is fine).
  *   - pluginSettings: merge by plugin_id, newer modifiedAt wins.
+ *   - readMessages (M11.2): merge by message_id, max(readAt) wins. Read is a
+ *     monotone state in V1 — no "mark unread" — so taking the most recent
+ *     timestamp gives consistent cross-device semantics.
+ *   - archivedMessages (M11.2): same as readMessages.
  *   - userScopedStorage: **NOT MERGED in V1**. Per Codex M7 review, naive
  *     remote-wins risks resurrecting locally-deleted keys and dropping
  *     local edits on same-key conflicts. Without per-key timestamps or
@@ -39,6 +45,18 @@ object StateMerger {
             remote.pluginSettings,
         ) { a, b -> if (a.modifiedAt >= b.modifiedAt) a else b }
 
+        val readMessages = mergeByKey(
+            local.readMessages + remote.readMessages,
+            key = { it.messageId },
+            pickWinner = { a, b -> if (a.readAt >= b.readAt) a else b },
+        )
+
+        val archivedMessages = mergeByKey(
+            local.archivedMessages + remote.archivedMessages,
+            key = { it.messageId },
+            pickWinner = { a, b -> if (a.archivedAt >= b.archivedAt) a else b },
+        )
+
         // userScopedStorage NOT merged in V1 — local wins. See class kdoc.
         return EncryptedUserState(
             schemaVersion = schema,
@@ -46,6 +64,8 @@ object StateMerger {
             dismissedMessages = dismissedMessages,
             pluginSettings = pluginSettings,
             userScopedStorage = local.userScopedStorage,
+            readMessages = readMessages,
+            archivedMessages = archivedMessages,
         )
     }
 

@@ -73,11 +73,70 @@ class StateMergerTest {
             dismissedMessages = listOf(DismissedMessageEntry("m1", "2026-05-20T10:00:00Z")),
             pluginSettings = mapOf("a" to PluginSettings(modifiedAt = "2026-05-20T10:00:00Z")),
             userScopedStorage = mapOf("a" to mapOf("k" to "v")),
+            readMessages = listOf(ReadMessageEntry("m2", "2026-05-21T08:00:00Z")),
+            archivedMessages = listOf(ArchivedMessageEntry("m3", "2026-05-21T09:00:00Z")),
         )
         val roundtrip = EncryptedUserState.fromJson(original.toJson())
         assertEquals(original.installedPlugins, roundtrip.installedPlugins)
         assertEquals(original.dismissedMessages, roundtrip.dismissedMessages)
         assertEquals(original.pluginSettings, roundtrip.pluginSettings)
         assertEquals(original.userScopedStorage, roundtrip.userScopedStorage)
+        assertEquals(original.readMessages, roundtrip.readMessages)
+        assertEquals(original.archivedMessages, roundtrip.archivedMessages)
+    }
+
+    @Test
+    fun `read messages merge by id with max readAt wins`() {
+        val local = EncryptedUserState(
+            readMessages = listOf(
+                ReadMessageEntry("m1", "2026-05-20T10:00:00Z"),
+                ReadMessageEntry("m2", "2026-05-20T12:00:00Z"),
+            ),
+        )
+        val remote = EncryptedUserState(
+            readMessages = listOf(
+                ReadMessageEntry("m1", "2026-05-20T11:00:00Z"),  // newer
+                ReadMessageEntry("m3", "2026-05-20T13:00:00Z"),  // only on remote
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(3, merged.readMessages.size)
+        val m1 = merged.readMessages.first { it.messageId == "m1" }
+        assertEquals("2026-05-20T11:00:00Z", m1.readAt)  // newer remote read time wins
+    }
+
+    @Test
+    fun `archived messages merge by id with max archivedAt wins`() {
+        val local = EncryptedUserState(
+            archivedMessages = listOf(ArchivedMessageEntry("m1", "2026-05-20T10:00:00Z")),
+        )
+        val remote = EncryptedUserState(
+            archivedMessages = listOf(
+                ArchivedMessageEntry("m1", "2026-05-20T11:00:00Z"),
+                ArchivedMessageEntry("m2", "2026-05-20T12:00:00Z"),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(2, merged.archivedMessages.size)
+        val m1 = merged.archivedMessages.first { it.messageId == "m1" }
+        assertEquals("2026-05-20T11:00:00Z", m1.archivedAt)
+    }
+
+    @Test
+    fun `V1 blob without read messages parses as empty list and forward-migrates`() {
+        // Simulate a blob written by a pre-M11.2 device that lacked the
+        // read_messages and archived_messages fields entirely.
+        val v1Json = """{
+            "schema_version": 1,
+            "installed_plugins": [],
+            "dismissed_messages": [{"message_id":"m1","dismissed_at":"2026-05-20T10:00:00Z"}],
+            "plugin_settings": {},
+            "user_scoped_storage": {}
+        }""".trimIndent()
+        val parsed = EncryptedUserState.fromJson(v1Json)
+        assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
+        assertEquals(emptyList<ReadMessageEntry>(), parsed.readMessages)
+        assertEquals(emptyList<ArchivedMessageEntry>(), parsed.archivedMessages)
+        assertEquals(1, parsed.dismissedMessages.size)
     }
 }
