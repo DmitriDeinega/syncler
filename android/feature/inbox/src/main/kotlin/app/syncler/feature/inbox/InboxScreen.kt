@@ -3,6 +3,7 @@ package app.syncler.feature.inbox
 import android.annotation.SuppressLint
 import android.webkit.WebSettings
 import android.webkit.WebView
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,10 +14,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -29,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -53,6 +59,9 @@ class InboxViewModel @Inject constructor(
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
     val items: StateFlow<List<InboxItem>> = repository.items
 
+    private val _selectedId = MutableStateFlow<String?>(null)
+    val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+
     fun refresh() {
         viewModelScope.launch {
             _refreshing.value = true
@@ -60,6 +69,9 @@ class InboxViewModel @Inject constructor(
             _refreshing.value = false
         }
     }
+
+    fun open(itemId: String) { _selectedId.value = itemId }
+    fun closeDetail() { _selectedId.value = null }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,12 +84,19 @@ fun InboxScreen(
 ) {
     val items by viewModel.items.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
+    val selectedId by viewModel.selectedId.collectAsState()
 
     LaunchedEffect(Unit) {
         while (true) {
             viewModel.refresh()
             delay(POLL_INTERVAL_MS)
         }
+    }
+
+    val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
+    if (selectedItem != null) {
+        DetailScreen(item = selectedItem, onBack = viewModel::closeDetail)
+        return
     }
 
     Scaffold(
@@ -99,35 +118,138 @@ fun InboxScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(items, key = { it.id }) { item -> InboxCard(item) }
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(items, key = { it.id }) { item ->
+                        InboxRow(item = item, onClick = { viewModel.open(item.id) })
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * Native Compose row — no WebView. The plugin's `render()` runs only in
+ * [DetailScreen] when the user taps a row. Senders fill in `hostPreview` via
+ * the sdk-python / sdk-plugin contract; rows without it use the generic
+ * fallback.
+ */
 @Composable
-private fun InboxCard(item: InboxItem) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(top = 12.dp, start = 12.dp, end = 12.dp, bottom = 12.dp)) {
+private fun InboxRow(item: InboxItem, onClick: () -> Unit) {
+    val preview = item.hostPreview
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(item.senderName, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    item.senderName,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
                 Text(item.sentAt, style = MaterialTheme.typography.labelSmall)
             }
-            Spacer(Modifier.height(8.dp))
-            if (item.bundleJs != null) {
-                PluginRenderView(
+            if (preview != null) {
+                Text(
+                    preview.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                preview.subtitle?.let { sub ->
+                    Text(
+                        sub,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                preview.summary?.let { sum ->
+                    Text(
+                        sum,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } else {
+                Text(
+                    "New message from ${item.senderName}",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    "Open to view",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DetailScreen(item: InboxItem, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            item.hostPreview?.title ?: "Message",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            item.senderName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            when {
+                item.bundleJs != null -> PluginRenderView(
                     bundleJs = item.bundleJs,
                     payloadJson = item.payloadJson,
                     declaredEndpoints = item.declaredEndpoints,
                 )
-            } else {
-                PayloadFallbackView(item.payloadJson)
+                else -> Column(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Plugin not loaded",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "Couldn't fetch the sender's plugin bundle yet. The encrypted payload is shown below.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    PayloadFallbackView(item.payloadJson)
+                }
             }
         }
     }
@@ -141,9 +263,7 @@ private fun PluginRenderView(
     declaredEndpoints: List<String>,
 ) {
     AndroidView(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(CARD_RENDER_HEIGHT),
+        modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             WebView(ctx).apply {
                 with(settings) {
@@ -159,10 +279,6 @@ private fun PluginRenderView(
                 setBackgroundColor(0x00000000)
                 val bridge = CardBridge(webView = this, declaredEndpoints = declaredEndpoints)
                 addJavascriptInterface(bridge, CardBridge.NATIVE_BRIDGE_NAME)
-                // Stash on the tag so onRelease can clean it up. Without this
-                // the bridge's CoroutineScope outlives the WebView and the
-                // WebView itself is never destroyed — a per-card leak that
-                // accumulates on scroll/recompose.
                 tag = bridge
                 val html = RenderShell.build(bundleJs, payloadJson)
                 loadDataWithBaseURL("https://syncler-plugin-host/inbox", html, "text/html", "utf-8", null)
@@ -206,4 +322,3 @@ private fun formatValue(value: Any?): String = when (value) {
 }
 
 private const val POLL_INTERVAL_MS = 15_000L
-private val CARD_RENDER_HEIGHT = 280.dp

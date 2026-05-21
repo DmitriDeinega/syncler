@@ -1,0 +1,227 @@
+**Core Stance**
+
+The inbox should stop treating each message as “a little app embedded in a scrolling list.” That is the wrong primitive. The actual product primitive is:
+
+**host-owned inbox item, plugin-owned detail surface.**
+
+The host should own the list, unread state, grouping, archive, expiration, selection, empty/error states, and app chrome. Plugins should own the rich rendering and domain-specific interaction once the user opens a message or enters a plugin-owned surface. That gives you a usable inbox without letting arbitrary plugins fragment the core app into multiple competing UX systems.
+
+The current fixed `280 dp` WebView is not merely the wrong height. It is the wrong contract. A rich card with twenty lines of detail, summary, and buttons does not belong inline in a feed. Auto-growing it would make the feed unusable. Nested scroll would make gesture behavior poor. Letting the plugin dynamically claim height would turn the host list into a layout negotiation protocol with untrusted, asynchronous documents. That path gets fragile quickly.
+
+The next UX should have two levels:
+
+1. **Inbox preview row/card**, owned by the host.
+2. **Message detail view**, rendered by the plugin in a WebView.
+
+The preview should be compact, predictable, and scannable: sender/plugin identity, time, title, short summary, unread marker, status/error affordance, maybe one primary action if the plugin declares it safe. The detail view is where the current plugin HTML belongs.
+
+If you ship only one change next, ship this: **tap a message to open a full-height detail view, and make the inbox list a compact host-owned preview list.** Everything else improves once that is true.
+
+**Card Presentation**
+
+Fixed-height inline WebViews are useful for proving the bridge. They are not a product UX. The host should own inbox height. In the list, each item should have stable dimensions. I would allow two preview density classes, not arbitrary height:
+
+- `compact`: about one to three lines of content plus metadata.
+- `expandedPreview`: maybe up to six lines for genuinely useful summaries.
+
+The plugin should not be able to say “I am 842 px tall, resize me.” That is fine in a detail surface, not in the inbox. Measurement-on-render and “done rendering” callbacks are especially dangerous because they couple list virtualization, WebView lifecycle, and untrusted content timing. The UX will jitter, scroll positions will jump, and failures become layout bugs.
+
+The plugin contract should instead separate **preview model** from **detail renderer**.
+
+A message should carry encrypted, client-visible host metadata, produced by the sender/plugin SDK:
+
+```json
+{
+  "title": "Draw results ready",
+  "subtitle": "Powerball May 21",
+  "summary": "3 matched lines, best prize $50",
+  "priority": "normal",
+  "category": "results",
+  "previewStyle": "compact",
+  "searchText": ["powerball", "draw", "may 21", "ticket 1842"]
+}
+```
+
+The host renders that natively. Then the detail WebView gets the full payload and plugin bundle. This is the clean boundary: the server remains content-blind, but the client can use decrypted metadata.
+
+I would still allow optional plugin-rendered preview later, but not as the default. If you allow it, constrain it brutally: fixed host-provided viewport, no dynamic height, no network during preview render unless explicitly allowed, no arbitrary chrome, no assumption that it appears for every row. The first usable version should not depend on WebView-per-row at all.
+
+**Read / Unread**
+
+Read state is UX state, not delivery state. Do not put it in server `delivery_status` except perhaps as a coarse transport/debug signal. “Delivered,” “fetched,” “decrypted,” “rendered,” and “read” are different events.
+
+Read/unread should live in the encrypted multi-device user-state blob from M7. That gives you cross-device sync without making the server content-aware. The record can be keyed by message id:
+
+```json
+{
+  "messages": {
+    "<message_id>": {
+      "readAt": "...",
+      "archivedAt": "...",
+      "starred": false,
+      "dismissedAt": null
+    }
+  }
+}
+```
+
+Marking something read should be conservative. Do not mark read just because it appeared in the list. That punishes scanning. I would mark read when:
+
+- the user opens the detail view,
+- the user invokes a meaningful action from the preview,
+- the user explicitly marks as read,
+- or the plugin requests `markRead()` during detail view after a host-approved event.
+
+That last one matters for chat-style or ticket-style plugins, where the detail view may have its own “seen” semantics. But the host should still mediate it.
+
+Visual treatment should be boring and strong: unread dot, heavier title, maybe a small unread count in date/plugin filters. Avoid giant blue backgrounds or card chrome that makes the whole inbox noisy. “Unread” is a state, not the main content.
+
+Sync should happen across devices. If I open a lottery result on the phone, the tablet should not keep shouting that it is new. CAS conflicts are acceptable if the state model is mergeable. For message UI state, use per-message timestamps and tombstones so merges are deterministic.
+
+**Organization**
+
+The default should be a chronological inbox with date buckets:
+
+- Today
+- Yesterday
+- Earlier
+- Expiring soon, if retention makes that important
+
+Then add lightweight host filters: all, unread, starred/pinned, archived, maybe plugin/sender chips. I would not start with bottom-nav tabs per plugin. That makes the app feel like a plugin launcher instead of an inbox, and it breaks down when one plugin is chat-like, another is alert-like, and another is a dashboard.
+
+Grouped-by-plugin collapsible sections sound appealing for lottery because the domain is discrete. They are worse for notification streams, trading bots, and chat-like senders where recency matters more than plugin identity. Use plugin grouping as a filter or secondary view, not the primary hierarchy.
+
+Pinned/starred is worth having, but not before archive/read/detail. Date buckets are cheap and broadly useful. Plugin-owned mini-tabs inside detail are acceptable because once the user is inside a message/plugin surface, domain organization is the plugin’s job.
+
+My preferred navigation:
+
+- **Inbox**: active messages, chronological, host-owned.
+- **Archive**: retained local history, host-owned.
+- **Devices/Settings**: pairing, senders, plugin permissions, account/session.
+
+Do not add a plugin tab bar yet. If plugins later register durable sections, they can appear behind a “Plugins” or “Sources” area, not as peers to Inbox on day one.
+
+**Search**
+
+The user’s instinct that “search may be implemented by the plugin” is half right, but dangerous as the only model.
+
+There are three searches:
+
+1. **Host metadata search**: sender, plugin id/name, title, subtitle, summary, sent-at, unread/archive/starred.
+2. **Local decrypted message search**: host-indexed `searchText` supplied by the plugin/sender.
+3. **Plugin remote search**: plugin queries its backend and renders results.
+
+The right V1 boundary is hybrid, with host search first.
+
+The host should provide a global search box that always works over local metadata. Because the server is content-blind, the index is local and built after decrypt. The plugin should be able to supply search tokens or a plain text search blob in the encrypted payload. That gives users a reliable search for “Powerball,” “ticket,” “AAPL,” “withdrawal,” or “Alice” without waking every plugin.
+
+Plugin-side remote search should be an optional extension, not the core inbox search. It is useful for domains where the inbox is only a notification layer over a larger backend: trading history, old chat messages, ticket databases, dashboards. But if search only works when the plugin opts in and its backend is available, the host inbox feels broken. Also, plugin-rendered search results raise navigation questions: are they inbox messages, remote entities, or plugin pages?
+
+I would define:
+
+- Host search returns local messages.
+- Plugins may register a `searchProvider`.
+- Results are visually separated as “From this device” and “From plugin/service.”
+- Remote plugin results open plugin-owned detail/history surfaces, not fake inbox messages unless the sender actually emitted a message.
+
+That preserves the inbox as a reliable local object while letting richer plugins grow.
+
+**Plugin Role Expansion**
+
+The smallest expansion that makes rich plugins usable is not “plugins own tabs.” It is:
+
+1. Plugins provide structured preview metadata.
+2. Plugins own message detail rendering.
+3. Plugins can request host-mediated actions and state changes from detail.
+
+That is enough for lottery, trading alerts, notification cards, and many workflow senders.
+
+Next, I would allow a plugin-owned **history/detail section** only after the host has stable Inbox and Archive concepts. A plugin could register:
+
+- `messageDetail`
+- `settings`
+- `history`
+- `compose` or `newRequest`
+- maybe `dashboard`
+
+But the host must keep the app chrome. Plugins can own content panes, not global navigation rules. They should not be able to replace the top app bar, hide archive/read controls, spoof pairing UI, or create their own permission prompts. The plugin can ask the host to show chrome actions: `markUnread`, `archive`, `openSettings`, `compose`, `refresh`, but the host renders them.
+
+The line I would draw: plugins can own surfaces; the host owns containment, navigation, identity, and trust signals.
+
+**Lifecycle**
+
+Retention changes the UX. A 30-day server cap means the app needs an explicit distinction between server-backed inbox and local history.
+
+I would use:
+
+- **Inbox**: active, unarchived messages not expired locally.
+- **Archive**: user-kept local messages.
+- **Delete**: remove local copy and dismiss from server if still present.
+- **Auto-expire**: server removes after cap; client may keep archived/read copies according to local policy.
+
+Dismissal should map to server cleanup, not necessarily user deletion. If the user archives a message, I would dismiss it from server once safely stored locally, because the server is just delivery/retention. If the user deletes it, remove local state and call dismiss. If the user marks read, do not dismiss automatically unless the product explicitly defines inbox as ephemeral.
+
+For `DISMISS_ALL`, be careful. It is useful for “clear all delivered transport items,” but a visible UI action named “Delete all” or “Clear inbox” must communicate local consequences. I would start with per-message archive/delete and batch archive, not expose broad dismissal protocol language.
+
+Client persistence longer than 30 days is valuable, especially for lottery and trading. But the plugin bundle question matters: if rendering old messages depends on a bundle that was revoked or unavailable, history breaks. Store the verified bundle version used for the message, or store a stable render artifact/manifest reference. At minimum, cache bundles by hash, not just plugin latest.
+
+**App Chrome**
+
+Use conventional app chrome:
+
+- Top app bar: title/search, account/sync status, overflow.
+- Bottom nav: Inbox, Archive, Devices or Settings.
+- Optional FAB only if there is at least one installed/paired plugin with a host-declared compose capability.
+
+The chrome can be plugin-aware, but only through host-declared capabilities. For example, a trading bot might expose “New alert,” a chat plugin might expose “New message,” lottery might expose nothing. If multiple plugins expose compose, the FAB opens a chooser. If none do, no FAB.
+
+Do not put Pair sender / Devices / Refresh / Log out as top-row buttons in the main steady-state UI. Pairing is an onboarding/settings action. Refresh can be pull-to-refresh or overflow. Log out belongs in account/settings. Devices belongs in bottom nav or settings.
+
+**Edge Cases**
+
+These need first-class screens/states, not logs.
+
+Empty inbox after fresh install should say, in product terms, that there are no messages yet and offer Pair sender. After pairing, the empty state should change: “Waiting for messages from X” with last poll/sync status available somewhere quiet.
+
+Plugin fetch failed should still show a host preview if metadata decrypted. The row opens an error detail with retry, plugin id/version/hash, and safe diagnostic text. The user should be able to archive/delete without the plugin rendering.
+
+Plugin render threw should not destroy the message. Show host metadata plus “Plugin failed to render this message,” with retry and report/copy diagnostics if you have that flow.
+
+Bundle revoked since storage is tricky. Revocation should prevent fetching/executing newly untrusted bundles. It should not automatically make old local history unreadable unless the revocation reason is severe. You need revocation classes: superseded, compromised, sender-disabled. Compromised may require blocking execution and showing a security state.
+
+Payload does not validate against current plugin version: do not use current plugin version. Use the message’s declared plugin id, version/range, bundle hash, and schema. If the exact compatible bundle is unavailable, show a compatibility error and preserve the message.
+
+**Lottery Versus Other Senders**
+
+Lottery wants rich, inspectable result details. It benefits from archive, date buckets, search by draw/ticket, and full detail views. It probably does not need compose, chat, or high-frequency unread behavior.
+
+A trading bot is more time-sensitive and risk-sensitive. It needs priority, freshness, maybe pinned alerts, quick actions, audit history, and stronger stale-state warnings. A trading alert from 27 minutes ago may be materially different from a lottery result from yesterday. It may also need plugin remote search/history because the backend has orders, fills, and account state beyond messages.
+
+A notification sender wants glanceability and bulk management. It may never need heavy detail. For it, host-native previews, archive, unread, and filters matter most.
+
+A chat-style sender breaks the “card” metaphor. It wants conversation grouping, sender identity, read receipts, compose, and thread-level navigation. That is exactly why the host should not hard-code plugin grouping as the main inbox model. The host can support a message detail or plugin section that becomes a conversation view, but the global inbox should remain a sane notification surface.
+
+**SDK / Contract Changes**
+
+I would add these plugin/message contract pieces:
+
+- `hostPreview` in encrypted message payload: title, subtitle, summary, optional image/icon token, category, priority, search text, preview density.
+- `messageSchemaVersion` and `minPluginVersion`/`maxPluginVersion` or exact compatible bundle hash.
+- `surfaces` in plugin manifest: `messageDetail`, optional `previewRenderer`, optional `settings`, optional `history`, optional `compose`, optional `searchProvider`.
+- `capabilities` in manifest: network in detail, network in preview, storage, compose, remoteSearch, suggested chrome actions.
+- `lifecycle` hooks: `onMessageDetailMount`, `onMessageDetailUnmount`, `onActionResult`, maybe `onHostStateChanged`.
+- Host APIs: `platform.message.markRead`, `markUnread`, `archive`, `delete`, `dismissRemote`, `setTitle` only within detail if allowed, `openExternal` with host confirmation, `requestRefresh`.
+- Search API: `plugin.search(query, cursor)` returning typed results, with host-rendered result shells and plugin-owned result detail.
+- Error contract: plugin can emit validation failure with user-safe message and diagnostic code.
+
+**Architecture Blockers**
+
+The current WebView-per-card model quietly precludes the direction if it remains the only renderer. The list needs to be host-native first, with WebView moved primarily to detail. You can keep WebView-per-preview as an optional constrained path later, but not as the foundation.
+
+The “latest bundle” fetch model also conflicts with durable history. Old messages must render against the bundle/version/hash they were validated for, or fail gracefully. Cache by SHA-256 and retain manifest metadata per message.
+
+The native bridge currently only has `platform.network.fetch` in inbox mode. Detail surfaces need lifecycle and host state APIs, but those APIs must be narrow and auditable. Do not expand by handing plugins general navigation control.
+
+Finally, the M7 state merger needs to be good enough for message UI state. Read/archive/star/delete are not cache fluff. They need timestamped, mergeable records with tombstones, or multi-device UX will feel random.
+
+The product should become an inbox first and a plugin host second. That does not make plugins weak. It gives them the right place to be powerful: inside detail, history, compose, and dashboard surfaces, contained by host chrome that users can trust.

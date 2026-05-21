@@ -23,6 +23,7 @@ def _canon_uuid(value: str) -> str:
     """
     return str(uuid.UUID(str(value)))
 
+from syncler.preview import HOST_PREVIEW_KEY, validate_host_preview
 from syncler.crypto import (
     assemble_envelope,
     b64,
@@ -226,6 +227,14 @@ class Client:
         self._require_sender_id()
         if self.pairing_key is None:
             raise SynclerError("no pairing key set; call set_pairing() first")
+
+        # Validate the optional hostPreview block in the payload. The host
+        # uses it to render the inbox row natively without invoking the
+        # plugin. Missing block → fallback row; malformed block → raises so
+        # the sender catches the mistake at send time rather than the user
+        # seeing "New message from X" with no detail.
+        if HOST_PREVIEW_KEY in payload:
+            validate_host_preview(payload[HOST_PREVIEW_KEY])
 
         expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
         plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")

@@ -7,6 +7,12 @@ from syncler.errors import (
     RecipientUnreachableError,
     SignatureError,
 )
+from syncler.preview import (
+    HOST_PREVIEW_KEY,
+    HostPreview,
+    HostPreviewValidationError,
+    validate_host_preview,
+)
 
 __all__ = [
     "Client",
@@ -16,6 +22,10 @@ __all__ = [
     "PluginRevokedError",
     "RecipientUnreachableError",
     "SignatureError",
+    "HOST_PREVIEW_KEY",
+    "HostPreview",
+    "HostPreviewValidationError",
+    "validate_host_preview",
 ]
 
 __version__ = "0.1.0"

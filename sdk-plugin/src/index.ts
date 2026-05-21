@@ -48,6 +48,13 @@ export {
   type StorageScope,
 } from './platform';
 export { storage } from './storage';
+export {
+  HOST_PREVIEW_KEY,
+  HOST_PREVIEW_LIMITS,
+  HostPreviewValidationError,
+  validateHostPreview,
+  type HostPreview,
+} from './preview';
 
 /**
  * Type-safe SDK wrapper around the host-injected `window.platform` bridge.

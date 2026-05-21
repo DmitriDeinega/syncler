@@ -1,0 +1,542 @@
+Reading additional input from stdin...
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, C:\Users\Dima\.codex\memories]
+reasoning effort: high
+reasoning summaries: none
+session id: 019e483c-cc50-7a73-9d59-517ab0f60c4a
+--------
+user
+# Consultation 35 — Inbox/app UX direction post-M11
+
+End-to-end dogfood works: paired sender publishes a plugin bundle, sender pushes a card, phone polls, decrypts, fetches+verifies the bundle by SHA-256, renders the plugin's HTML in a per-card WebView, action buttons hit the sender's callback through a hardened native bridge. The Android UX is currently a placeholder built only to prove the pipeline:
+
+- Single screen: vertical `LazyColumn` of cards
+- Each card: fixed-height `AndroidView(WebView)` at **280 dp**, sender name + sent-at timestamp in the header
+- Top row of buttons: Pair sender / Devices / Refresh / Log out
+- No concept of read/unread, no grouping, no search, no detail view, no per-plugin organization
+- Cards above the fold get clipped; rich plugins (20 lines of detail + buttons + summary) are unusable
+
+The user wants the next iteration to be the *actual* UX. This is a **design consultation**, not a code review. Think broadly. **Do not anchor on the specific suggestions one of the Claudes already wrote** (it suggested auto-expand vs detail view vs max-height+scroll — those are three of many possible answers); pretend you haven't seen them and generate your own.
+
+## The design space — make sure your answer covers these
+
+Some of these may be wrong questions; if you think so, say so and propose a better framing.
+
+1. **Card presentation.** Fixed-height vs auto-grow vs max-height+scroll vs preview+detail. Who owns height — the host or the plugin (via manifest hint, via measurement-on-render, via a separate `previewHeight` field, via the plugin telling the host "I'm done rendering and I'm N pixels tall")?
+
+2. **Read/unread state.** Where does it live (server with delivery_status — partially wired — or client-local)? What's the visual treatment? When does a card transition from unread to read? Should it sync across the user's devices (the multi-device CAS sync from M7 exists but isn't wired into UI)?
+
+3. **Organization / hierarchy.** Flat list, grouped by plugin (collapsible sections), bottom-nav tabs per plugin, date buckets (Today / Yesterday / Earlier), pinned/starred, plugin-owned mini-tabs. Trade-offs?
+
+4. **Search.** The user's intuition was "maybe search is implemented BY the plugin — the host shows a search UI only if the plugin opts in, the host forwards the query to the plugin, the plugin queries against its backend, plugin renders results." Pressure-test this. Alternatives: host-side metadata search (sender, plugin id, sent-at) vs plugin-side full search vs hybrid. What's the right boundary?
+
+5. **Plugin role expansion.** V1 plugins own the card render only. Future possibilities: plugins own the detail view, plugins own a dedicated section/tab, plugins can register additional surfaces (settings, history view, dashboards). What's the smallest expansion that makes the inbox usable for rich plugins, and where do we draw the line so plugins don't take over the chrome?
+
+6. **Lifecycle.** Server retention cap is 30 days. Client can persist longer (the encrypted body + plugin bundle are reproducible from the inbox + plugin manifest). Dismissal protocol exists (DISMISS_ALL etc.) but isn't wired to UI. Archive vs delete? Auto-expire?
+
+7. **App chrome.** Bottom-nav, top-app-bar, FAB? Should the chrome itself be plugin-aware (e.g., a "compose" affordance only makes sense for plugins that opt in)?
+
+8. **Edge cases that need first-class treatment.** Empty inbox, fresh-pair "what do I do now", plugin fetch failed, plugin render threw, plugin bundle revoked since the message was stored, payload doesn't validate against current plugin version.
+
+## What to deliver
+
+Write a 1500–2500-word response that includes:
+
+- **Your independent take** on the right direction (don't just enumerate options — pick a coherent stance and defend it)
+- **The single most important call** you'd make first if the user could only ship one change next
+- **The two or three things you'd defer** even though they sound appealing, and why
+- **Where the lottery sender's needs differ from a future trading-bot / notification / chat-style sender** (the plugin space is intentionally open — your UX has to serve all of them, not just lottery)
+- **The plugin contract changes** the SDK would need to support your direction (new manifest fields? new dispatch hooks? new platform APIs?) — be specific
+- **Anything in our current architecture that quietly precludes your direction** that we'd need to change
+
+Tone: opinionated. The user wants discussion, not a shopping list. If you think the host should NOT own grouping and search at all, say that and explain. If you think the plugin should be allowed to take over half the chrome, defend it.
+
+## Context you have
+
+Existing reviews in `.triad/` 27–34 give the architectural priors. Notable constraints:
+
+- Server is content-blind. Anything the host UI does with card *content* has to happen client-side, post-decrypt.
+- Multi-device sync exists (M7 — encrypted user-state blob with CAS). Read/unread state could ride on it.
+- Plugins run in isolated WebViews with a narrow native bridge (`platform.network.fetch` is the only thing wired in inbox mode right now).
+- The phone polls every 15s. No FCM-equipped device required (we decoupled storage from push this session).
+- WebView per card is the rendering model; if your direction needs a different model, name it.
+
+Skip pleasantries. Go.
+codex
+I’ll ground this in the repo’s stated priors rather than re-litigating the implementation. I’m going to skim the recent `.triad` notes for constraints that affect UX ownership and plugin contracts.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg --files .triad' in D:\Projects\syncler
+ succeeded in 253ms:
+.triad\35-ux-direction-prompt.md
+.triad\35-codex-ux.txt
+.triad\35-codex-ux-log.txt
+.triad\34-review-m11-dogfood-prompt.md
+.triad\34-gemini-review.txt
+.triad\34-gemini-review-log.txt
+.triad\34-codex-review.txt
+.triad\34-codex-review-log.txt
+.triad\33-review-m9-prompt.md
+.triad\33-gemini-review.txt
+.triad\33-codex-review.txt
+.triad\33-codex-review-log.txt
+.triad\32-review-m8-prompt.md
+.triad\32-gemini-review.txt
+.triad\32-codex-review.txt
+.triad\32-codex-review-log.txt
+.triad\31-review-m7-prompt.md
+.triad\31-gemini-review.txt
+.triad\31-codex-review.txt
+.triad\31-codex-review-log.txt
+.triad\30-review-m61-prompt.md
+.triad\30-gemini-review.txt
+.triad\30-codex-review.txt
+.triad\30-codex-review-log.txt
+.triad\29-review-m6-prompt.md
+.triad\29-gemini-review.txt
+.triad\29-gemini-review-v2.txt
+.triad\29-gemini-review-retry.md
+.triad\29-codex-review.txt
+.triad\29-codex-review-log.txt
+.triad\28-review-m51-prompt.md
+.triad\28-gemini-review.txt
+.triad\28-codex-review.txt
+.triad\28-codex-review-log.txt
+.triad\27-review-synthesis.md
+.triad\27-review-m5-prompt.md
+.triad\27-gemini-review.txt
+.triad\27-codex-review.txt
+.triad\27-codex-review-log.txt
+.triad\27-codex-ping-log.txt
+.triad\27-codex-availability.txt
+.triad\26-m4b1-fix-prompt.md
+.triad\26-codex-out.txt
+.triad\26-codex-log.txt
+.triad\25-review-synthesis.md
+.triad\25-gemini-review.txt
+.triad\25-gemini-review-prompt.md
+.triad\25-claude-review-m1-m4b.md
+.triad\24-m9-prompt.md
+.triad\23-m8-prompt.md
+.triad\22-m7-prompt.md
+.triad\21-m6-prompt.md
+.triad\20-m5-prompt.md
+.triad\20-codex-log.txt
+.triad\19-m4b-prompt.md
+.triad\19-codex-out.txt
+.triad\19-codex-log.txt
+.triad\18-m4a-prompt.md
+.triad\18-codex-out.txt
+.triad\18-codex-log.txt
+.triad\17-m3-prompt.md
+.triad\17-codex-out.txt
+.triad\17-codex-log.txt
+.triad\16-m2-prompt.md
+.triad\16-codex-out.txt
+.triad\16-codex-log.txt
+.triad\15-m1-8-prompt.md
+.triad\15-codex-out.txt
+.triad\15-codex-log.txt
+.triad\14-m1-6-7-prompt.md
+.triad\14-codex-out.txt
+.triad\14-codex-log.txt
+.triad\13-m1-4-5-prompt.md
+.triad\13-codex-out.txt
+.triad\13-codex-log.txt
+.triad\12-m1-2-3-prompt.md
+.triad\12-codex-out.txt
+.triad\12-codex-log.txt
+.triad\11-m1-1-prompt.md
+.triad\11-codex-m1-1-out.txt
+.triad\11-codex-m1-1-log.txt
+.triad\10-practical-vote.md
+.triad\10-gemini-vote.txt
+.triad\10-codex-vote.txt
+.triad\10-codex-log.txt
+.triad\10-claude-vote.md
+.triad\09-gemini-vote.txt
+.triad\09-codex-vote.txt
+.triad\09-codex-log.txt
+.triad\09-buildphase-vote.md
+.triad\08-codex-log.txt
+.triad\08-codex-input.txt
+.triad\08-codex-final-plan.txt
+.triad\08-codex-arbitrate-prompt.md
+.triad\07-plan-draft-by-claude.md
+.triad\07-gemini-input.txt
+.triad\07-gemini-attack.txt
+.triad\07-gemini-attack-prompt.md
+.triad\06-multidevice-pivot.md
+.triad\06-gemini-out.txt
+.triad\06-gemini-fresh-input.txt
+.triad\06-codex-out.txt
+.triad\06-codex-log.txt
+.triad\05-triad-vote.md
+.triad\05-gemini-out.txt
+.triad\05-codex-out.txt
+.triad\05-codex-log.txt
+.triad\04-pivot-brief.md
+.triad\04-merged-batch3.md
+.triad\04-gemini-out.txt
+.triad\04-gemini-fresh-input.txt
+.triad\04-codex-out.txt
+.triad\04-codex-log.txt
+.triad\03-round3-prompt.md
+.triad\03-merged-batch2.md
+.triad\03-gemini-out.txt
+.triad\03-codex-out.txt
+.triad\03-codex-log.txt
+.triad\02-round2-prompt.md
+.triad\02-merged-questions.md
+.triad\02-gemini-out.txt
+.triad\02-gemini-fresh-input.txt
+.triad\02-codex-out.txt
+.triad\02-codex-log.txt
+.triad\01-meta-prompt.md
+.triad\01-gemini-out.txt
+.triad\01-combined.txt
+.triad\01-codex-out.txt
+.triad\01-codex-log.txt
+.triad\01-claude-vote.md
+.triad\01-brief.md
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content .triad\\27-review-synthesis.md" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content .triad\\31-codex-review.txt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content .triad\\34-codex-review.txt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content .triad\\35-codex-ux.txt" in D:\Projects\syncler
+ succeeded in 266ms:
+ succeeded in 267ms:
+**Findings**
+
+- **P0: Inbox render path can execute unsigned bundle JS, including over HTTP in release.**  
+  [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:87) fetches `latest.signedBundleUrl` and executes the returned JS without checking `bundle_hash` or `signature`, and without a debug-gated HTTPS check. [PluginPublishRequest](D:/Projects/syncler/server/app/schemas.py:301) also accepts any `signed_bundle_url`. Combined with app-wide `usesCleartextTraffic="true"` in [AndroidManifest.xml](D:/Projects/syncler/android/app/src/main/AndroidManifest.xml:12), a release build can fetch and execute a substituted HTTP bundle in this path. For dogfood debug, document this explicitly; before prod, reuse `PluginSignatureVerifier`/hash check and require HTTPS unless `BuildConfig.DEBUG`.
+
+- **P0: `NetworkBridge` release HTTP relaxation is bypassed in the existing plugin host.**  
+  [NetworkBridge.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/capabilities/NetworkBridge.kt:21) only applies `MODERN_TLS` in release when it constructs its own client. But [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:107) injects a default OkHttp client, so release `platform.network.fetch` can still use OkHttpג€™s default cleartext-capable specs if the manifest declares an `http://` endpoint. Fix by enforcing scheme in `fetch()` itself, or always wrapping injected clients with release-safe `connectionSpecs`.
+
+- **P1: `CardBridge` lifecycle leak is real.**  
+  [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:143) creates a `WebView` and local `CardBridge`, but there is no `AndroidView` `onRelease`/disposal path. [CardBridge.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/CardBridge.kt:36) owns a coroutine scope, and [destroy()](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/CardBridge.kt:67) is never called. Add disposal that removes the JS interface, cancels the bridge, stops loading, and destroys the WebView. The `@JavascriptInterface` annotation itself is present at [CardBridge.kt:48](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/CardBridge.kt:48).
+
+- **P1: AAD reconstruction is byte-correct for the Python SDK, but timestamp canonicalization is fragile.**  
+  Android uses `dto.expiresAt` directly in AAD at [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:110). The server verifies using `payload.expires_at.isoformat().replace("+00:00", "Z")` at [messages.py](D:/Projects/syncler/server/app/routers/messages.py:65), then later returns the DB datetime at [messages.py](D:/Projects/syncler/server/app/routers/messages.py:246). If any sender uses a non-UTC offset string that the server accepts, Postgres may normalize it before inbox response and device decrypt will fail. For tonightג€™s Python SDK dogfood, `Z` output is okay. For protocol safety, reject non-UTC `expires_at` or persist/return the exact canonical AAD string.
+
+- **P1: Docs still contradict V1 action callback behavior.**  
+  [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:42) says `device_id` is in the callback body and [line 46](D:/Projects/syncler/docs/integration-guide.md:46) says dedupe by `(item_id, device_id)`, but [line 218](D:/Projects/syncler/docs/integration-guide.md:218) correctly says V1 does not inject `device_id`. The Flask example still reads `data["device_id"]` at [line 229](D:/Projects/syncler/docs/integration-guide.md:229). This will break a sender following the guide.
+
+- **P2: One SDK example script still builds ESM.**  
+  `sdk-plugin/examples/minimal/build.sh` is fixed, but `npm run build:example` in [package.json](D:/Projects/syncler/sdk-plugin/package.json:15) still uses `--format=esm`. Anyone using that script gets the old non-module `<script>` syntax error.
+
+**Validated**
+
+- `plugin_publish` rate limiting is shaped correctly: the per-sender bucket fires only after sender lookup and signature verification, so spoofers cannot burn another senderג€™s bucket.
+- FCM/storage separation looks clean: storage gates on active devices, push remains best-effort for FCM-equipped devices.
+- `plugin_identifier` projection is batch-loaded for inbox and falls back safely.
+- `min_plugin_version` null-to-empty handling matches the Python SDK AAD shape.
+- `npm run build` in `sdk-plugin` passes.
+
+Server regression tests did not run locally because the configured Postgres credentials failed (`InvalidPasswordError` for user `syncler`).
+
+ succeeded in 286ms:
+# M5 review synthesis (Claude+Gemini+Codex)
+
+## Fix NOW (show-stoppers, before M6)
+
+| ID | Title | Source | Action |
+|---|---|---|---|
+| S1 | AAD/envelope contract mismatch | Both | Reconcile crypto-spec: drop message_id/created_at/schema_version from required AAD (sender can't know them). AAD = canonical envelope bytes only. Update docs/crypto-spec.md + server/app/crypto/aead.py + android/core/crypto/Aad.kt. |
+| S2 | Missing replay check at /send | Both | Wire `NonceRegistry` from M2 into `store_message`. (sender_id, nonce) pair seen ג†’ 409 Conflict. |
+| S3 | Plugin ownership not verified | Codex | `services/messages.py:_plugin()` adds `Plugin.sender_id == sender_id` filter. |
+| S4 | Android Hilt bindings missing ג†’ won't compile | Codex | Add stub `app`-module implementations of PluginMessagePipeline, FcmDispatcher, FcmTokenRegistrar. Stubs return no-ops until M6/M7 wire real ones. |
+| S5 | /send succeeds with no FCM-tokened device | Codex | `store_message` requires at least one device with `fcm_token IS NOT NULL`. Otherwise 410. |
+
+## Fix NOW (mediums that affect correctness)
+
+| ID | Title | Source | Action |
+|---|---|---|---|
+| F1 | `expires_at` not in signed envelope | Both | Add to envelope canonical bytes. Sender supplies; server validates `expires_at > now` and `expires_at <= now + 30d` cap. |
+| F2 | /send rate limit by X-Sender-ID header is spoofable | Both | Switch to IP-based rate limit for /send (post-auth per-sender bucket can come V1.1 once we verify sig before counting). |
+| F3 | Dismiss `device_id` belongs to user not verified | Both | services/messages.mark_dismissed: confirm device.user_id == user.id. |
+| F4 | Expired messages accepted/fetched | Codex | Reject past `expires_at` at store_message; filter `expires_at > now` in inbox/get. |
+| F5 | PluginNotificationService scope cancellation | Codex | Cancel full scope on destroy, not only latest workJob. Track jobs in a set. |
+| F6 | SynclerFcmService fire-and-forget async | Codex | Use goAsync() or WorkManager for dismiss + token registration. |
+
+## Defer to M11 (polish, not show-stoppers)
+
+- Silent timeout in PluginNotificationService ג†’ post "delivery failed" notification
+- Battery optimization helper: use general settings intent + doc warning
+- Inline pointer parser hardening (validate=True, length checks)
+- WorkManager full migration for all FCM-side async
+
+## Sources
+
+- `.triad/27-gemini-review.txt`
+- `.triad/27-codex-review.txt`
+- `.triad/27-review-m5-prompt.md` (my self-flagged items)
+
+ succeeded in 286ms:
+**Findings**
+
+- **High: concurrent update CAS can falsely return success for the loser.**  
+  [server/app/services/state.py](d:/Projects/syncler/server/app/services/state.py:77) runs `UPDATE ... WHERE state_version = expected`, but never checks `rowcount` or uses `RETURNING`. If two clients read version `1`, both compute `new_version = 2`; one update wins, the other updates zero rows, commits, then [re-reads](d:/Projects/syncler/server/app/services/state.py:88) version `2` and returns success. With SQLAlchemyג€™s identity map this re-read may be even less reliable. Fix by treating `rowcount == 0` / no `RETURNING` row as conflict, then rollback/expire and fetch current state for the 409 body.
+
+- **High: initial create race returns an unhandled DB error instead of CAS conflict.**  
+  In the no-row path, both first writers with `expected_state_version = 0` can reach [db.add + commit](d:/Projects/syncler/server/app/services/state.py:63). The primary key prevents double insert, so they will not both succeed, but the loser gets an unhandled `IntegrityError`/500 rather than a 409 with current state. Catch `IntegrityError`, rollback, read current, raise `StateConflictError`.
+
+- **Medium: `StateMerger` is not actually three-way, and user-scoped deletes/conflicts can lose data.**  
+  [StateMerger.merge](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:18) only has `local` and `remote`, no base/ancestor. For [userScopedStorage](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:83), remote overwrites same keys and absent keys are treated as ג€unchangedג€, not deletions. Since `StorageBridge` supports delete at [StorageBridge.kt](d:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/capabilities/StorageBridge.kt:44), a local delete will be resurrected if remote still has the key, and a local edit to the same key is dropped on conflict. Remote-wins is acceptable only if this storage is cache-like/disposable; for durable user plugin state, add per-key metadata/tombstones or exclude this class from V1 sync.
+
+- **Medium: 409 DTO does not match the actual FastAPI error envelope.**  
+  Server returns `{"detail": {"current_state_version": ..., "current_encrypted_blob": ...}}` from [routers/state.py](d:/Projects/syncler/server/app/routers/state.py:69). FastAPI does not stringify the dict; it nests it under `detail`. Android defines [StateConflictBodyDto](d:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/SynclerApi.kt:83) as if the body were top-level, so parsing `errorBody()` directly into that DTO will fail. Add a `StateConflictResponseDto(detail: StateConflictBodyDto)` or change the server to return a direct JSON response for 409.
+
+- **Medium: schema-v0/missing-field migration is only partially safe.**  
+  Top-level missing arrays/maps are safe via `optJSONArray`/`optJSONObject`, but missing `schema_version` defaults to `SCHEMA_V1` at [EncryptedUserState.kt](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:46), so older blobs are silently treated as v1 instead of routed through a v0 migration. Nested records still use required `getString` calls, for example [installed plugin fields](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:83) and [modified_at](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:126), so older partial entries can still throw.
+
+**Verification Notes**
+
+1. **CAS race:** update path is not safe; two concurrent PUTs can both receive 200 for the same target version.
+2. **`userScopedStorage` remote-wins:** too lossy for durable state, especially same-key edits and deletes.
+3. **Missing fields:** top-level missing collections parse safely; true schema-v0 handling and nested missing fields are not safe enough.
+4. **Base64:** no mismatch found. Server uses standard padded base64; Android helpers also produce standard/no-wrap strings.
+5. **PUT empty blob:** rejecting length `0` is reasonable. Empty GET blob is the ג€no row/version 0ג€ sentinel; persisted encrypted state should not be empty.
+6. **409 parseability:** server body is valid JSON but nested under `detail`; Android needs an envelope DTO or server should return a direct body.
+
+I did not run tests because the workspace sandbox is read-only and the test runners are likely to write cache/build artifacts.
+
+codex
+**Core Stance**
+
+The inbox should stop treating each message as “a little app embedded in a scrolling list.” That is the wrong primitive. The actual product primitive is:
+
+**host-owned inbox item, plugin-owned detail surface.**
+
+The host should own the list, unread state, grouping, archive, expiration, selection, empty/error states, and app chrome. Plugins should own the rich rendering and domain-specific interaction once the user opens a message or enters a plugin-owned surface. That gives you a usable inbox without letting arbitrary plugins fragment the core app into multiple competing UX systems.
+
+The current fixed `280 dp` WebView is not merely the wrong height. It is the wrong contract. A rich card with twenty lines of detail, summary, and buttons does not belong inline in a feed. Auto-growing it would make the feed unusable. Nested scroll would make gesture behavior poor. Letting the plugin dynamically claim height would turn the host list into a layout negotiation protocol with untrusted, asynchronous documents. That path gets fragile quickly.
+
+The next UX should have two levels:
+
+1. **Inbox preview row/card**, owned by the host.
+2. **Message detail view**, rendered by the plugin in a WebView.
+
+The preview should be compact, predictable, and scannable: sender/plugin identity, time, title, short summary, unread marker, status/error affordance, maybe one primary action if the plugin declares it safe. The detail view is where the current plugin HTML belongs.
+
+If you ship only one change next, ship this: **tap a message to open a full-height detail view, and make the inbox list a compact host-owned preview list.** Everything else improves once that is true.
+
+**Card Presentation**
+
+Fixed-height inline WebViews are useful for proving the bridge. They are not a product UX. The host should own inbox height. In the list, each item should have stable dimensions. I would allow two preview density classes, not arbitrary height:
+
+- `compact`: about one to three lines of content plus metadata.
+- `expandedPreview`: maybe up to six lines for genuinely useful summaries.
+
+The plugin should not be able to say “I am 842 px tall, resize me.” That is fine in a detail surface, not in the inbox. Measurement-on-render and “done rendering” callbacks are especially dangerous because they couple list virtualization, WebView lifecycle, and untrusted content timing. The UX will jitter, scroll positions will jump, and failures become layout bugs.
+
+The plugin contract should instead separate **preview model** from **detail renderer**.
+
+A message should carry encrypted, client-visible host metadata, produced by the sender/plugin SDK:
+
+```json
+{
+  "title": "Draw results ready",
+  "subtitle": "Powerball May 21",
+  "summary": "3 matched lines, best prize $50",
+  "priority": "normal",
+  "category": "results",
+  "previewStyle": "compact",
+  "searchText": ["powerball", "draw", "may 21", "ticket 1842"]
+}
+```
+
+The host renders that natively. Then the detail WebView gets the full payload and plugin bundle. This is the clean boundary: the server remains content-blind, but the client can use decrypted metadata.
+
+I would still allow optional plugin-rendered preview later, but not as the default. If you allow it, constrain it brutally: fixed host-provided viewport, no dynamic height, no network during preview render unless explicitly allowed, no arbitrary chrome, no assumption that it appears for every row. The first usable version should not depend on WebView-per-row at all.
+
+**Read / Unread**
+
+Read state is UX state, not delivery state. Do not put it in server `delivery_status` except perhaps as a coarse transport/debug signal. “Delivered,” “fetched,” “decrypted,” “rendered,” and “read” are different events.
+
+Read/unread should live in the encrypted multi-device user-state blob from M7. That gives you cross-device sync without making the server content-aware. The record can be keyed by message id:
+
+```json
+{
+  "messages": {
+    "<message_id>": {
+      "readAt": "...",
+      "archivedAt": "...",
+      "starred": false,
+      "dismissedAt": null
+    }
+  }
+}
+```
+
+Marking something read should be conservative. Do not mark read just because it appeared in the list. That punishes scanning. I would mark read when:
+
+- the user opens the detail view,
+- the user invokes a meaningful action from the preview,
+- the user explicitly marks as read,
+- or the plugin requests `markRead()` during detail view after a host-approved event.
+
+That last one matters for chat-style or ticket-style plugins, where the detail view may have its own “seen” semantics. But the host should still mediate it.
+
+Visual treatment should be boring and strong: unread dot, heavier title, maybe a small unread count in date/plugin filters. Avoid giant blue backgrounds or card chrome that makes the whole inbox noisy. “Unread” is a state, not the main content.
+
+Sync should happen across devices. If I open a lottery result on the phone, the tablet should not keep shouting that it is new. CAS conflicts are acceptable if the state model is mergeable. For message UI state, use per-message timestamps and tombstones so merges are deterministic.
+
+**Organization**
+
+The default should be a chronological inbox with date buckets:
+
+- Today
+- Yesterday
+- Earlier
+- Expiring soon, if retention makes that important
+
+Then add lightweight host filters: all, unread, starred/pinned, archived, maybe plugin/sender chips. I would not start with bottom-nav tabs per plugin. That makes the app feel like a plugin launcher instead of an inbox, and it breaks down when one plugin is chat-like, another is alert-like, and another is a dashboard.
+
+Grouped-by-plugin collapsible sections sound appealing for lottery because the domain is discrete. They are worse for notification streams, trading bots, and chat-like senders where recency matters more than plugin identity. Use plugin grouping as a filter or secondary view, not the primary hierarchy.
+
+Pinned/starred is worth having, but not before archive/read/detail. Date buckets are cheap and broadly useful. Plugin-owned mini-tabs inside detail are acceptable because once the user is inside a message/plugin surface, domain organization is the plugin’s job.
+
+My preferred navigation:
+
+- **Inbox**: active messages, chronological, host-owned.
+- **Archive**: retained local history, host-owned.
+- **Devices/Settings**: pairing, senders, plugin permissions, account/session.
+
+Do not add a plugin tab bar yet. If plugins later register durable sections, they can appear behind a “Plugins” or “Sources” area, not as peers to Inbox on day one.
+
+**Search**
+
+The user’s instinct that “search may be implemented by the plugin” is half right, but dangerous as the only model.
+
+There are three searches:
+
+1. **Host metadata search**: sender, plugin id/name, title, subtitle, summary, sent-at, unread/archive/starred.
+2. **Local decrypted message search**: host-indexed `searchText` supplied by the plugin/sender.
+3. **Plugin remote search**: plugin queries its backend and renders results.
+
+The right V1 boundary is hybrid, with host search first.
+
+The host should provide a global search box that always works over local metadata. Because the server is content-blind, the index is local and built after decrypt. The plugin should be able to supply search tokens or a plain text search blob in the encrypted payload. That gives users a reliable search for “Powerball,” “ticket,” “AAPL,” “withdrawal,” or “Alice” without waking every plugin.
+
+Plugin-side remote search should be an optional extension, not the core inbox search. It is useful for domains where the inbox is only a notification layer over a larger backend: trading history, old chat messages, ticket databases, dashboards. But if search only works when the plugin opts in and its backend is available, the host inbox feels broken. Also, plugin-rendered search results raise navigation questions: are they inbox messages, remote entities, or plugin pages?
+
+I would define:
+
+- Host search returns local messages.
+- Plugins may register a `searchProvider`.
+- Results are visually separated as “From this device” and “From plugin/service.”
+- Remote plugin results open plugin-owned detail/history surfaces, not fake inbox messages unless the sender actually emitted a message.
+
+That preserves the inbox as a reliable local object while letting richer plugins grow.
+
+**Plugin Role Expansion**
+
+The smallest expansion that makes rich plugins usable is not “plugins own tabs.” It is:
+
+1. Plugins provide structured preview metadata.
+2. Plugins own message detail rendering.
+3. Plugins can request host-mediated actions and state changes from detail.
+
+That is enough for lottery, trading alerts, notification cards, and many workflow senders.
+
+Next, I would allow a plugin-owned **history/detail section** only after the host has stable Inbox and Archive concepts. A plugin could register:
+
+- `messageDetail`
+- `settings`
+- `history`
+- `compose` or `newRequest`
+- maybe `dashboard`
+
+But the host must keep the app chrome. Plugins can own content panes, not global navigation rules. They should not be able to replace the top app bar, hide archive/read controls, spoof pairing UI, or create their own permission prompts. The plugin can ask the host to show chrome actions: `markUnread`, `archive`, `openSettings`, `compose`, `refresh`, but the host renders them.
+
+The line I would draw: plugins can own surfaces; the host owns containment, navigation, identity, and trust signals.
+
+**Lifecycle**
+
+Retention changes the UX. A 30-day server cap means the app needs an explicit distinction between server-backed inbox and local history.
+
+I would use:
+
+- **Inbox**: active, unarchived messages not expired locally.
+- **Archive**: user-kept local messages.
+- **Delete**: remove local copy and dismiss from server if still present.
+- **Auto-expire**: server removes after cap; client may keep archived/read copies according to local policy.
+
+Dismissal should map to server cleanup, not necessarily user deletion. If the user archives a message, I would dismiss it from server once safely stored locally, because the server is just delivery/retention. If the user deletes it, remove local state and call dismiss. If the user marks read, do not dismiss automatically unless the product explicitly defines inbox as ephemeral.
+
+For `DISMISS_ALL`, be careful. It is useful for “clear all delivered transport items,” but a visible UI action named “Delete all” or “Clear inbox” must communicate local consequences. I would start with per-message archive/delete and batch archive, not expose broad dismissal protocol language.
+
+Client persistence longer than 30 days is valuable, especially for lottery and trading. But the plugin bundle question matters: if rendering old messages depends on a bundle that was revoked or unavailable, history breaks. Store the verified bundle version used for the message, or store a stable render artifact/manifest reference. At minimum, cache bundles by hash, not just plugin latest.
+
+**App Chrome**
+
+Use conventional app chrome:
+
+- Top app bar: title/search, account/sync status, overflow.
+- Bottom nav: Inbox, Archive, Devices or Settings.
+- Optional FAB only if there is at least one installed/paired plugin with a host-declared compose capability.
+
+The chrome can be plugin-aware, but only through host-declared capabilities. For example, a trading bot might expose “New alert,” a chat plugin might expose “New message,” lottery might expose nothing. If multiple plugins expose compose, the FAB opens a chooser. If none do, no FAB.
+
+Do not put Pair sender / Devices / Refresh / Log out as top-row buttons in the main steady-state UI. Pairing is an onboarding/settings action. Refresh can be pull-to-refresh or overflow. Log out belongs in account/settings. Devices belongs in bottom nav or settings.
+
+**Edge Cases**
+
+These need first-class screens/states, not logs.
+
+Empty inbox after fresh install should say, in product terms, that there are no messages yet and offer Pair sender. After pairing, the empty state should change: “Waiting for messages from X” with last poll/sync status available somewhere quiet.
+
+Plugin fetch failed should still show a host preview if metadata decrypted. The row opens an error detail with retry, plugin id/version/hash, and safe diagnostic text. The user should be able to archive/delete without the plugin rendering.
+
+Plugin render threw should not destroy the message. Show host metadata plus “Plugin failed to render this message,” with retry and report/copy diagnostics if you have that flow.
+
+Bundle revoked since storage is tricky. Revocation should prevent fetching/executing newly untrusted bundles. It should not automatically make old local history unreadable unless the revocation reason is severe. You need revocation classes: superseded, compromised, sender-disabled. Compromised may require blocking execution and showing a security state.
+
+Payload does not validate against current plugin version: do not use current plugin version. Use the message’s declared plugin id, version/range, bundle hash, and schema. If the exact compatible bundle is unavailable, show a compatibility error and preserve the message.
+
+**Lottery Versus Other Senders**
+
+Lottery wants rich, inspectable result details. It benefits from archive, date buckets, search by draw/ticket, and full detail views. It probably does not need compose, chat, or high-frequency unread behavior.
+
+A trading bot is more time-sensitive and risk-sensitive. It needs priority, freshness, maybe pinned alerts, quick actions, audit history, and stronger stale-state warnings. A trading alert from 27 minutes ago may be materially different from a lottery result from yesterday. It may also need plugin remote search/history because the backend has orders, fills, and account state beyond messages.
+
+A notification sender wants glanceability and bulk management. It may never need heavy detail. For it, host-native previews, archive, unread, and filters matter most.
+
+A chat-style sender breaks the “card” metaphor. It wants conversation grouping, sender identity, read receipts, compose, and thread-level navigation. That is exactly why the host should not hard-code plugin grouping as the main inbox model. The host can support a message detail or plugin section that becomes a conversation view, but the global inbox should remain a sane notification surface.
+
+**SDK / Contract Changes**
+
+I would add these plugin/message contract pieces:
+
+- `hostPreview` in encrypted message payload: title, subtitle, summary, optional image/icon token, category, priority, search text, preview density.
+- `messageSchemaVersion` and `minPluginVersion`/`maxPluginVersion` or exact compatible bundle hash.
+- `surfaces` in plugin manifest: `messageDetail`, optional `previewRenderer`, optional `settings`, optional `history`, optional `compose`, optional `searchProvider`.
+- `capabilities` in manifest: network in detail, network in preview, storage, compose, remoteSearch, suggested chrome actions.
+- `lifecycle` hooks: `onMessageDetailMount`, `onMessageDetailUnmount`, `onActionResult`, maybe `onHostStateChanged`.
+- Host APIs: `platform.message.markRead`, `markUnread`, `archive`, `delete`, `dismissRemote`, `setTitle` only within detail if allowed, `openExternal` with host confirmation, `requestRefresh`.
+- Search API: `plugin.search(query, cursor)` returning typed results, with host-rendered result shells and plugin-owned result detail.
+- Error contract: plugin can emit validation failure with user-safe message and diagnostic code.
+
+**Architecture Blockers**
+
+The current WebView-per-card model quietly precludes the direction if it remains the only renderer. The list needs to be host-native first, with WebView moved primarily to detail. You can keep WebView-per-preview as an optional constrained path later, but not as the foundation.
+
+The “latest bundle” fetch model also conflicts with durable history. Old messages must render against the bundle/version/hash they were validated for, or fail gracefully. Cache by SHA-256 and retain manifest metadata per message.
+
+The native bridge currently only has `platform.network.fetch` in inbox mode. Detail surfaces need lifecycle and host state APIs, but those APIs must be narrow and auditable. Do not expand by handing plugins general navigation control.
+
+Finally, the M7 state merger needs to be good enough for message UI state. Read/archive/star/delete are not cache fluff. They need timestamped, mergeable records with tombstones, or multi-device UX will feel random.
+
+The product should become an inbox first and a plugin host second. That does not make plugins weak. It gives them the right place to be powerful: inside detail, history, compose, and dashboard surfaces, contained by host chrome that users can trust.
+tokens used
+21,356

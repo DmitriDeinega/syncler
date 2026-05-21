@@ -8,25 +8,45 @@ Syncler does not know what your data looks like, what your UI says, or what your
 
 Two artifacts:
 
-1. A **JavaScript plugin** that runs in the Syncler Android app's WebView and (a) renders cards from your payload, (b) defines buttons that POST back to your backend.
+1. A **JavaScript plugin** that runs in the Syncler Android app's WebView and renders the **detail view** of a card when the user taps it. The plugin defines buttons that POST back to your backend.
 2. **Backend code** that pushes a card to the user via the Syncler server, and an HTTP endpoint that receives the action callback.
+
+The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, time. The host draws that row from structured metadata you embed in the payload (`hostPreview`, §2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
 
 ## 2. Protocol
 
 ### Payload (your backend → user device)
 
-Whatever JSON you want. The example below uses a generic "alert + action" shape — replace it with your domain's schema.
+Two parts: a reserved **`hostPreview`** block the platform renders natively as the inbox row, and the rest of the payload that your plugin's `render()` consumes for the detail view.
 
 ```json
 {
+  "hostPreview": {
+    "title": "Something happened",
+    "subtitle": "Account A • 12 minutes ago",
+    "summary": "Brief one-sentence context for the row.",
+    "searchText": ["account-a", "alert", "threshold"]
+  },
   "item_id": "<your-internal-id>",
-  "title": "Something happened",
-  "body": "Details about the thing",
+  "body": "Details for the detail view, used by render()",
   "action_label": "Acknowledge"
 }
 ```
 
-That JSON is your `payload` argument to `client.send_to(...)`. Schema is yours.
+That JSON is your `payload` argument to `client.send_to(...)`. The plugin's `render(payload)` receives the entire dict — including the `hostPreview` block — but it doesn't need to use it (the host already drew the row).
+
+**`hostPreview` contract** (validated by `client.send_to` — invalid blocks raise at send time):
+
+| Field | Required | Type | Cap |
+|---|---|---|---|
+| `title` | yes | string | 80 UTF-8 bytes |
+| `subtitle` | no | string | 120 UTF-8 bytes |
+| `summary` | no | string | 240 UTF-8 bytes |
+| `searchText` | no | string[] | 16 entries × 64 UTF-8 bytes each |
+
+Total serialized `hostPreview` ≤ 2048 UTF-8 bytes. Missing block → the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
+
+`searchText` is folded into the host's global inbox search alongside title/subtitle/summary. Use it for domain-specific terms users would search by but that aren't visible in the row (e.g., ticker symbols, ticket numbers, account references).
 
 ### Action callback (user → your backend)
 
@@ -49,11 +69,20 @@ The platform does **not** inject `device_id` into the body in V1 — see §7 for
 `src/plugin.ts`:
 
 ```ts
-import { BasePlugin, DismissBehavior, registerPlugin, type PluginManifest } from '@syncler/plugin-sdk';
+import {
+  BasePlugin,
+  DismissBehavior,
+  registerPlugin,
+  type HostPreview,
+  type PluginManifest,
+} from '@syncler/plugin-sdk';
 
 interface MyPayload {
+  // hostPreview is in every payload your plugin receives — the host already
+  // drew the inbox row from it, but render() can still use it (e.g. to repeat
+  // the title in the detail header).
+  hostPreview: HostPreview;
   item_id: string;
-  title: string;
   body: string;
   action_label: string;
 }
@@ -74,8 +103,8 @@ class MyPlugin extends BasePlugin {
 
   async onMessage(payload: MyPayload) {
     return platform.showNotification({
-      title: payload.title,
-      body: payload.body,
+      title: payload.hostPreview.title,
+      body: payload.hostPreview.summary ?? payload.body,
       importance: 'default',
     });
   }
@@ -87,7 +116,7 @@ class MyPlugin extends BasePlugin {
     // devices). For V1, post directly to your declared endpoint.
     return `
       <div style="font-family:sans-serif;padding:16px">
-        <h2>${escapeHtml(payload.title)}</h2>
+        <h2>${escapeHtml(payload.hostPreview.title)}</h2>
         <p>${escapeHtml(payload.body)}</p>
         <button id="act" style="font-size:18px;padding:12px">${escapeHtml(payload.action_label)}</button>
       </div>
@@ -194,9 +223,14 @@ result = client.send_to(
     plugin_identifier="com.example.myapp",
     plugin_id="<plugin_row_id from publish_plugin>",
     payload={
+        "hostPreview": {
+            "title": "Something happened",
+            "subtitle": "Account A",
+            "summary": "Brief one-sentence context.",
+            "searchText": ["account-a", "alert"],
+        },
         "item_id": "abc-123",
-        "title": "Something happened",
-        "body": "Details about the thing",
+        "body": "Details for the detail view.",
         "action_label": "Acknowledge",
     },
     min_plugin_version="1.0.0",
@@ -255,6 +289,8 @@ def action():
 - **`429 rate limited`** — back off + retry per `Retry-After` header.
 - **Card shows "render failed: plugin did not install __syncler_internal_dispatch — missing registerPlugin() call?"** — your bundle defined the plugin class but didn't call `registerPlugin(new YourPlugin())` at module scope. See §3.
 - **Card shows "endpoint not declared"** — your `onclick` handler is calling a URL that doesn't match any pattern in your manifest's `declaredEndpoints`. Add the URL pattern (globs allowed: `https://example.com/api/*`) and re-publish.
+- **`HostPreviewValidationError: hostPreview.X is N UTF-8 bytes; max is M`** — caught at `client.send_to` time. Trim the offending field; see §2 for the caps. UTF-8 byte counts, not characters — emoji and accented characters cost more than one byte.
+- **Row shows "New message from {sender}" with no detail** — your message was sent without a `hostPreview` block, or the block was malformed (and got logged + ignored on the device). Add the block and re-send.
 
 Cross-reference `docs/crypto-spec.md` for the AAD + envelope canonical byte shapes if signatures disagree.
 
