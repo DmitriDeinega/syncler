@@ -1,0 +1,35 @@
+**Findings**
+
+- **High:** Android `parseHostPreview` is not contract-equivalent to the SDK validators. It silently ignores `hostPreview` when it is not an object at [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:191):24, coerces non-string `title`/`subtitle`/`summary` via `optString` at lines 193/201/206, ignores a non-array `searchText` via `optJSONArray` at line 213, coerces non-string array entries via `optString(i, "")` at line 220, and never enforces the 2048-byte total cap before returning `HostPreview` at line 228. Example: `{"title":"ok","searchText":"a, comma, list"}` is rejected by Python and TS, but Android accepts it as a valid preview with empty `searchText` and no warn log.
+
+- **Medium:** Python and TypeScript total-size validation are not byte-identical for non-ASCII unknown fields. Python uses `json.dumps(...).encode("utf-8")` with default `ensure_ascii=True` at [preview.py](D:/Projects/syncler/sdk-python/syncler/preview.py:89), while TS uses `TextEncoder(JSON.stringify(record))` at [preview.ts](D:/Projects/syncler/sdk-plugin/src/preview.ts:120). For documented fields the per-field caps catch most of this, but extension-field total caps can diverge.
+
+- **Medium:** The selected-item removal behavior described in the prompt is only true if something else removes the item. `refresh()` only merges `newDecrypted + _items.value` and writes when new messages exist at [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:88):1. It does not prune expired messages or messages from revoked pairings. The UI lookup would flip back if absent at [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:96):1, but current repository behavior keeps old items around.
+
+- **Medium:** The integration guide example contradicts the V1 bridge. `onMessage` calls `platform.showNotification` at [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:104):1, while the same guide says `platform.showNotification` rejects in V1 inbox mode at line 151. Revise the example to omit `onMessage`, return a notification descriptor only if that hook is actually invoked by the host, or explicitly mark it future/non-V1.
+
+- **Low:** Docs overpromise search. §2 says `searchText` “is folded into the host's global inbox search” at [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:49):1, but this phase only parses and stores it; no host search path consumes it. Since Phase 5 is out of scope, phrase this as reserved/future-indexed metadata.
+
+**Direct Answers**
+
+1. Byte caps are numerically aligned in the two SDKs, but Android is not enforcing the same shape/type/total rules. The `searchText` string case is the clearest failure: SDKs reject, Android accepts/ignores.
+
+2. When Android actually returns `null`, the fallback side effects are sound: row falls back, `payloadJson` is intact, and detail still passes the full payload to `PluginRenderView` at [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:234):1. The problem is that several malformed shapes do not return `null` or log.
+
+3. The unknown-extra-field total-cap test framing is right: documented fields intentionally fit under 2KB, leaving extension headroom. Keep that framing. Fix Android total-cap enforcement and consider canonicalizing Python/TS serialization.
+
+4. Normal WebView lifecycle looks fine: `BackHandler`/top-bar back exits detail, `AndroidView.onRelease` destroys bridge and WebView at [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:287):1. Fast back/open should not keep the first WebView composed. Residual risk: an in-flight `CardBridge` fetch can hold the old WebView reference until the blocking OkHttp call returns.
+
+5. Flip-back on selected item disappearance is the right behavior for expired/revoked content. But implement pruning first; currently stale items stick.
+
+6. No mark-read in Phase 1 is fine. It makes the flow feel less finished, but it belongs with the Phase 2 CAS/read-state work.
+
+7. I would not visually mark malformed metadata for users in Phase 1. Warn log/telemetry is enough, especially for old SDK senders. First fix Android so all malformed cases actually warn.
+
+8. Do not hide rows while `bundleJs == null`; `hostPreview` still gives useful inbox context. Detail fallback is acceptable for dogfood, but the copy says “encrypted payload” while showing decrypted `payloadJson` at [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:248):1.
+
+9. Main doc drift: search promise, `showNotification` example, and common error text “with no detail” at [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:293):1. Malformed/missing preview still has detail if the plugin bundle loads.
+
+10. Revise the §3 `onMessage` example. As written, it will fail if invoked in V1 inbox mode.
+
+Verification: `pytest sdk-python\tests\test_preview.py` passed. `vitest` preview tests could not run in this sandbox due local `spawn EPERM`, including with a single-thread pool retry.

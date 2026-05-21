@@ -10,7 +10,6 @@ import app.syncler.core.network.SynclerApi
 import app.syncler.core.storage.PairedSenderStore
 import app.syncler.feature.inbox.BuildConfig
 import java.security.MessageDigest
-import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -172,61 +171,9 @@ class InboxRepository @Inject constructor(
             expiresAt = dto.expiresAt,
             bundleJs = null,
             declaredEndpoints = emptyList(),
-            hostPreview = parseHostPreview(plaintextString),
+            hostPreview = HostPreviewParser.parse(plaintextString),
         )
     }.onFailure { Timber.tag(TAG).w(it, "decrypt failed for message %s", dto.id) }.getOrNull()
-
-    /**
-     * Extracts the optional `hostPreview` block from the decrypted payload.
-     * The host renders the inbox row from this; the plugin's `render()` still
-     * receives the full payload for the detail view. Missing block, malformed
-     * block, or required-field violations all yield null and a warn log — the
-     * row falls back to "New message from {senderName}" without crashing.
-     *
-     * Validation mirrors sdk-plugin/preview.ts and sdk-python/preview.py.
-     */
-    private fun parseHostPreview(plaintextJson: String): HostPreview? = runCatching {
-        val root = JSONObject(plaintextJson)
-        if (!root.has("hostPreview")) return@runCatching null
-        val obj = root.optJSONObject("hostPreview") ?: return@runCatching null
-
-        val title = obj.optString("title").takeIf { it.isNotBlank() } ?: run {
-            Timber.tag(TAG).w("hostPreview missing required title; falling back")
-            return@runCatching null
-        }
-        if (title.toByteArray(Charsets.UTF_8).size > 80) {
-            Timber.tag(TAG).w("hostPreview.title exceeds 80 UTF-8 bytes; falling back")
-            return@runCatching null
-        }
-        val subtitle = obj.optString("subtitle", "").takeIf { it.isNotEmpty() }
-        if (subtitle != null && subtitle.toByteArray(Charsets.UTF_8).size > 120) {
-            Timber.tag(TAG).w("hostPreview.subtitle exceeds 120 UTF-8 bytes; falling back")
-            return@runCatching null
-        }
-        val summary = obj.optString("summary", "").takeIf { it.isNotEmpty() }
-        if (summary != null && summary.toByteArray(Charsets.UTF_8).size > 240) {
-            Timber.tag(TAG).w("hostPreview.summary exceeds 240 UTF-8 bytes; falling back")
-            return@runCatching null
-        }
-
-        val searchText = mutableListOf<String>()
-        val searchArr = obj.optJSONArray("searchText")
-        if (searchArr != null) {
-            if (searchArr.length() > 16) {
-                Timber.tag(TAG).w("hostPreview.searchText has %d entries; max 16", searchArr.length())
-                return@runCatching null
-            }
-            for (i in 0 until searchArr.length()) {
-                val token = searchArr.optString(i, "")
-                if (token.isEmpty() || token.toByteArray(Charsets.UTF_8).size > 64) {
-                    Timber.tag(TAG).w("hostPreview.searchText[%d] invalid; falling back", i)
-                    return@runCatching null
-                }
-                searchText += token
-            }
-        }
-        HostPreview(title = title, subtitle = subtitle, summary = summary, searchText = searchText)
-    }.onFailure { Timber.tag(TAG).w(it, "hostPreview parse failed; falling back") }.getOrNull()
 
     private companion object {
         const val TAG = "InboxRepo"

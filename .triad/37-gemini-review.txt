@@ -1,0 +1,69 @@
+# Review 37 — Phase 1: hostPreview contract + preview/detail split
+
+Implementation follows the contract for the most part, but there is one **critical omission** in the Android validator (Total Cap) and a documentation hazard in the integration guide.
+
+## Contract enforcement
+
+### 1. Byte-cap parity
+- **Status:** **Partial.**
+- **Mismatch:** The 2048-byte **total cap** is missing in the Android implementation.
+    - `sdk-python` (L88) and `sdk-plugin` (L128) both serialize the block to JSON and verify it stays under 2048 bytes.
+    - `Android: InboxRepository.kt::parseHostPreview` (L223) checks individual fields (80/120/240/64) but never checks the total size of the block. A sender could bypass the 2KB limit by including many large unknown extension fields or a maxed-out `searchText` array that, combined with other fields, exceeds 2KB.
+- **Minor Inconsistency:** `searchText` empty tokens.
+    - Android (L255) rejects the entire block if any token in `searchText` is `isEmpty()`.
+    - SDKs allow empty strings (they only cap the max bytes). This is a safe deviation but technically a contract mismatch.
+
+### 2. Side-effects of fallback
+- **Status:** **Verified.**
+- `InboxRepository.kt::parseHostPreview` is wrapped in `runCatching` (L223) and returns `null` on any violation.
+- `InboxRow` (L146) correctly switches to the generic "New message from {senderName}" template when `preview == null`.
+- The plugin still loads the full `payloadJson` in the detail view; the malformed `hostPreview` block is simply ignored by the host but preserved for the plugin.
+
+### 3. Total-cap test
+- **Finding:** The documented fields alone sum to 1,512 bytes (80+120+240 + 16*64 + JSON overhead). The ~500B headroom for "unknown fields" is a sound design choice for future-proofing, but **must be enforced on the host** to prevent payload bloat in the inbox database.
+
+## Preview/detail split
+
+### 4. WebView lifecycle
+- **Status:** **Clean.**
+- `InboxScreen.kt::PluginRenderView` uses `onRelease` (L237) to call `bridge.destroy()`, `removeJavascriptInterface`, and `webView.destroy()`.
+- Since `DetailScreen` is conditionally composed based on `selectedId` (L97), setting `selectedId = null` (back action) removes the entire sub-tree, triggering `onRelease`.
+- Fast back/open cycles are safe because each `AndroidView` gets a fresh `WebView` instance.
+
+### 5. `selectedId` vs `items` race
+- **Status:** **Correct.**
+- If a background poll-refresh removes the selected item (e.g. it expired), `selectedItem` (L96) becomes null on the next recomposition, and the UI correctly flips back to the list view.
+- Note: The current `InboxRepository.refresh` (L77) only appends/merges; it doesn't seem to prune expired items yet, so this race won't trigger in practice until Phase 4 (Cleanup).
+
+### 6. No mark-read
+- **Status:** **Fine.** Deferring visual unread states to Phase 2 (M7) is appropriate given the scope of the preview/detail split.
+
+## Fallback / failure paths
+
+### 7. UI affordance for malformed metadata
+- **Finding:** Currently, there is no visual indicator that a message *intended* to have a preview but failed validation. 
+- **Recommendation:** Stick with the current "silent fallback." Surfacing "Malformed Metadata" errors to end-users is alarmist. If a sender is broken, they'll see the failure in their own SDK logs/tests during development (§9 of the guide).
+
+### 8. Bundle not yet fetched
+- **Status:** **Correct.**
+- `DetailScreen` (L186) shows a "Plugin not loaded" card with the raw `PayloadFallbackView` if `bundleJs` is null.
+- This is better than hiding the row, as it allows the user to see the encrypted content (best effort) even if the CDN is down or the hash check failed.
+
+## Doc consistency
+
+### 9. Documentation Chain
+- **Status:** **Consistent.** `integration-guide.md` §2 table matches the SDK/Host byte limits (except for the missing Android total-cap enforcement mentioned above).
+
+### 10. §3 Example Hazard
+- **Status:** **Conflicting.**
+- `integration-guide.md` §3 example code shows `onMessage` calling `platform.showNotification`.
+- However, the text immediately below and the implementation in `RenderShell.kt` (L93) explicitly **reject** `showNotification` in V1 inbox mode.
+- **Fix:** Revise the §3 example to remove `onMessage` or have it `console.log`. Using a forbidden API in the primary "Getting Started" example is a high-friction footgun for integrators.
+
+## Summary of Fixes Required
+
+1. **Android:** Add `totalMaxBytes` (2048) check to `InboxRepository.kt::parseHostPreview`.
+2. **Docs:** Update `integration-guide.md` §3 to remove the `showNotification` call from the example code.
+
+---
+*Verified against commit M11.1 (HEAD).*

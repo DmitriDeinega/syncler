@@ -46,7 +46,7 @@ That JSON is your `payload` argument to `client.send_to(...)`. The plugin's `ren
 
 Total serialized `hostPreview` ≤ 2048 UTF-8 bytes. Missing block → the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
 
-`searchText` is folded into the host's global inbox search alongside title/subtitle/summary. Use it for domain-specific terms users would search by but that aren't visible in the row (e.g., ticker symbols, ticket numbers, account references).
+`searchText` is reserved metadata the host will index for global inbox search (planned). Even though search isn't wired yet in V1, populate this now — your messages become searchable as soon as the feature ships, without re-publishing. Use it for domain-specific terms users would search by but that aren't visible in the row (e.g., ticker symbols, ticket numbers, account references).
 
 ### Action callback (user → your backend)
 
@@ -101,13 +101,10 @@ class MyPlugin extends BasePlugin {
     minPlatformVersion: '1.0.0',
   };
 
-  async onMessage(payload: MyPayload) {
-    return platform.showNotification({
-      title: payload.hostPreview.title,
-      body: payload.hostPreview.summary ?? payload.body,
-      importance: 'default',
-    });
-  }
+  // onMessage is NOT invoked in V1 inbox mode — message arrival is already
+  // surfaced by the host-rendered row from hostPreview. If you implement it
+  // anyway, do not call platform.showNotification (rejects in V1).
+  // The host will invoke onMessage when the V1.5 OS-notification path ships.
 
   render(payload: MyPayload): string {
     // V1 recommended pattern: button handler calls `platform.network.fetch`
@@ -290,7 +287,7 @@ def action():
 - **Card shows "render failed: plugin did not install __syncler_internal_dispatch — missing registerPlugin() call?"** — your bundle defined the plugin class but didn't call `registerPlugin(new YourPlugin())` at module scope. See §3.
 - **Card shows "endpoint not declared"** — your `onclick` handler is calling a URL that doesn't match any pattern in your manifest's `declaredEndpoints`. Add the URL pattern (globs allowed: `https://example.com/api/*`) and re-publish.
 - **`HostPreviewValidationError: hostPreview.X is N UTF-8 bytes; max is M`** — caught at `client.send_to` time. Trim the offending field; see §2 for the caps. UTF-8 byte counts, not characters — emoji and accented characters cost more than one byte.
-- **Row shows "New message from {sender}" with no detail** — your message was sent without a `hostPreview` block, or the block was malformed (and got logged + ignored on the device). Add the block and re-send.
+- **Row shows "New message from {sender}" with fallback text only** — your message was sent without a `hostPreview` block, or the block was malformed (logged + ignored on the device). The detail view still loads the plugin and renders normally; only the row is generic. Add a valid `hostPreview` and re-send.
 
 Cross-reference `docs/crypto-spec.md` for the AAD + envelope canonical byte shapes if signatures disagree.
 

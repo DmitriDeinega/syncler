@@ -47,4 +47,10 @@ dependencies {
     implementation(libs.timber)
 
     ksp(libs.hilt.compiler)
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    // Android stubs org.json with NotMocked, breaking host-side parser tests.
+    // Pull the real implementation onto the test classpath so the unit tests
+    // exercise the same JSON behavior the production runtime sees.
+    testImplementation("org.json:json:20240303")
 }

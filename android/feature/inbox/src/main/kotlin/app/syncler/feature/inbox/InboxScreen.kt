@@ -245,7 +245,8 @@ private fun DetailScreen(item: InboxItem, onBack: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Text(
-                        "Couldn't fetch the sender's plugin bundle yet. The encrypted payload is shown below.",
+                        "Couldn't fetch or verify the sender's plugin bundle. " +
+                            "Raw decrypted payload shown below for diagnostics.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     PayloadFallbackView(item.payloadJson)

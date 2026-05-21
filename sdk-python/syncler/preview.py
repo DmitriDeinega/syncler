@@ -85,8 +85,10 @@ def validate_host_preview(value: Any) -> None:
             _check_bytes(f"searchText[{i}]", token, SEARCH_TEXT_ENTRY_MAX_BYTES)
 
     # Total serialized size cap. Senders who want a richer preview should
-    # trim summary or searchText rather than dropping fields.
-    serialized = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    # trim summary or searchText rather than dropping fields. `ensure_ascii=False`
+    # keeps the byte count byte-identical to sdk-plugin's TextEncoder(JSON.stringify(...)),
+    # which encodes non-ASCII characters raw (the JS default).
+    serialized = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(serialized) > TOTAL_MAX_BYTES:
         raise HostPreviewValidationError(
             f"hostPreview serialized size {len(serialized)} bytes exceeds {TOTAL_MAX_BYTES} byte cap"
