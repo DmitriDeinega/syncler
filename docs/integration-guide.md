@@ -11,16 +11,15 @@ Two artifacts:
 1. A **JavaScript plugin** that runs in the Syncler Android app's WebView and renders the **detail view** of a card when the user taps it. The plugin defines buttons that POST back to your backend.
 2. **Backend code** that pushes a card to the user via the Syncler server, and an HTTP endpoint that receives the action callback.
 
-The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, relative timestamp. The host draws that row from structured metadata you embed in the payload (`hostPreview`, §2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
+The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, arrival time. The host draws that row from structured metadata you embed in the payload (`hostPreview`, §2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
 
 ### What the host does for you
 
 Once a card is in a user's inbox, the host handles all of the following without you doing anything plugin-side:
 
-- **Native row rendering** from your `hostPreview` block (title / subtitle / summary) plus the server timestamp.
+- **Native row rendering** from your `hostPreview` block (title / subtitle / summary) plus the server's arrival time (HH:mm for today, MMM d for older).
 - **Unread indicator** + read sync across the user's devices. A row marks read when the user opens the detail view; the state syncs via an encrypted CAS state blob.
-- **Date buckets** in the chronological view (Today / Yesterday / Earlier).
-- **Group-by-sender** toggle with collapsible sections — the user picks chronological or grouped from the top app bar.
+- **Left navigation drawer** with selectable views: **Unread** (only items the user hasn't opened), **All** (the default), **Archive** (items the user moved out of the main flow), and **Groups** — an expandable list of every paired sender that lets the user filter the inbox down to one sender at a time. The top-bar title reflects the active view.
 - **Inbox search** (case-insensitive substring) over title, subtitle, summary, sender name, AND any tokens you supplied in `hostPreview.searchText`.
 - **Archive** + **Delete** + **Multi-select** with bulk Archive / Delete. Archive/delete state is local and synced across devices; deleted messages are hidden from inbox AND archive. The server retains messages until their normal expiry.
 - **Bottom navigation** (Inbox / Senders / Settings) — the user is always one tap away from your card.
