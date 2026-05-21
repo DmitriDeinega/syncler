@@ -46,7 +46,7 @@ That JSON is your `payload` argument to `client.send_to(...)`. The plugin's `ren
 
 Total serialized `hostPreview` ≤ 2048 UTF-8 bytes. Missing block → the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
 
-`searchText` is reserved metadata the host will index for global inbox search (planned). Even though search isn't wired yet in V1, populate this now — your messages become searchable as soon as the feature ships, without re-publishing. Use it for domain-specific terms users would search by but that aren't visible in the row (e.g., ticker symbols, ticket numbers, account references).
+`searchText` is folded into the host's inbox search alongside title, subtitle, summary, and sender name. The host does a case-insensitive substring match — populate this with the terms a user would type into the search box but that aren't part of the visible row (ticker symbols, ticket numbers, account references). Plugin-scoped *content* search (a search bar that runs against your backend) is V1.5.
 
 ### Action callback (user → your backend)
 

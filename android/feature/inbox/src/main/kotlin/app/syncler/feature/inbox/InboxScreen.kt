@@ -21,7 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -38,7 +40,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -88,6 +92,17 @@ class InboxViewModel @Inject constructor(
 
     private val _selectedId = MutableStateFlow<String?>(null)
     val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+
+    /**
+     * Host-side metadata search (M11.5). Substring match against
+     * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
+     * entirely client-side — the server is content-blind. Plugin-scoped
+     * content search is V1.5 (per the consultation 35 federated-search plan).
+     */
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    fun setSearch(q: String) { _searchQuery.value = q }
+    fun clearSearch() { _searchQuery.value = "" }
 
     init {
         // Pull cross-device state, then retry any push that failed previously
@@ -156,6 +171,8 @@ fun InboxScreen(
     val readMessageIds by viewModel.readMessageIds.collectAsState()
     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
     val showArchive by viewModel.showArchive.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    var searchActive by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -194,44 +211,121 @@ fun InboxScreen(
     Scaffold(
         modifier = modifier,
         topBar = {
-            TopAppBar(
-                title = { Text("Inbox") },
-                actions = {
-                    if (refreshing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
-                        )
-                    }
-                    IconButton(onClick = { viewModel.refresh() }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
-                    }
-                    IconButton(onClick = viewModel::openArchive) {
-                        Icon(Icons.Filled.Archive, contentDescription = "Archive")
-                    }
-                },
-            )
+            if (searchActive) {
+                InboxSearchAppBar(
+                    query = searchQuery,
+                    onQueryChange = viewModel::setSearch,
+                    onClose = {
+                        viewModel.clearSearch()
+                        searchActive = false
+                    },
+                )
+            } else {
+                TopAppBar(
+                    title = { Text("Inbox") },
+                    actions = {
+                        if (refreshing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
+                            )
+                        }
+                        IconButton(onClick = { searchActive = true }) {
+                            Icon(Icons.Filled.Search, contentDescription = "Search")
+                        }
+                        IconButton(onClick = { viewModel.refresh() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        }
+                        IconButton(onClick = viewModel::openArchive) {
+                            Icon(Icons.Filled.Archive, contentDescription = "Archive")
+                        }
+                    },
+                )
+            }
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
-            // The active inbox excludes archived messages — they live in the
-            // archive sub-screen and don't add to the unread badge / clutter
-            // the active feed.
+            // Active inbox = items minus archived. Search filters this set
+            // by matching the trimmed query against title/subtitle/summary/
+            // searchText/senderName (case-insensitive substring match — host
+            // metadata only; plugin-scoped content search is V1.5).
             val activeItems = items.filter { it.id !in archivedMessageIds }
-            if (activeItems.isEmpty()) {
-                Text(
+            val filtered = remember(activeItems, searchQuery) {
+                if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+            }
+            when {
+                activeItems.isEmpty() -> Text(
                     "No cards yet. Pair a sender from the Senders tab and they can push to you.",
                     modifier = Modifier.padding(top = 24.dp),
                     style = MaterialTheme.typography.bodyMedium,
                 )
-            } else {
-                BucketedInboxList(
-                    items = activeItems,
+                searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+                    "No cards match \"$searchQuery\".",
+                    modifier = Modifier.padding(top = 24.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                else -> BucketedInboxList(
+                    items = filtered,
                     readMessageIds = readMessageIds,
                     onItemClick = viewModel::open,
                 )
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InboxSearchAppBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    TopAppBar(
+        title = {
+            androidx.compose.material3.TextField(
+                value = query,
+                onValueChange = onQueryChange,
+                placeholder = { Text("Search inbox") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = androidx.compose.material3.TextFieldDefaults.colors(
+                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                ),
+            )
+        },
+        navigationIcon = {
+            IconButton(onClick = onClose) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close search")
+            }
+        },
+        actions = {
+            if (query.isNotEmpty()) {
+                IconButton(onClick = { onQueryChange("") }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                }
+            }
+        },
+    )
+}
+
+/**
+ * Case-insensitive substring match across visible row fields plus the
+ * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
+ * promised in §2 of the integration guide that searchText would be
+ * folded into host search — this is where that promise gets paid.
+ */
+internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
+    val q = rawQuery.trim().lowercase()
+    if (q.isEmpty()) return true
+    if (item.senderName.lowercase().contains(q)) return true
+    item.hostPreview?.let { preview ->
+        if (preview.title.lowercase().contains(q)) return true
+        if (preview.subtitle?.lowercase()?.contains(q) == true) return true
+        if (preview.summary?.lowercase()?.contains(q) == true) return true
+        if (preview.searchText.any { it.lowercase().contains(q) }) return true
+    }
+    return false
 }
 
 /**
