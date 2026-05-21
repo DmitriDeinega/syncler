@@ -82,4 +82,7 @@ abstract class SessionBindings {
 
     @Binds
     abstract fun bindDevicePublicKeyProvider(provider: DeviceKeyProvider): DevicePublicKeyProvider
+
+    @Binds
+    abstract fun bindDeviceIdentityStore(store: SecureDeviceIdentityStore): DeviceIdentityStore
 }

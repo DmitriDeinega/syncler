@@ -44,6 +44,7 @@ from app.services.messages import (
     parse_pointer,
     store_message,
 )
+from app.services.devices import touch_device_last_seen
 from app.services.push import push_dismiss_to_other_devices, push_message_to_user_devices
 from app.services.senders import (
     SenderNotFoundError,
@@ -160,6 +161,10 @@ async def inbox(
             await assert_device_belongs_to_user(db, user_id=user.id, device_id=device_id)
         except DeviceOwnershipError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found") from exc
+        # Authenticated + ownership-checked: bump last_seen so the Settings
+        # tab shows fresh activity. Without this the column stays NULL and
+        # users can't tell which row in the device list is the current one.
+        await touch_device_last_seen(db, device_id=device_id)
 
     messages, next_since = await inbox_for_device(
         db,

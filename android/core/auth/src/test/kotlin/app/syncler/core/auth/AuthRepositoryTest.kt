@@ -25,7 +25,8 @@ class AuthRepositoryTest {
         val api = FakeApi()
         val tokenStore = InMemoryTokenStore()
         val session = Session(tokenStore)
-        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider())
+        val identityStore = FakeDeviceIdentityStore()
+        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore)
 
         val result = repository.signup("User@Example.com", "correct horse battery staple".toCharArray())
 
@@ -36,17 +37,43 @@ class AuthRepositoryTest {
         assertEquals("user@example.com", api.preLoginRequest?.email)
         assertNotNull(api.signupRequest?.encryptedMasterKey)
         assertEquals(1, api.enrollCount)
+        assertEquals("device-1", identityStore.value)
+    }
+
+    @Test
+    fun logoutClearsStoredDeviceId() = runTest {
+        val api = FakeApi()
+        val identityStore = FakeDeviceIdentityStore()
+        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore)
+        repository.signup("u@example.com", "correct horse battery staple".toCharArray())
+        assertEquals("device-1", identityStore.value)
+
+        repository.logout()
+
+        assertEquals(null, identityStore.value)
     }
 
     @Test
     fun revokeFailureIsReturned() = runTest {
         val api = FakeApi(revokeSucceeds = false)
-        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider())
+        val repository = AuthRepository(
+            api,
+            Session(InMemoryTokenStore()),
+            FixedDevicePublicKeyProvider(),
+            FakeDeviceIdentityStore(),
+        )
 
         val result = repository.revokeDevice("missing")
 
         assertTrue(result.isFailure)
     }
+}
+
+private class FakeDeviceIdentityStore : DeviceIdentityStore {
+    var value: String? = null
+    override fun read(): String? = value
+    override fun write(deviceId: String) { value = deviceId }
+    override fun clear() { value = null }
 }
 
 private class InMemoryTokenStore : TokenStore {
@@ -116,7 +143,7 @@ private class FakeApi(
     // they were stubbed when added to keep this fixture compiling alongside
     // SynclerApi growth (state, pairing, plugin lookup, etc.).
     override suspend fun getMessage(id: String) = stub()
-    override suspend fun inbox(since: String?) = stub()
+    override suspend fun inbox(since: String?, deviceId: String?) = stub()
     override suspend fun dismissMessage(id: String, deviceId: String): Response<Unit> = stub()
     override suspend fun previewPairing(token: String) = stub()
     override suspend fun completePairing(body: app.syncler.core.network.PairingCompleteRequestDto) = stub()
@@ -125,6 +152,7 @@ private class FakeApi(
     override suspend fun getUserState() = stub()
     override suspend fun putUserState(body: app.syncler.core.network.StatePutRequestDto): Response<app.syncler.core.network.StatePutResponseDto> = stub()
     override suspend fun getPluginLatest(senderId: String, pluginIdentifier: String) = stub()
+    override suspend fun getPluginById(pluginRowId: String) = stub()
 
     private fun stub(): Nothing = throw UnsupportedOperationException("not implemented by AuthRepositoryTest fake")
 }

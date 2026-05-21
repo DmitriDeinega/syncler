@@ -35,7 +35,12 @@ interface SynclerApi {
     suspend fun getMessage(@Path("id") id: String): MessageInboxItemDto
 
     @GET("/v1/messages/inbox")
-    suspend fun inbox(@retrofit2.http.Query("since") since: String? = null): MessageInboxResponseDto
+    suspend fun inbox(
+        @retrofit2.http.Query("since") since: String? = null,
+        // Server bumps the device row's last_seen when this is supplied so the
+        // Settings tab can identify the current device by freshness.
+        @retrofit2.http.Query("device_id") deviceId: String? = null,
+    ): MessageInboxResponseDto
 
     @POST("/v1/messages/{id}/dismiss")
     suspend fun dismissMessage(

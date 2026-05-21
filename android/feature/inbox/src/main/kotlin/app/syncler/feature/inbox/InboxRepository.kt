@@ -1,5 +1,6 @@
 package app.syncler.feature.inbox
 
+import app.syncler.core.auth.DeviceIdentityStore
 import app.syncler.core.auth.Session
 import app.syncler.core.crypto.Aead
 import app.syncler.core.crypto.MessageAad
@@ -39,6 +40,7 @@ class InboxRepository @Inject constructor(
     private val api: SynclerApi,
     private val session: Session,
     private val pairedSenderStore: PairedSenderStore,
+    private val deviceIdentityStore: DeviceIdentityStore,
 ) {
     private val _items = MutableStateFlow<List<InboxItem>>(emptyList())
     val items: StateFlow<List<InboxItem>> = _items.asStateFlow()
@@ -74,7 +76,7 @@ class InboxRepository @Inject constructor(
 
     suspend fun refresh(): Result<Int> = pollMutex.withLock {
         runCatching {
-            val response = api.inbox(since = lastSince)
+            val response = api.inbox(since = lastSince, deviceId = deviceIdentityStore.read())
             val userId = session.currentUserId() ?: return@runCatching 0
             val pairings = pairedSenderStore.pairedSenders.value.associateBy { it.senderId }
 

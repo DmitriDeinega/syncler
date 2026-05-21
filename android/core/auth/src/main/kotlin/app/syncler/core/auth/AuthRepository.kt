@@ -25,6 +25,7 @@ class AuthRepository @Inject constructor(
     private val api: SynclerApi,
     private val session: Session,
     private val deviceKeyProvider: DevicePublicKeyProvider,
+    private val deviceIdentityStore: DeviceIdentityStore,
 ) {
     suspend fun signup(email: String, password: CharArray): Result<SignupResult> = runCatching {
         val normalizedEmail = normalizedEmail(email)
@@ -90,6 +91,7 @@ class AuthRepository @Inject constructor(
     }
 
     suspend fun logout() {
+        deviceIdentityStore.clear()
         session.logout()
     }
 
@@ -103,7 +105,13 @@ class AuthRepository @Inject constructor(
     }
 
     private suspend fun enrollCurrentDevice() {
-        api.enrollDevice(DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()))
+        val response = api.enrollDevice(
+            DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()),
+        )
+        // Persist the server-issued device_id so we can pass it on the inbox
+        // poll. The server uses it to bump last_seen + identify the current
+        // device in the Settings list.
+        deviceIdentityStore.write(response.deviceId)
     }
 
     private fun normalizedEmail(email: String): String = email.trim().lowercase(Locale.US)
