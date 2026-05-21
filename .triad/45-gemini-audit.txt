@@ -1,0 +1,36 @@
+**Consultation 45: M11 Alignment Audit & Integration Guide Rewrite**
+
+I have completed the alignment audit of the M11 development phase and updated the `docs/integration-guide.md` to reflect the current platform state.
+
+### Part 1: M11 Alignment Audit
+
+The following table recaps the audit of the M11.0 through M11.7 commit ladder against the original agreements in consultations 35, 36, and reviews 37–44.
+
+| Phase | Deliverable | Status | Justification |
+| :--- | :--- | :--- | :--- |
+| **M11.1** | `hostPreview` + Preview/Detail split | **GREEN** | Contract exactly matches the "cut" version (Title, Subtitle, Summary, SearchText). No drift into priority/category. |
+| **M11.2** | Read state + M7 CAS sync | **GREEN** | Syncs via encrypted user-state blob. Triggered on detail-open only (confirmed as the intentional decision in Review 38). |
+| **M11.3** | Bottom nav + Date buckets + Archive | **GREEN** | Nav (Inbox/Senders/Settings) and date buckets match spec. Archive honestly documented as "hide-from-active" for V1. |
+| **M11.4** | Bundle-by-hash + Revocation reasons | **GREEN** | `/by-id` lookup ensures historical correctness. `compromised` reason triggers the requested hard E-stop in the UI. |
+| **M11.5** | Host-side metadata search | **GREEN** | Covers Title, Subtitle, Summary, Sender, and `searchText` tokens. Case-insensitive substring match verified. |
+| **M11.6** | Relative timestamps + Delete | **GREEN** | Cross-device delete (via CAS) and relative formatting implemented. Settings screen filters revoked devices. |
+| **M11.7** | Multi-select + Group-by-sender | **GREEN** | Group-by-sender was added as an **optional toggle**, reconciling Consult 35's concerns with user feedback. |
+
+**Pressure-Test Resolutions:**
+1.  **Group-by-sender:** This was a planned drift to accommodate user feedback. By making it a toggle rather than the primary navigation, we preserved the time-sensitive chronological feed while allowing structured access.
+2.  **Bundle-by-hash:** The V1 state is compatible. While disk persistence is deferred to V1.5, the implementation uses `/by-id` to ensure that messages always resolve to their original validated bundles, even after app restarts.
+3.  **Delete vs Dismiss vs Archive:** The "trinary" is honored. Archive and Delete are synced UI actions; Dismiss remains a server-side endpoint for future sender-feedback loops.
+
+---
+
+### Part 2: Integration Guide Update
+
+I have updated `docs/integration-guide.md` to provide a clean, current-state description of the platform.
+
+**Key Updates:**
+*   **Added §5.5 Revoking a plugin version:** Documents the `client.revoke_plugin` method and the UX consequences of each revocation reason (`superseded`, `compromised`, `sender_disabled`).
+*   **Added §10 Versioning + history:** Explains the bundle-by-hash guarantee and how Syncler ensures `v2.0.0` releases don't break `v1.0.0` message rendering.
+*   **Scrubbed Changelog Phrasing:** Replaced "now," "is no longer," and "we changed" with descriptive, state-based language (e.g., changing "The version is no longer active" to "The version is inactive").
+*   **Formatting Fixes:** Corrected a missing bullet point and bold markers in the "Common errors" section.
+
+The document is now ready for delivery to the sender-side development team.

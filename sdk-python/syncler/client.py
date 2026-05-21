@@ -323,6 +323,51 @@ class Client:
         resp.raise_for_status()
         return resp.json()
 
+    # Accepted classifications for the optional ``reason`` field on revoke.
+    # The host renders different UX per reason: silent for ``superseded``,
+    # security alert with refuse-to-execute for ``compromised``, neutral
+    # "no longer available" banner for ``sender_disabled``. ``unspecified``
+    # is the conservative default for legacy revokes with no reason given;
+    # callers SHOULD always supply a real classification.
+    REVOCATION_REASONS = ("superseded", "compromised", "sender_disabled", "unspecified")
+
+    def revoke_plugin(
+        self,
+        *,
+        plugin_row_id: str,
+        reason: str | None = None,
+    ) -> None:
+        """Revoke a previously-published plugin row, optionally with a
+        classified reason.
+
+        ``reason`` must be one of :attr:`REVOCATION_REASONS` or None. If
+        supplied, the value is included in the canonical signed envelope so
+        an in-flight MITM cannot strip a security classification down to a
+        harmless one. The server's revoke service is monotone: a higher-
+        severity reason can overwrite a lower one (``superseded`` ->
+        ``compromised``), but downgrades are silently ignored.
+
+        Returns None on success; raises for HTTP errors.
+        """
+        self._require_sender_id()
+        if reason is not None and reason not in self.REVOCATION_REASONS:
+            raise SynclerError(
+                f"reason must be one of {self.REVOCATION_REASONS}; got {reason!r}"
+            )
+        envelope: dict[str, str] = {
+            "sender_id": self._canonical_sender_id(),
+            "plugin_row_id": _canon_uuid(plugin_row_id),
+        }
+        if reason is not None:
+            envelope["reason"] = reason
+        signature = self.private_key.sign(canonical_json(envelope))
+        body: dict[str, Any] = dict(envelope)
+        body["sender_signature"] = b64(signature)
+        resp = self.session.post(
+            f"{self.base_url}/v1/plugins/revoke", json=body, timeout=10
+        )
+        resp.raise_for_status()
+
     # ---------------------------- Helpers ----------------------------------
 
     def _require_sender_id(self) -> None:

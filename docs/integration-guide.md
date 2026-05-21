@@ -1,6 +1,6 @@
 # Syncler integration guide
 
-You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes encrypted blobs to a user's phone, and a JavaScript plugin you wrote renders them and handles taps. **Read this end-to-end before writing code; it's ~6 pages.**
+You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes encrypted blobs to a user's phone, and a JavaScript plugin you wrote renders them and handles taps. **Read this end-to-end before writing code; it's ~7 pages.**
 
 Syncler does not know what your data looks like, what your UI says, or what your buttons do. Your payload, your plugin code, your callback endpoint — Syncler just routes bytes.
 
@@ -11,7 +11,22 @@ Two artifacts:
 1. A **JavaScript plugin** that runs in the Syncler Android app's WebView and renders the **detail view** of a card when the user taps it. The plugin defines buttons that POST back to your backend.
 2. **Backend code** that pushes a card to the user via the Syncler server, and an HTTP endpoint that receives the action callback.
 
-The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, time. The host draws that row from structured metadata you embed in the payload (`hostPreview`, §2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
+The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, relative timestamp. The host draws that row from structured metadata you embed in the payload (`hostPreview`, §2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
+
+### What the host does for you
+
+Once a card is in a user's inbox, the host handles all of the following without you doing anything plugin-side:
+
+- **Native row rendering** from your `hostPreview` block (title / subtitle / summary) plus the server timestamp.
+- **Unread indicator** + read sync across the user's devices. A row marks read when the user opens the detail view; the state syncs via an encrypted CAS state blob.
+- **Date buckets** in the chronological view (Today / Yesterday / Earlier).
+- **Group-by-sender** toggle with collapsible sections — the user picks chronological or grouped from the top app bar.
+- **Inbox search** (case-insensitive substring) over title, subtitle, summary, sender name, AND any tokens you supplied in `hostPreview.searchText`.
+- **Archive** + **Delete** + **Multi-select** with bulk Archive / Delete. Archive/delete state is local and synced across devices; deleted messages are hidden from inbox AND archive. The server retains messages until their normal expiry.
+- **Bottom navigation** (Inbox / Senders / Settings) — the user is always one tap away from your card.
+- **Revocation UX** — if you revoke a plugin version with a `compromised` reason, the host refuses to execute the bundle on the device and shows a security banner instead. See §5.5.
+
+You don't need to opt into any of these. Populate `hostPreview` and they all work.
 
 ## 2. Protocol
 
@@ -101,16 +116,14 @@ class MyPlugin extends BasePlugin {
     minPlatformVersion: '1.0.0',
   };
 
-  // onMessage is NOT invoked in V1 inbox mode — message arrival is already
-  // surfaced by the host-rendered row from hostPreview. If you implement it
-  // anyway, do not call platform.showNotification (rejects in V1).
-  // The host will invoke onMessage when the V1.5 OS-notification path ships.
+  // onMessage is NOT invoked in V1 inbox mode. Message arrival is surfaced by
+  // the host-rendered row from hostPreview. If you implement it anyway, do not
+  // call platform.showNotification; it rejects in V1 inbox mode.
 
   render(payload: MyPayload): string {
     // V1 recommended pattern: button handler calls `platform.network.fetch`
     // directly. The `platform.message.respond` + `onAction` round-trip is
-    // reserved for V1.5 (it lets the platform sync action state across
-    // devices). For V1, post directly to your declared endpoint.
+    // not part of V1 inbox mode. Post directly to your declared endpoint.
     return `
       <div style="font-family:sans-serif;padding:16px">
         <h2>${escapeHtml(payload.hostPreview.title)}</h2>
@@ -143,9 +156,9 @@ registerPlugin(new MyPlugin());
 
 Render whatever HTML/CSS/JS suits your domain. The WebView is isolated; only `platform.*` APIs cross the boundary.
 
-**V1 card-render bridge — what's wired:**
+**V1 card-render bridge:**
 - `platform.network.fetch(url, init)` — works, gated by `declaredEndpoints` glob match
-- `platform.showNotification`, `platform.storage`, `platform.camera`, `platform.gallery`, `platform.file`, `platform.location`, `platform.message.respond` — *reject* with a clear error in V1 inbox mode. The full bridge needs the multi-process plugin host and is a follow-up. For V1 dogfood, stick to network.fetch.
+- `platform.showNotification`, `platform.storage`, `platform.camera`, `platform.gallery`, `platform.file`, `platform.location`, `platform.message.respond` — *reject* with a clear error in V1 inbox mode. For V1 dogfood, stick to `network.fetch`.
 
 ## 4. Build + sign the plugin
 
@@ -209,6 +222,28 @@ print("Published row:", response["plugin_row_id"])
 # Save this — you'll need it in `send_to(plugin_id=...)`.
 ```
 
+### 5.5 Revoking a plugin version
+
+Revoke a single published plugin row when that exact version should be treated as inactive:
+
+```python
+client.revoke_plugin(
+    plugin_row_id="<plugin_row_id from publish_plugin>",
+    reason="superseded",
+)
+```
+
+`reason` is optional for legacy compatibility, but senders should always supply one of:
+
+| Reason | Use when | Host UX |
+|---|---|---|
+| `superseded` | A newer version replaces this row. | Shows a subdued "newer version available" banner in detail; the historical bundle can still render. |
+| `compromised` | The bundle or signing key is unsafe. | Refuses to execute the bundle and shows a security banner with the decrypted payload fallback. |
+| `sender_disabled` | The sender/service is intentionally disabled. | Shows a neutral "sender unavailable" banner in detail; the historical bundle can still render. |
+| `unspecified` | You are migrating legacy tooling and cannot classify the revoke. | Shows a generic revoked banner; avoid using this for new revokes. |
+
+The revoke request is signed by the SDK. The `reason` value is included in the signed envelope, so an intermediary cannot strip `compromised` down to a softer classification. Re-revoking a row keeps the original `revoked_at`; a higher-severity reason can promote the row, while downgrades are ignored.
+
 ## 6. Sending a card (your backend, per event)
 
 ```python
@@ -233,6 +268,8 @@ result = client.send_to(
     min_plugin_version="1.0.0",
 )
 ```
+
+`ttl_seconds` defaults to 7 days. The server rejects envelopes that are already expired or more than 30 days in the future.
 
 ## 7. The action callback endpoint
 
@@ -270,11 +307,11 @@ def action():
 2. Sign up + log in. The app auto-enrolls this device with the server.
 3. From your backend, run a script that registers your sender and prints a pairing QR (see SDK README).
 4. Tap **Pair sender** → **Scan QR** in the Syncler app. Confirm the fingerprint matches what your script prints.
-5. After confirming, the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you. (V1 dev-mode handoff; V1.5 will wire this automatically via the bootstrap exchange.)
+5. After confirming, the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you.
 6. Publish your plugin (`client.publish_plugin(...)`) — save the `plugin_row_id`.
 7. Run `client.send_to(...)` with a test payload.
-8. Within ~15s the phone's inbox poll picks it up, decrypts, fetches your bundle, and renders the card in a WebView.
-9. Tap your action button on the phone.
+8. Within ~15s the phone's inbox poll picks it up, decrypts it, fetches your bundle, and shows the native inbox row.
+9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
 
 ## 9. Common errors
@@ -291,6 +328,18 @@ def action():
 
 Cross-reference `docs/crypto-spec.md` for the AAD + envelope canonical byte shapes if signatures disagree.
 
+## 10. Versioning + history
+
+Publish every plugin release as a new row under the same `plugin_identifier`. `plugin_identifier` is the stable name, while `plugin_row_id` is the exact version row returned by `client.publish_plugin(...)`.
+
+Version strings use semver-lite: `MAJOR.MINOR.PATCH` with an optional prerelease suffix. Each numeric component is capped at 6 digits, and every publish for the same `(sender_id, plugin_identifier)` must be strictly greater than all existing versions.
+
+When you send a card, pass the exact `plugin_row_id` that matches the payload schema you produced. The message stores that row UUID. On the device, Syncler resolves the historical row by ID, not by `/latest`, so a v1 message keeps using the v1 bundle even after you publish v2.
+
+The device verifies the downloaded bundle against the row's SHA-256 `bundle_hash` and caches verified bundle bytes by hash for the process lifetime. On app restart, the cache is empty and the device re-fetches the same historical row's `signed_bundle_url`. Keep old bundle URLs available for as long as you want old inbox messages to remain renderable.
+
+Archive/delete are user-organization states synced through the encrypted user-state blob. They do not remove the server copy, and archive does not store a local message body beyond the server's retention window.
+
 ---
 
-**Six pages.** If you needed more than that to integrate, the SDK has a DX problem — file a finding back at the Syncler team.
+**Seven pages.** If you needed more than that to integrate, the SDK has a DX problem — file a finding back at the Syncler team.

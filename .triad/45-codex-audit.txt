@@ -1,0 +1,34 @@
+Implemented the integration-guide delta in [docs/integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:20). I did not touch the existing `sdk-python/syncler/client.py` revoke-plugin work.
+
+**M11 Alignment Audit**
+| Phase | Status | Justification | Minimum Delta |
+|---|---|---|---|
+| M11 base | Yellow | Useful dogfood base, but pre-consultation UX still used inline WebView/card model. | Superseded by M11.1. |
+| M11.1 | Green | Shipped native host rows + plugin detail surface, and `hostPreview` matches consultation 36: `title`, `subtitle`, `summary`, `searchText` only. | None. |
+| M11.2 | Green | Read state is local-first, CAS synced, and marks read only on detail open at [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:177). | None. |
+| M11.3 | Yellow | Bottom nav/date buckets/archive landed, but archive is hide-from-active while server still has the body, not durable local history. | Add local archived message body storage past server expiry. |
+| M11.4 | Yellow | `/by-id` fixed update drift and revocation UX is discoverable, but bundle cache is process-memory only; restart requires old `signed_bundle_url` to work. | Add disk bundle-by-hash cache or guarantee old bundle URLs. |
+| M11.5 | Green | Host metadata search only; plugin content search remains deferred. | None. |
+| M11.6 | Yellow | Delete/archive/dismiss remain distinct, but delete is local+synced only and does not call server dismiss. | Either wire delete to server dismiss or document local-only delete. |
+| M11.7 | Green | Group-by-sender shipped as an optional top-bar toggle, not primary nav, so it is an acceptable user-requested exception. | None. |
+
+**Pressure Tests**
+1. Group-by-sender is not drift: it defaults to chronological and is optional.
+2. Bundle-by-hash is correct for “no v2 drift” because messages resolve by historical row via `/by-id`; it underdelivers only if the promise includes offline/restart persistence without re-fetch.
+3. `hostPreview` shipped exactly the cut-down contract. No `priority`, `category`, sender timestamp, or `accessibilityLabel`.
+4. Read trigger confirmed: detail-open only, not scroll visibility.
+5. Archive durability is a real V1 scope cut. The honest V1 framing is acceptable if docs say it is not permanent retention.
+6. Trinary is partially honored: Archive and Delete are UI concepts; Dismiss exists server-side but is not client UI-wired.
+7. V1.5 deferrals preserved: no plugin dashboards, plugin-scoped search, cross-plugin aggregation, or plugin-owned chrome shipped.
+8. Fix-up commits match their reviews: 37 through 44 all contain the claimed remediation. I found no “address review N” mismatch.
+
+**Guide Rewrite Applied**
+Updated [docs/integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:20) to:
+- Correct host row wording: server timestamp is not a `hostPreview` field.
+- Add/clean §5.5 revoke docs with `client.revoke_plugin(...)`, all four reasons, signed reason behavior, monotone promotion, and actual host UX.
+- Add `ttl_seconds` / 30-day server cap note.
+- Fix the end-to-end test flow: arrival shows a native row; WebView renders only after tap.
+- Add §10 versioning/history: `plugin_identifier` vs `plugin_row_id`, semver-lite rules, `/by-id` historical lookup, in-memory bundle cache, old URL requirement, archive retention limit.
+- Scrub stale “will/changed/now” style phrasing found in the guide.
+
+No tests were run; this pass changed documentation only.
