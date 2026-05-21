@@ -10,6 +10,7 @@ import app.syncler.core.network.SynclerApi
 import app.syncler.core.storage.PairedSenderStore
 import app.syncler.feature.inbox.BuildConfig
 import java.security.MessageDigest
+import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -86,7 +87,16 @@ class InboxRepository @Inject constructor(
 
             if (newDecrypted.isNotEmpty()) {
                 val merged = (newDecrypted + _items.value).distinctBy { it.id }
-                _items.value = merged.sortedByDescending { it.sentAt }
+                // Sort by parsed Instant, not by raw string. ISO timestamps
+                // with variable fractional seconds sort lexically the wrong
+                // way ("…10:00:00Z" > "…10:00:00.500Z") and would put older
+                // messages above newer ones in the feed. Items that fail to
+                // parse fall to the bottom so a corrupt timestamp can't
+                // hijack the top of the inbox.
+                _items.value = merged.sortedWith(
+                    compareByDescending<InboxItem> { parseInstantOrNull(it.sentAt) }
+                        .thenByDescending { it.id },
+                )
             }
             response.nextSince?.let { lastSince = it }
             newDecrypted.size
@@ -174,6 +184,9 @@ class InboxRepository @Inject constructor(
             hostPreview = HostPreviewParser.parse(plaintextString),
         )
     }.onFailure { Timber.tag(TAG).w(it, "decrypt failed for message %s", dto.id) }.getOrNull()
+
+    private fun parseInstantOrNull(s: String): Instant? =
+        runCatching { Instant.parse(s) }.getOrNull()
 
     private companion object {
         const val TAG = "InboxRepo"

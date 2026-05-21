@@ -1,0 +1,39 @@
+The Phase 3 implementation successfully realizes the three-tab structure and the client-side archive synchronization. The decision to use an activity-scoped ViewModel pattern for the tabs provides a "persistent state" experience (where deep-linking into sub-screens survives tab switching), which is a valid UX choice for this type of utility app.
+
+### Navigation
+
+1.  **Three-tab structure:** The choice of **Inbox / Senders / Settings** is well-justified. Placing Archive as a sub-screen of Inbox is the right call for Material 3; it treats Archive as a "filter/view" rather than a primary destination, keeping the bottom nav lean.
+2.  **Tab state on rotation/process restart:** You are correct that `MutableStateFlow` survives rotation but will reset to Inbox on process death. To fix this, you should inject `SavedStateHandle` into `MainViewModel` and use it to persist the `TopLevelScreen`.
+3.  **Sub-screen back navigation:** Keeping the bottom bar visible is acceptable, but be aware that since `InboxViewModel` is Activity-scoped, the `showArchive` and `selectedId` states persist. If a user is in a Detail view, switches to Senders, and returns to Inbox, they remain in the Detail view. This is generally a "pro" for power users, but ensure it doesn't lead to navigation traps.
+
+### Inbox
+
+4.  **Date bucket boundaries:** The timezone math is correct. By projecting `Instant` to `ZoneId.systemDefault()` before extracting the `LocalDate`, you ensure that "Today" matches the user's physical calendar day regardless of the server's UTC clock.
+5.  **`remember(items, today)`:** Your assumption is correct. `LocalDate.now()` will be re-captured on any recomposition (which happens every 15s due to the poll). The lag of at most 15s past midnight is perfectly acceptable for V1.
+6.  **Archive list ordering:** Newest first (via `sentAt`) is the correct default. Ordering by `archivedAt` would only be useful if users frequently archived extremely old messages and then struggled to find them at the top of the archive.
+
+### Archive behavior
+
+7.  **Archive flow:** Correct. The M7 CAS blob is the source of truth. The merging logic in `StateMerger` (M7) ensures that even if a message is re-fetched after being archived locally, the archive mark wins.
+8.  **Archived → unarchive:** This is a notable omission. You should add an "Unarchive" icon to the `DetailScreen`'s `TopAppBar` actions when `isArchived == true` (line 379:383 in `InboxScreen.kt`).
+9.  **Server-side dismiss vs local-only archive:** The separation is correct. Archive is a personal organization tool; "Dismiss" (if implemented later) should be reserved for permanent, cross-device message expiration.
+
+### Settings
+
+10. **DevicesViewModel.refresh on every Settings open:** I disagree with your note—**it WILL re-refresh.** Because `SettingsScreen` is conditionally composed in `MainActivity`'s `when(tab)` block, it is disposed when switching to Inbox and re-entered when switching back. `LaunchedEffect(Unit)` always re-runs on re-entry. This is the correct behavior for ensuring device status is fresh.
+11. **Logout from Settings:** Verified. The `session.sessionState` observer in `UserStateRepository` (line 64:72) correctly handles the "locked" transition by wiping local decrypted state before the `AuthScreen` even appears.
+
+### Technical Citations & Nitpicks
+
+*   **`UserStateRepository.kt:64`**: The `distinctUntilChanged().drop(1)` pattern is clever and correctly avoids wiping state during the initial startup emission.
+*   **`InboxScreen.kt:338`**: Using `Box` with conditional `Modifier.background` for the unread dot is good for layout stability (prevents text jumping when marked read).
+*   **Missing Unarchive**: Suggest adding the following to `InboxScreen.kt` (around line 380):
+    ```kotlin
+    if (isArchived) {
+        IconButton(onClick = { onUnarchive(); onBack() }) {
+            Icon(Icons.Filled.Unarchive, contentDescription = "Unarchive")
+        }
+    } else { ... }
+    ```
+
+**Green light to proceed to Phase 4.** The core M3 navigation and CAS-backed archive logic are sound. Priority for V1.5 should be the "Unarchive" affordance.

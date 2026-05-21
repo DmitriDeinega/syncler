@@ -123,6 +123,24 @@ class UserStateRepository @Inject constructor(
     }
 
     /**
+     * Removes the message from the archive set, returning it to the active
+     * inbox. Note: this is a local "forget the archive mark" operation, not
+     * a tombstone — if another device has a still-current archive entry for
+     * the same message and we re-pull before pushing, the merge's
+     * max(archivedAt)-wins rule will resurrect the archive locally. V1
+     * accepts that tiny race in exchange for not encoding tombstones
+     * (which would need a separate tombstones list and explicit GC).
+     */
+    suspend fun markUnarchived(messageId: String) {
+        mutateLocal { current ->
+            current.copy(
+                archivedMessages = current.archivedMessages.filterNot { it.messageId == messageId },
+            )
+        }
+        markDirtyAndPush()
+    }
+
+    /**
      * Atomic local-state mutation. Holds [syncMutex] so a concurrent [pull]
      * cannot interleave its merge between the read and the write here, and
      * so disk persistence is also serialized.

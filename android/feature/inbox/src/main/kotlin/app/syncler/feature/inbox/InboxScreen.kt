@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -133,6 +134,10 @@ class InboxViewModel @Inject constructor(
         viewModelScope.launch { userState.markArchived(itemId) }
     }
 
+    fun unarchive(itemId: String) {
+        viewModelScope.launch { userState.markUnarchived(itemId) }
+    }
+
     private val _showArchive = MutableStateFlow(false)
     val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
     fun openArchive() { _showArchive.value = true }
@@ -161,6 +166,8 @@ fun InboxScreen(
 
     // Sub-screens stack on top of the inbox: detail view (per item) and
     // archive list. They handle their own back navigation and return here.
+    // We forward `modifier` (which carries the outer Scaffold's bottom-bar
+    // inset) so sub-screen content doesn't draw under the bottom nav.
     val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
     if (selectedItem != null) {
         DetailScreen(
@@ -168,6 +175,8 @@ fun InboxScreen(
             onBack = viewModel::closeDetail,
             isArchived = selectedItem.id in archivedMessageIds,
             onArchive = { viewModel.archive(selectedItem.id) },
+            onUnarchive = { viewModel.unarchive(selectedItem.id) },
+            modifier = modifier,
         )
         return
     }
@@ -177,6 +186,7 @@ fun InboxScreen(
             readMessageIds = readMessageIds,
             onBack = viewModel::closeArchive,
             onItemClick = { id -> viewModel.open(id) },
+            modifier = modifier,
         )
         return
     }
@@ -289,9 +299,11 @@ private fun ArchiveScreen(
     readMessageIds: Set<String>,
     onBack: () -> Unit,
     onItemClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onBack)
     Scaffold(
+        modifier = modifier,
         topBar = {
             TopAppBar(
                 title = { Text("Archive") },
@@ -433,9 +445,12 @@ private fun DetailScreen(
     onBack: () -> Unit,
     isArchived: Boolean,
     onArchive: () -> Unit,
+    onUnarchive: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onBack)
     Scaffold(
+        modifier = modifier,
         topBar = {
             TopAppBar(
                 title = {
@@ -459,7 +474,14 @@ private fun DetailScreen(
                     }
                 },
                 actions = {
-                    if (!isArchived) {
+                    if (isArchived) {
+                        IconButton(onClick = {
+                            onUnarchive()
+                            onBack()
+                        }) {
+                            Icon(Icons.Filled.Unarchive, contentDescription = "Unarchive")
+                        }
+                    } else {
                         IconButton(onClick = {
                             onArchive()
                             onBack()  // pop back to inbox so the archive transition feels active

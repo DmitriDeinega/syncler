@@ -1,0 +1,30 @@
+**Findings**
+
+1. **P1: Archive does not actually retain archived cards.**  
+   [ArchiveScreen.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:176>) renders archive from `items.filter { it.id in archivedMessageIds }`, but `items` is only the in-memory `InboxRepository` cache, populated from current server inbox responses at [InboxRepository.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:42>) and [InboxRepository.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:87>). After cold start past server expiry, the synced archive ID can exist but there is no payload/card to show or open. That conflicts with the storage comment that archive means “keep around past the server’s 30-day expiry” at [EncryptedUserState.kt](<D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:190>). Either persist an archived message snapshot locally, or explicitly downgrade V1 archive semantics to “hide from inbox while the message is still fetchable/cached.”
+
+2. **P2: Detail/archive sub-screens draw under the bottom nav.**  
+   The outer scaffold passes bottom-bar padding into `InboxScreen` at [MainActivity.kt](<D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:90>), but `InboxScreen` only applies `modifier` on the normal inbox scaffold at [InboxScreen.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:184>). The early-return branches call `DetailScreen` / `ArchiveScreen` without that modifier at [InboxScreen.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:166>) and [InboxScreen.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:175>). If the bottom bar stays visible, pass/apply the outer padding to those scaffolds too; otherwise hide the bottom bar for sub-screens.
+
+3. **P2: Newest-first ordering is using fragile string comparison.**  
+   [InboxRepository.kt](<D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:89>) sorts by `sentAt` as a string. ISO timestamps with variable fractional seconds can sort incorrectly, e.g. `...10:00:00Z` vs `...10:00:00.500Z`. Parse to `Instant` for ordering. This affects both inbox and archive because archive preserves repository order.
+
+**UX / Design Answers**
+
+The three-tab structure is the right V1 call. Archive as an Inbox sub-screen is fine; a permanent archive tab would be wasted for normal usage. I would keep the top-app-bar archive icon, but the retention issue above needs fixing before “archive” means what users expect.
+
+Cold restart to Inbox is acceptable. I would not persist the last tab yet unless Settings/Senders become frequent workspaces.
+
+Timezone bucketing is correct for user-facing “Today / Yesterday”: parse the UTC/offset instant, project into device local date, compare against device local today. The across-midnight concern is acceptable here because the 15s refresh toggles `refreshing`, causing recomposition; a cleaner later pattern is a lifecycle-aware midnight ticker or injected `Clock`.
+
+Archive ordering by message `sentAt` is fine for “saved messages.” If archive becomes a triage/history view, order by `archivedAt`.
+
+No-unarchive is tolerable only if you add at least an immediate undo later. A silent permanent local action is easy to mis-tap from detail.
+
+Archive should stay separate from server-side dismiss. Dismiss is a server lifecycle/action semantic; archive is user-local organization/sync state.
+
+Your Settings refresh premise is off: because `SettingsScreen` only exists inside the `when(tab)` branch, switching away disposes it, and [SettingsScreen.kt](<D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/ui/SettingsScreen.kt:43>) runs again when Settings is opened again. It just won’t refresh while already focused or on re-tapping the selected tab.
+
+Explicit logout flow is correct: `MainViewModel.logout()` -> `AuthRepository.logout()` -> `Session.logout()` -> locked UI, with `UserStateRepository` clearing on the lock transition. Residual risk: cold-start locked state is intentionally ignored by the observer, so signing into a different account after restart without a prior logout can still reuse loaded local user state.
+
+Not green-lighting Phase 4 yet: fix archive durability semantics and the sub-screen bottom-bar inset issue first.

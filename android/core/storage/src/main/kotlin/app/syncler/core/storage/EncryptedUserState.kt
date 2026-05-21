@@ -187,10 +187,21 @@ data class ReadMessageEntry(
 }
 
 /**
- * M11.2: a message the user has archived. Distinct from dismissal: archive
- * means "keep around past the server's 30-day expiry"; dismiss means "hide
- * from the active inbox view but the message still exists on the server
- * until expiry." Synced via the M7 CAS state blob.
+ * M11.2: a message the user has archived. The archive state is synced via
+ * the M7 CAS blob so an archive on one device shows up across all of the
+ * user's devices.
+ *
+ * V1 semantic limit (called out in review 39 by Codex): "archived" is a
+ * *filter* over the still-fetchable inbox — we don't persist the message
+ * body locally beyond the server's 30-day retention cap. Once the server
+ * expires the message, the archived id remains in this list but there's
+ * no body to render. A proper "keep past expiry" archive needs a local
+ * message body store and is V1.5 work. For now, treat archive as
+ * "hide from the active inbox while the server still has the message."
+ *
+ * Distinct from "dismiss": dismiss is a server-side message lifecycle
+ * action (POST /v1/messages/.../dismiss). Archive is purely the user's
+ * cross-device organization state.
  */
 data class ArchivedMessageEntry(
     val messageId: String,
