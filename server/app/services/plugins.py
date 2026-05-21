@@ -126,13 +126,29 @@ async def get_latest_for_plugin(
     return rows[0]
 
 
-async def revoke_plugin_row(db: AsyncSession, plugin_row_id: uuid.UUID) -> Plugin:
+async def revoke_plugin_row(
+    db: AsyncSession,
+    plugin_row_id: uuid.UUID,
+    reason: str | None = None,
+) -> Plugin:
+    """Mark a plugin row revoked, optionally with a classification reason.
+
+    Idempotent: if the row is already revoked, the reason is updated only
+    if a new one was supplied (so a sender can upgrade ``superseded`` to
+    ``compromised`` later if a security issue surfaces in an old version).
+    """
     result = await db.execute(select(Plugin).where(Plugin.id == plugin_row_id))
     plugin = result.scalar_one_or_none()
     if plugin is None:
         raise PluginNotFoundError(f"no plugin row {plugin_row_id}")
+    changed = False
     if plugin.revoked_at is None:
         plugin.revoked_at = datetime.now(UTC)
+        changed = True
+    if reason is not None and plugin.revocation_reason != reason:
+        plugin.revocation_reason = reason
+        changed = True
+    if changed:
         await db.commit()
         await db.refresh(plugin)
     return plugin

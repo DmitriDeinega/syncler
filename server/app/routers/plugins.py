@@ -60,10 +60,16 @@ def _publish_envelope(payload: PluginPublishRequest) -> bytes:
 
 
 def _revoke_envelope(payload: PluginRevokeRequest) -> bytes:
-    envelope = {
+    # Canonical 3-field envelope. Reason is part of the signed bytes so a
+    # man-in-the-middle can't strip a "compromised" reason down to a silent
+    # "superseded". Backwards compat with M8.1 clients: when reason is None
+    # we omit it from the envelope so the signature shape matches.
+    envelope: dict[str, str] = {
         "sender_id": str(payload.sender_id),
         "plugin_row_id": str(payload.plugin_row_id),
     }
+    if payload.reason is not None:
+        envelope["reason"] = payload.reason
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -182,7 +188,7 @@ async def revoke(
         raise HTTPException(status_code=404, detail="plugin not found")
 
     try:
-        await revoke_plugin_row(db, payload.plugin_row_id)
+        await revoke_plugin_row(db, payload.plugin_row_id, reason=payload.reason)
     except PluginNotFoundError as exc:
         raise HTTPException(status_code=404, detail="plugin not found") from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

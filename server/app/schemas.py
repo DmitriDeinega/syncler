@@ -366,13 +366,37 @@ class PluginLatestResponse(BaseModel):
     created_at: datetime
 
 
+# M11.4: classified revocation reasons. Devices use this to decide UX:
+# - ``superseded``: silent; show in update prompts.
+# - ``compromised``: refuse to execute; show security alert.
+# - ``sender_disabled``: stop rendering; show neutral "unavailable".
+# - ``unspecified``: legacy revokes (pre-M11.4) where no reason was given;
+#   conservative client treats this as ``compromised`` until clarified.
+REVOCATION_REASONS = frozenset({"superseded", "compromised", "sender_disabled", "unspecified"})
+
+
 class PluginRevokeRequest(BaseModel):
     sender_id: UUID
     plugin_row_id: UUID
     sender_signature: str  # base64 Ed25519 over canonical body
+    # Optional in V1 for backwards compatibility with the M8.1 contract;
+    # senders SHOULD always supply one. Missing reason → stored as null;
+    # client code interprets null as ``unspecified``.
+    reason: str | None = None
 
     @field_validator("sender_signature")
     @classmethod
     def validate_sender_signature(cls, value: str) -> str:
         decode_base64(value, field_name="sender_signature", exact=64)
+        return value
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in REVOCATION_REASONS:
+            raise ValueError(
+                f"reason must be one of {sorted(REVOCATION_REASONS)}; got {value!r}"
+            )
         return value

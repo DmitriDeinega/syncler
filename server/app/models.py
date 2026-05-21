@@ -122,6 +122,9 @@ class Plugin(Base):
     capabilities: Mapped[dict] = mapped_column(JSONB_TYPE, nullable=False)
     endpoints: Mapped[dict] = mapped_column(JSONB_TYPE, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # M11.4: optional classification of why this plugin row was revoked.
+    # See revoke endpoint for the accepted enum and per-reason UX contract.
+    revocation_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

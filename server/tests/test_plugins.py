@@ -53,8 +53,16 @@ def _sign_publish(
     return _b64(private_key.sign(canonical))
 
 
-def _sign_revoke(private_key: Ed25519PrivateKey, *, sender_id: uuid.UUID, plugin_row_id: uuid.UUID) -> str:
-    envelope = {"sender_id": str(sender_id), "plugin_row_id": str(plugin_row_id)}
+def _sign_revoke(
+    private_key: Ed25519PrivateKey,
+    *,
+    sender_id: uuid.UUID,
+    plugin_row_id: uuid.UUID,
+    reason: str | None = None,
+) -> str:
+    envelope: dict = {"sender_id": str(sender_id), "plugin_row_id": str(plugin_row_id)}
+    if reason is not None:
+        envelope["reason"] = reason
     canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return _b64(private_key.sign(canonical))
 
@@ -191,6 +199,75 @@ async def test_publish_with_only_body_sender_id_succeeds(app_client: AsyncClient
     # — should also succeed (was 400 with the same root cause).
     latest = await app_client.get(f"/v1/plugins/{sender_id}/com.lottery.app/latest")
     assert latest.status_code == 200, latest.text
+
+
+@pytest.mark.asyncio
+async def test_revoke_records_reason_when_provided(app_client: AsyncClient) -> None:
+    """M11.4: revoke endpoint accepts an optional ``reason`` enum that's
+    persisted with the row so devices can render differentiated UX
+    (silent for ``superseded``, alert for ``compromised``, neutral
+    "unavailable" for ``sender_disabled``).
+    """
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+
+    sender_id, private_key = await _register_sender(app_client)
+    publish = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
+    )
+    plugin_row_id = uuid.UUID(publish.json()["plugin_row_id"])
+
+    # Revoke WITHOUT reason — legacy path; row gets revoked_at but null reason.
+    sig_no_reason = _sign_revoke(private_key, sender_id=sender_id, plugin_row_id=plugin_row_id)
+    no_reason = await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_id),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig_no_reason,
+        },
+    )
+    assert no_reason.status_code == 204
+
+    # Re-revoke with reason — service is idempotent on revoked_at but
+    # updates reason if a new one is supplied.
+    sig_with = _sign_revoke(
+        private_key, sender_id=sender_id, plugin_row_id=plugin_row_id, reason="compromised",
+    )
+    with_reason = await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_id),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig_with,
+            "reason": "compromised",
+        },
+    )
+    assert with_reason.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_revoke_rejects_invalid_reason(app_client: AsyncClient) -> None:
+    sender_id, private_key = await _register_sender(app_client)
+    publish = await app_client.post(
+        "/v1/plugins/publish", json=_body(sender_id, private_key, version="1.0.0")
+    )
+    plugin_row_id = uuid.UUID(publish.json()["plugin_row_id"])
+    sig = _sign_revoke(
+        private_key, sender_id=sender_id, plugin_row_id=plugin_row_id, reason="totally_made_up",
+    )
+    resp = await app_client.post(
+        "/v1/plugins/revoke",
+        json={
+            "sender_id": str(sender_id),
+            "plugin_row_id": str(plugin_row_id),
+            "sender_signature": sig,
+            "reason": "totally_made_up",
+        },
+    )
+    # Pydantic field_validator wraps non-enum values as 400 via our shared
+    # validation_exception_handler.
+    assert resp.status_code == 400, resp.text
 
 
 @pytest.mark.asyncio

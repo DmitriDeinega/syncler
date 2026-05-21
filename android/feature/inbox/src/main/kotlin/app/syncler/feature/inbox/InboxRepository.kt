@@ -54,8 +54,19 @@ class InboxRepository @Inject constructor(
             },
         )
         .build()
-    /** Cache keyed by (senderId, pluginIdentifier). */
-    private val pluginCache = mutableMapOf<String, CachedPlugin>()
+    /**
+     * Bundle cache keyed by SHA-256 hash (lowercase hex). Multiple plugin
+     * versions coexist: a new publish doesn't evict the old version, so old
+     * messages keep rendering against the EXACT bundle they were originally
+     * validated for (Codex's M11.3 concern: avoid history drift when a
+     * plugin author publishes a render-incompatible v2).
+     *
+     * In-memory only in V1 — survives process lifetime, lost on restart.
+     * Disk persistence with size-based eviction is V1.5 (see also
+     * `docs/integration-guide.md` §9 "Common errors" for the user-visible
+     * "Plugin couldn't be re-fetched" path).
+     */
+    private val bundleByHash = mutableMapOf<String, CachedBundle>()
     private val pluginMutex = Mutex()
 
     private var lastSince: String? = null
@@ -82,6 +93,7 @@ class InboxRepository @Inject constructor(
                 decrypted.copy(
                     bundleJs = plugin?.bundleJs,
                     declaredEndpoints = plugin?.endpoints.orEmpty(),
+                    bundleHash = plugin?.bundleHashHex,
                 )
             }
 
@@ -103,14 +115,31 @@ class InboxRepository @Inject constructor(
         }.onFailure { Timber.tag(TAG).w(it, "refresh failed") }
     }
 
-    private suspend fun fetchPluginOrNull(senderId: String, pluginIdentifier: String): CachedPlugin? {
-        val key = "$senderId/$pluginIdentifier"
-        pluginMutex.withLock { pluginCache[key] }?.let { return it }
+    /**
+     * Fetches the latest manifest for `senderId/pluginIdentifier`, verifies
+     * the bundle, caches the bundle bytes BY HASH (not by identifier), and
+     * returns the resolved cache entry. The returned object carries the
+     * bundle's SHA-256 in hex — the caller stores this on the InboxItem so
+     * future renders look up by hash, surviving plugin version churn.
+     *
+     * Already-cached hashes short-circuit: if a previous call resolved this
+     * `(sender, identifier)` to a hash we already hold bundle bytes for, we
+     * skip the network and return the cached entry. New plugin versions
+     * naturally produce new hashes, which fall through to the download path
+     * and populate a new cache slot — old hashes remain rendered correctly.
+     */
+    private suspend fun fetchPluginOrNull(senderId: String, pluginIdentifier: String): CachedBundle? {
         return runCatching {
             val latest = api.getPluginLatest(senderId = senderId, pluginIdentifier = pluginIdentifier)
+            val expectedHashBytes = runCatching { latest.bundleHash.base64ToBytes() }.getOrNull()
+                ?: error("plugin bundle_hash is not valid base64")
+            val expectedHashHex = expectedHashBytes.joinToString("") { "%02x".format(it) }
+
+            // Cache hit by hash — same plugin version we already verified.
+            pluginMutex.withLock { bundleByHash[expectedHashHex] }?.let { return@runCatching it }
+
             // Scheme check. Release: HTTPS only. Debug: any HTTP allowed for
-            // LAN dev hosting. Mirrors the host's bundle-URL policy in
-            // :feature:plugin-host PluginLoader.requireHttps.
+            // LAN dev hosting. Mirrors :feature:plugin-host PluginLoader.requireHttps.
             val url = latest.signedBundleUrl
             val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
             if (!schemeOk) error("plugin bundle URL must be HTTPS (got $url)")
@@ -125,25 +154,38 @@ class InboxRepository @Inject constructor(
             // bundle_hash. The publish endpoint verified the sender's Ed25519
             // signature over (canonical_manifest || bundle_hash) at upload
             // time, so a matching hash is sufficient evidence that this is
-            // the bundle the sender published — defense against a compromised
-            // CDN / MITM mutating bytes in flight.
-            val expectedHash = runCatching { latest.bundleHash.base64ToBytes() }.getOrNull()
-                ?: error("plugin bundle_hash is not valid base64")
+            // the bundle the sender published.
             val actualHash = MessageDigest.getInstance("SHA-256").digest(bundleBytes)
-            if (!actualHash.contentEquals(expectedHash)) {
+            if (!actualHash.contentEquals(expectedHashBytes)) {
                 error("plugin bundle hash mismatch (CDN/MITM substitution?)")
             }
 
-            val js = bundleBytes.toString(Charsets.UTF_8)
-            val cached = CachedPlugin(bundleJs = js, endpoints = latest.endpoints)
-            pluginMutex.withLock { pluginCache[key] = cached }
+            val cached = CachedBundle(
+                bundleJs = bundleBytes.toString(Charsets.UTF_8),
+                endpoints = latest.endpoints,
+                bundleHashHex = expectedHashHex,
+            )
+            pluginMutex.withLock { bundleByHash[expectedHashHex] = cached }
             cached
         }.onFailure {
-            Timber.tag(TAG).w(it, "plugin fetch failed for %s", key)
+            Timber.tag(TAG).w(it, "plugin fetch failed for %s/%s", senderId, pluginIdentifier)
         }.getOrNull()
     }
 
-    private data class CachedPlugin(val bundleJs: String, val endpoints: List<String>)
+    /**
+     * Resolves a previously-cached bundle by its SHA-256 hash (hex). Used
+     * by the detail-view path to render an old message against the EXACT
+     * bundle bytes that were validated when the message arrived, even if
+     * the sender has since published a render-incompatible newer version.
+     */
+    suspend fun bundleByHash(hashHex: String): CachedBundle? =
+        pluginMutex.withLock { bundleByHash[hashHex] }
+
+    data class CachedBundle(
+        val bundleJs: String,
+        val endpoints: List<String>,
+        val bundleHashHex: String,
+    )
 
     private fun decrypt(
         dto: MessageInboxItemDto,
@@ -181,6 +223,7 @@ class InboxRepository @Inject constructor(
             expiresAt = dto.expiresAt,
             bundleJs = null,
             declaredEndpoints = emptyList(),
+            bundleHash = null,
             hostPreview = HostPreviewParser.parse(plaintextString),
         )
     }.onFailure { Timber.tag(TAG).w(it, "decrypt failed for message %s", dto.id) }.getOrNull()
@@ -214,6 +257,15 @@ data class InboxItem(
      * `platform.network.fetch` calls to URLs that don't match any pattern.
      */
     val declaredEndpoints: List<String>,
+    /**
+     * SHA-256 (lowercase hex) of the bundle this message was originally
+     * validated against (M11.4). Null until a successful fetch. The detail
+     * view looks the bundle up by THIS hash, not by the current /latest,
+     * so old messages keep rendering against the bundle they were verified
+     * for even after the plugin author publishes a render-incompatible new
+     * version. See [InboxRepository.bundleByHash].
+     */
+    val bundleHash: String?,
     /**
      * Structured row metadata extracted from the decrypted payload's reserved
      * `hostPreview` key. Null when the sender didn't supply one or the block
