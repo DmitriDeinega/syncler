@@ -28,6 +28,14 @@ data class PairedSender(
     val fingerprint: String,
     val nameHash: ByteArray,
     val firstPairedAt: String,
+    /**
+     * 32-byte AES-256 key shared with the sender. Generated client-side at
+     * pairing time, persisted here so future messages from this sender can be
+     * decrypted. In V1 dev mode the user copies this off the screen and pastes
+     * it into the sender's CLI (`set_pairing(user_id, pairing_key_hex)`); in
+     * V1.5 the bootstrap exchange wires it automatically.
+     */
+    val pairingKey: ByteArray,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -108,6 +116,7 @@ class EncryptedPairedSenderStore @Inject constructor(
             put("fingerprint", r.fingerprint)
             put("name_hash", Base64.encodeToString(r.nameHash, Base64.NO_WRAP))
             put("first_paired_at", r.firstPairedAt)
+            put("pairing_key", Base64.encodeToString(r.pairingKey, Base64.NO_WRAP))
         }.toString()
     }
 
@@ -121,6 +130,9 @@ class EncryptedPairedSenderStore @Inject constructor(
             fingerprint = obj.getString("fingerprint"),
             nameHash = Base64.decode(obj.getString("name_hash"), Base64.NO_WRAP),
             firstPairedAt = obj.getString("first_paired_at"),
+            pairingKey = obj.optString("pairing_key").takeIf { it.isNotBlank() }
+                ?.let { Base64.decode(it, Base64.NO_WRAP) }
+                ?: ByteArray(0),
         )
     } catch (_: Exception) {
         null

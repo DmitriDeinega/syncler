@@ -5,7 +5,8 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 
 npx esbuild "$ROOT_DIR/examples/minimal/src/plugin.ts" \
   --bundle \
-  --format=esm \
+  --format=iife \
+  --global-name=SynclerPluginExports \
   --platform=browser \
   --alias:@syncler/plugin-sdk="$ROOT_DIR/src/index.ts" \
   --outfile="$ROOT_DIR/examples/minimal/dist/plugin.bundle.js"

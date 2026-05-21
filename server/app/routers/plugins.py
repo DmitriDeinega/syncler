@@ -6,12 +6,13 @@ import base64
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto.signatures import verify_message_envelope
 from app.db import get_db
-from app.middleware.rate_limit import rate_limit
+from app.middleware.rate_limit import check_rate_limit, rate_limit
+from app.middleware.rate_limit_config import RATE_LIMITS
 from app.models import Plugin
 from app.schemas import (
     PluginLatestResponse,
@@ -69,7 +70,10 @@ def _revoke_envelope(payload: PluginRevokeRequest) -> bytes:
 @router.post("/publish", response_model=PluginPublishResponse, status_code=status.HTTP_201_CREATED)
 async def publish(
     payload: PluginPublishRequest,
-    _: None = Depends(rate_limit("pairing_initiate")),
+    request: Request,
+    # Pre-auth IP bucket — cheap, prevents body-parsing DoS from anonymous
+    # callers. The per-sender bucket is applied below, after sig verification.
+    _: None = Depends(rate_limit("message_send_ip")),
     db: AsyncSession = Depends(get_db),
 ) -> PluginPublishResponse:
     try:
@@ -82,6 +86,12 @@ async def publish(
     sender_sig = decode_base64(payload.sender_signature, field_name="sender_signature", exact=64)
     if not verify_message_envelope(sender.public_key, _publish_envelope(payload), sender_sig):
         raise HTTPException(status_code=401, detail="invalid sender signature")
+
+    # Per-sender bucket AFTER signature verification — a spoofer cannot inflate
+    # someone else's bucket by setting a foreign sender_id in the body, because
+    # they cannot forge the matching Ed25519 signature.
+    request.state.sender_id = str(payload.sender_id)
+    await check_rate_limit(db, request, RATE_LIMITS["plugin_publish"])
 
     try:
         plugin = await publish_plugin(

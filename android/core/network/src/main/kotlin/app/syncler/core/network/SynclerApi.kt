@@ -61,14 +61,18 @@ interface SynclerApi {
     @retrofit2.http.PUT("/v1/state")
     suspend fun putUserState(@Body body: StatePutRequestDto): Response<StatePutResponseDto>
 
-    @GET("/v1/plugins/{id}/latest")
-    suspend fun getPluginLatest(@Path("id") pluginId: String): PluginLatestDto
+    @GET("/v1/plugins/{sender_id}/{plugin_identifier}/latest")
+    suspend fun getPluginLatest(
+        @Path("sender_id") senderId: String,
+        @Path("plugin_identifier") pluginIdentifier: String,
+    ): PluginLatestDto
 }
 
 @JsonClass(generateAdapter = true)
 data class PluginLatestDto(
-    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_row_id") val pluginRowId: String,
     @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
     val version: String,
     @Json(name = "signed_bundle_url") val signedBundleUrl: String,
     @Json(name = "manifest_hash") val manifestHash: String,
@@ -153,6 +157,7 @@ data class MessageInboxItemDto(
     val id: String,
     @Json(name = "sender_id") val senderId: String,
     @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
     @Json(name = "min_plugin_version") val minPluginVersion: String?,
     @Json(name = "encrypted_body") val encryptedBody: String,
     val nonce: String,

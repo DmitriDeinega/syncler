@@ -1,0 +1,47 @@
+I have completed the review of the M11 dogfood path. The implementation successfully unblocks the end-to-end lottery dogfooding scenario, with robust fixes for rate-limiting and Samsung-specific crypto quirks. However, I have identified a critical resource leak and a significant security gap that should be addressed before moving beyond the initial dogfooding phase.
+
+### Server
+*   **Rate-limiting:** The `plugin_publish` fix is solid. Moving the per-sender check after signature verification while keeping a cheap IP-based pre-check effectively prevents both anonymous DoS and sender-identity spoofing in the rate-limit buckets.
+*   **FCM Decoupling:** The migration to `_active_devices()` in `store_message` is clean. It correctly separates the storage channel (inbox) from the push channel (FCM), allowing non-FCM devices to function via polling as intended.
+*   **Inbox Projection:** Including `plugin_identifier` in the inbox response via a batch query is N+1 safe.
+
+### sdk-plugin (TypeScript)
+*   **Bundle Format:** Flipping to IIFE is correct. Since the Android host injects the bundle into a standard `<script>` tag, ESM `export` statements would have caused a syntax error.
+*   **Render Hook:** The addition of the `render` dispatch hook correctly completes the bridge contract for card rendering.
+
+### Android
+*   **Critical Risk: Resource Leak in CardBridge:** `CardBridge` initializes a `CoroutineScope` with a `SupervisorJob`. In `InboxScreen.kt`, `CardBridge` is instantiated within the `AndroidView.factory` for each card in the `LazyColumn`. Since `destroy()` is never called, every card that is scrolled or recomposed will leak its `SupervisorJob` and its `Dispatchers.IO` threads.
+    *   *Recommendation:* Use the `onRelease` block in `AndroidView` (or a `DisposableEffect`) to call `bridge.destroy()`.
+*   **Critical Security Gap: Bundle Signature Verification:** `InboxRepository.fetchPluginOrNull` downloads and executes the JS bundle without verifying its SHA-256 hash or Ed25519 signature. A compromised CDN or MITM (in non-debug builds) could substitute the bundle and gain JS execution context.
+    *   *Validation:* While flagged as "V1 work," this is a high-severity gap for production. The `latest` API already provides the `signature` and `bundle_hash`; the repository should use `PluginSignatureVerifier` to validate these before execution.
+*   **Crypto (AAD Reconstruction):** The reassembly of AAD in `InboxRepository.decrypt` is spec-compliant. The explicit handling of `null` vs `""` for `min_plugin_version` ensures the byte-shape matches what the Python SDK signs.
+*   **Samsung Keystore Fix:** The defensive cleanup in `Signing.kt` for stale/substituted P-256 aliases is a robust solution to the OEM Ed25519 provider quirk.
+*   **HTTP Relaxation:** The `BuildConfig.DEBUG` gates in `NetworkBridge`, `CardBridge`, and `PluginLoader` are correctly applied and will not leak into release builds.
+
+### Docs
+*   **Integration Guide:** The guide is now consistent with the M11 reality. Specifically, §3 clearly defines the V1 bridge limitations, and §8 correctly describes the manual `user_id`/`pairing_key` handoff for dev mode.
+
+### Final Verification Result: **PASS (with caveats)**
+The path is ready for internal dogfooding. The **CardBridge leak** should be fixed immediately to prevent app instability during long sessions, and the **bundle signature verification** must be prioritized for the V1.5 security hardening.
+
+```kotlin
+// Recommended fix for CardBridge leak in InboxScreen.kt
+AndroidView(
+    modifier = Modifier...,
+    factory = { ctx ->
+        WebView(ctx).apply {
+            // ...
+            val bridge = CardBridge(webView = this, ...)
+            addJavascriptInterface(bridge, CardBridge.NATIVE_BRIDGE_NAME)
+            tag = bridge // Store for cleanup
+        }
+    },
+    onRelease = { webView ->
+        (webView.tag as? CardBridge)?.destroy()
+    }
+)
+```
+
+Strategic update: Review completed. Identifying resource leak in Android CardBridge and security gap in bundle verification. All other server and SDK changes validated.
+
+Review 34 is complete. The dogfood path is functional, but the **CardBridge CoroutineScope leak** in `InboxScreen.kt` and the **missing bundle signature verification** in `InboxRepository.kt` should be addressed before wider internal distribution.

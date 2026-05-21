@@ -1,6 +1,7 @@
 package app.syncler.android.pluginhost.capabilities
 
 import app.syncler.android.pluginhost.AuditLogger
+import app.syncler.android.pluginhost.BuildConfig
 import app.syncler.android.pluginhost.EndpointMatcher
 import app.syncler.android.pluginhost.PluginBridgeException
 import app.syncler.android.pluginhost.PluginInstance
@@ -19,12 +20,28 @@ class NetworkBridge(
 ) {
     private val client = httpClient ?: OkHttpClient.Builder()
         .cookieJar(CookieJar.NO_COOKIES)
-        .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
+        .connectionSpecs(
+            if (BuildConfig.DEBUG) {
+                listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+            } else {
+                listOf(ConnectionSpec.MODERN_TLS)
+            },
+        )
         .build()
 
     suspend fun fetch(plugin: PluginInstance, argsJson: String): String = withContext(Dispatchers.IO) {
         val args = JsonBridgeCodec.objectFrom(argsJson)
         val url = args["url"] as? String ?: return@withContext JsonBridgeCodec.error("invalid_args")
+        // Bridge-level scheme check: defense in depth against an injected
+        // OkHttpClient (PluginLoader.android() builds one without setting
+        // connectionSpecs, so the constructor's release-HTTPS gate above is
+        // only reached when no client is injected). Enforcing scheme here
+        // means we fail closed regardless of how `client` was built.
+        val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
+        if (!schemeOk) {
+            auditLogger.denied(plugin.manifest.id, "cleartext_in_release", url)
+            throw PluginBridgeException("cleartext_in_release", "fetch URL must be HTTPS")
+        }
         if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
             auditLogger.denied(plugin.manifest.id, "endpoint_not_declared", url)
             throw PluginBridgeException("endpoint_not_declared", "Endpoint not declared: $url")

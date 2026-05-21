@@ -136,7 +136,7 @@ async def send_message(
     except PluginInactiveError as exc:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing, revoked, or not owned by sender") from exc
     except NoActiveDeviceWithPluginError as exc:
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active device with FCM token") from exc
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active devices") from exc
     except NonceReplayError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
 
@@ -167,7 +167,17 @@ async def inbox(
         device_id=device_id or uuid.uuid4(),  # informational; inbox is per-user in V1
         since=since,
     )
-    items = [_message_to_inbox_item(m) for m in messages]
+    # Project plugin_identifier for each message in one batch query.
+    plugin_ids = list({m.plugin_id for m in messages})
+    identifier_by_id: dict[uuid.UUID, str] = {}
+    if plugin_ids:
+        from app.models import Plugin
+        from sqlalchemy import select as sql_select
+        rows = await db.execute(
+            sql_select(Plugin.id, Plugin.plugin_identifier).where(Plugin.id.in_(plugin_ids))
+        )
+        identifier_by_id = {row[0]: row[1] for row in rows.all()}
+    items = [_message_to_inbox_item(m, identifier_by_id.get(m.plugin_id, "")) for m in messages]
     return MessageInboxResponse(messages=items, next_since=next_since)
 
 
@@ -181,7 +191,14 @@ async def get_message(
         message = await get_message_for_user(db, user_id=user.id, message_id=message_id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
-    return MessageDetailResponse(**_message_to_inbox_item(message).model_dump())
+    # Fetch plugin_identifier for this one message.
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+    plugin_row = await db.execute(
+        sql_select(Plugin.plugin_identifier).where(Plugin.id == message.plugin_id)
+    )
+    identifier = plugin_row.scalar_one_or_none() or ""
+    return MessageDetailResponse(**_message_to_inbox_item(message, identifier).model_dump())
 
 
 @router.post("/{message_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
@@ -214,12 +231,13 @@ async def dismiss_message(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _message_to_inbox_item(message) -> MessageInboxItem:  # noqa: ANN001
+def _message_to_inbox_item(message, plugin_identifier: str) -> MessageInboxItem:  # noqa: ANN001
     encrypted_body, nonce, envelope_signature = parse_pointer(message.encrypted_body_pointer)
     return MessageInboxItem(
         id=message.id,
         sender_id=message.sender_id,
         plugin_id=message.plugin_id,
+        plugin_identifier=plugin_identifier,
         min_plugin_version=message.min_plugin_version,
         encrypted_body=_b64(encrypted_body),
         nonce=_b64(nonce),

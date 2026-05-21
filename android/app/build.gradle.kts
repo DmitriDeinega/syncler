@@ -17,7 +17,9 @@ android {
         versionCode = 1
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "SERVER_BASE_URL", "\"http://192.168.1.4:8001/\"")
+        val baseUrl = (project.findProperty("syncler.server.base.url") as? String)
+            ?: "http://10.0.2.2:8000/"
+        buildConfigField("String", "SERVER_BASE_URL", "\"$baseUrl\"")
 
         // Environment label. Override at build time:
         //   ./gradlew :app:assembleDebug -Psyncler.environment=PROD

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_serializer, field_validator
 
 EmailField = (
     EmailStr
@@ -175,6 +175,11 @@ class MessageInboxItem(BaseModel):
     id: UUID
     sender_id: UUID
     plugin_id: UUID
+    # Stable sender-chosen identifier (e.g. "com.lottery.app"). The device
+    # uses this to fetch the plugin manifest at
+    # `/v1/plugins/{sender_id}/{plugin_identifier}/latest` and render the
+    # message's card via the sender's JS plugin bundle.
+    plugin_identifier: str
     min_plugin_version: str | None
     encrypted_body: str
     nonce: str
@@ -182,6 +187,16 @@ class MessageInboxItem(BaseModel):
     sent_at: datetime
     # Required so the recipient can reconstruct AAD/envelope for decrypt + sig verify.
     expires_at: datetime
+
+    # Senders sign/encrypt with a `Z`-suffixed UTC string for `expires_at`
+    # (see sdk-python crypto.py + the canonicalization in
+    # routers/messages.py:_build_envelope_bytes). Pydantic's default datetime
+    # serializer emits `+00:00`, which would make the device's AAD bytes
+    # diverge from what the sender encrypted with and break AES-GCM decrypt.
+    # Force the canonical form on the wire.
+    @field_serializer("expires_at")
+    def _serialize_expires_at(self, value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
 
 
 class MessageInboxResponse(BaseModel):

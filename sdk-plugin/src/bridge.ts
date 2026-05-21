@@ -3,8 +3,12 @@ import { assertPluginManifest, setRegisteredManifest } from './manifest';
 
 /**
  * Hooks the native host may dispatch into a loaded plugin.
+ *
+ * 'render' returns the HTML string the host should inject into the card view.
+ * The other three are lifecycle hooks the plugin implements on the BasePlugin
+ * subclass.
  */
-export type DispatchHook = 'onMessage' | 'onAction' | 'onDismiss';
+export type DispatchHook = 'onMessage' | 'onAction' | 'onDismiss' | 'render';
 
 let registeredPlugin: BasePlugin | undefined;
 
@@ -50,6 +54,8 @@ export async function dispatchPluginHook(hook: DispatchHook, args: unknown[]): P
       return await registeredPlugin.onAction(asString(args[0], 'actionName'), args[1]);
     case 'onDismiss':
       return await registeredPlugin.onDismiss(asString(args[0], 'deviceId'));
+    case 'render':
+      return await registeredPlugin.render(args[0]);
     default:
       return assertNever(hook);
   }

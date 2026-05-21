@@ -14,7 +14,7 @@ syncler/
   sdk-python/       Python sender SDK (the canonical sender impl)
   examples/         Runnable examples (trading-bot)
   docs/             crypto-spec.md (the canonical crypto contract)
-                    lottery-integration-spec.md (the M10 DX dogfood deliverable)
+                    integration-guide.md (how any sender integrates with Syncler)
   .triad/           Design history (planning + reviews) — committed for context
 ```
 
@@ -92,7 +92,7 @@ npm run build
 cd examples/minimal && ./build.sh
 ```
 
-End-to-end integration template: [docs/lottery-integration-spec.md](docs/lottery-integration-spec.md).
+End-to-end integration guide for senders: [docs/integration-guide.md](docs/integration-guide.md).
 
 ## Status
 

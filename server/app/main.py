@@ -43,7 +43,8 @@ app.include_router(plugins.router, prefix="/v1/plugins")
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    print(f"[validation_error] {request.method} {request.url.path} -> {exc.errors()}", flush=True)
     return JSONResponse(status_code=400, content=jsonable_encoder({"detail": exc.errors()}))
 
 

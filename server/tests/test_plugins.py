@@ -167,6 +167,33 @@ async def test_revoke_requires_sender_signature(app_client: AsyncClient) -> None
 
 
 @pytest.mark.asyncio
+async def test_publish_with_only_body_sender_id_succeeds(app_client: AsyncClient) -> None:
+    """Regression: the Python SDK puts sender_id in the JSON body only — no
+    X-Sender-ID header. Pre-fix, the publish route's rate-limit dependency
+    borrowed the `pairing_initiate` actor, which required header/state to be
+    set and returned 400 "missing rate limit actor" before the handler ran.
+
+    The fix moved the per-sender bucket to *after* signature verification (so a
+    spoofer can't inflate someone else's bucket via the body), and added a
+    `plugin_publish` actor that reads sender_id from state. This test ensures
+    SDK-shape calls — no header, sender_id only in body — succeed.
+    """
+    sender_id, private_key = await _register_sender(app_client)
+
+    response = await app_client.post(
+        "/v1/plugins/publish",
+        json=_body(sender_id, private_key, version="1.0.0"),
+        # Explicitly no X-Sender-ID header — mirrors what the Python SDK sends.
+    )
+    assert response.status_code == 201, response.text
+
+    # And the /latest lookup that the plugin host hits — no X-Device-ID header
+    # — should also succeed (was 400 with the same root cause).
+    latest = await app_client.get(f"/v1/plugins/{sender_id}/com.lottery.app/latest")
+    assert latest.status_code == 200, latest.text
+
+
+@pytest.mark.asyncio
 async def test_revoke_rejects_foreign_sender(app_client: AsyncClient) -> None:
     sender_a, key_a = await _register_sender(app_client)
     sender_b, key_b = await _register_sender(app_client)

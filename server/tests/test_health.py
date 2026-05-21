@@ -12,4 +12,8 @@ async def test_health() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "0.1.0"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["version"] == "0.1.0"
+    assert "environment" in body
+    assert "title" in body

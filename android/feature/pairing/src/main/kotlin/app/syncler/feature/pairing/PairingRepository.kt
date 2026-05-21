@@ -31,7 +31,10 @@ class PairingRepository @Inject constructor(
     private val pairedSenderStore: PairedSenderStore,
 ) {
     fun parseBrokerUrl(url: String): PairingCandidate? {
-        if (!url.startsWith("https://")) {
+        // Debug builds accept plain http:// so devs can pair against a local
+        // broker without TLS. Release builds require HTTPS.
+        val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
+        if (!schemeOk) {
             Timber.tag(TAG).w("non-https broker URL rejected")
             return null
         }
@@ -50,6 +53,7 @@ class PairingRepository @Inject constructor(
     suspend fun confirm(
         candidate: PairingCandidate,
         preview: PairingPreviewResponseDto,
+        pairingKey: ByteArray,
         encryptedInitialState: ByteArray,
     ): Result<PairedSender> = runCatching {
         val response = api.completePairing(
@@ -89,6 +93,7 @@ class PairingRepository @Inject constructor(
             fingerprint = response.senderPublicKeyFingerprint,
             nameHash = Base64.decode(response.senderNameHash, Base64.NO_WRAP),
             firstPairedAt = response.pairedAt,
+            pairingKey = pairingKey,
         )
         pairedSenderStore.add(record)
         record

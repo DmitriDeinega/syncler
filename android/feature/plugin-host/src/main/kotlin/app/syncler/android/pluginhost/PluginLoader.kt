@@ -90,8 +90,9 @@ class PluginLoader(
     }
 
     private fun requireHttps(url: String) {
-        val allowHttpLocalhost = BuildConfig.DEBUG && (url.startsWith("http://localhost") || url.startsWith("http://10.0.2.2"))
-        require(url.startsWith("https://") || allowHttpLocalhost) {
+        // Debug builds accept any HTTP origin so devs can host bundles on their
+        // LAN/dev box without TLS. Release builds require HTTPS unconditionally.
+        require(url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))) {
             "plugin URLs must use HTTPS (got $url)"
         }
     }

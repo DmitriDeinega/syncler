@@ -94,6 +94,7 @@ async def _seed_pairing_and_plugin(
     plugin = Plugin(
         id=uuid.uuid4(),
         sender_id=sender_id,
+        plugin_identifier="com.test.plugin",
         version="1.0.0",
         manifest_hash=b"\x00" * 32,
         bundle_hash=b"\x00" * 32,
@@ -259,9 +260,13 @@ async def test_send_rejects_past_expires_at(
 
 
 @pytest.mark.asyncio
-async def test_send_returns_410_when_no_device_has_fcm_token(
+async def test_send_succeeds_when_device_has_no_fcm_token(
     app_client: AsyncClient, db_session: AsyncSession
 ) -> None:
+    """A device without an FCM token (typical in debug builds without a real
+    google-services.json) must still be able to receive messages via the
+    /v1/messages/inbox pull endpoint. Storage is the source of truth; FCM is
+    a best-effort delivery channel on top of it."""
     user_id, session_token = await _signup_and_login(app_client)
     # Enroll device WITHOUT fcm_token
     response = await app_client.post(
@@ -270,6 +275,34 @@ async def test_send_returns_410_when_no_device_has_fcm_token(
         json={"public_key": _b64(b"d" * 32)},
     )
     assert response.status_code == 201
+    sender_id, private_key = await _register_sender(app_client)
+    plugin_id = await _seed_pairing_and_plugin(db_session, user_id=user_id, sender_id=sender_id)
+
+    body = await _send_payload(
+        sender_id=sender_id, user_id=user_id, plugin_id=plugin_id, private_key=private_key
+    )
+    send = await app_client.post("/v1/messages/send", json=body)
+    assert send.status_code == 201, send.text
+    message_id = send.json()["message_id"]
+
+    # The message is pullable from the inbox endpoint.
+    inbox = await app_client.get(
+        "/v1/messages/inbox",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+    assert inbox.status_code == 200, inbox.text
+    ids = [m["id"] for m in inbox.json()["messages"]]
+    assert message_id in ids
+
+
+@pytest.mark.asyncio
+async def test_send_returns_410_when_user_has_no_devices(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """If the user has zero active devices, the message has no possible
+    recipient and storage refuses (would just expire after 30d). Distinct from
+    the FCM-less case — there, storage succeeds and inbox-pull works."""
+    user_id, _ = await _signup_and_login(app_client)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_plugin(db_session, user_id=user_id, sender_id=sender_id)
 

@@ -16,6 +16,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -45,6 +46,7 @@ dependencies {
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.timber)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     ksp(libs.hilt.compiler)
     testImplementation(libs.junit)

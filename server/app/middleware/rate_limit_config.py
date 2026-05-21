@@ -12,6 +12,11 @@ RATE_LIMITS: dict[str, RateLimitConfig] = {
     "login": RateLimitConfig(name="login", max_count=5, window_seconds=60),
     "signup": RateLimitConfig(name="signup", max_count=3, window_seconds=60),
     "pairing_initiate": RateLimitConfig(name="pairing_initiate", max_count=10, window_seconds=60),
+    # Per-sender publish bucket. Senders publish new plugin versions
+    # infrequently; the budget exists to absorb retries / CI hiccups, not
+    # legitimate publish traffic. Applied AFTER sender-signature verification
+    # (see plugins.publish) so a spoofer can't inflate someone else's bucket.
+    "plugin_publish": RateLimitConfig(name="plugin_publish", max_count=10, window_seconds=60),
     # M5.1: pre-signature IP bucket. After signature verifies, the per-sender
     # "message_send" bucket applies as defense-in-depth.
     "message_send_ip": RateLimitConfig(name="message_send_ip", max_count=120, window_seconds=60),

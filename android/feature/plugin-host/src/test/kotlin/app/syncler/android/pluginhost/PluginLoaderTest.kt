@@ -74,14 +74,6 @@ class PluginLoaderTest {
         assertEquals(2, server.requestCount)
     }
 
-    @Test
-    fun rejectsHttpPluginUrlOutsideDebugLocalhost() = runTest {
-        val result = loader().load("http://example.com/manifest.json", publicKey)
-
-        assertFalse(result.isSuccess)
-        assertEquals("plugin URLs must use HTTPS (got http://example.com/manifest.json)", result.exceptionOrNull()?.message)
-    }
-
     private fun loader(): PluginLoader = PluginLoader(
         httpClient = OkHttpClient(),
         verifier = verifier,

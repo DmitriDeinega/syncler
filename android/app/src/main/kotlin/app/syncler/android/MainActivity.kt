@@ -11,10 +11,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.syncler.android.ui.AuthScreen
 import app.syncler.android.ui.AuthViewModel
 import app.syncler.android.ui.DevicesViewModel
-import app.syncler.android.ui.InboxScreenStub
 import app.syncler.android.ui.MainViewModel
 import app.syncler.android.ui.SettingsDevicesScreen
 import app.syncler.android.ui.TopLevelScreen
+import app.syncler.feature.inbox.InboxScreen
 import app.syncler.feature.pairing.PairingScreen
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity() {
                         screen == TopLevelScreen.Pairing -> PairingScreen(
                             onDone = mainViewModel::showInbox,
                         )
-                        else -> InboxScreenStub(
+                        else -> InboxScreen(
                             onLogout = mainViewModel::logout,
                             onManageDevices = mainViewModel::showDevices,
                             onPairSender = mainViewModel::showPairing,

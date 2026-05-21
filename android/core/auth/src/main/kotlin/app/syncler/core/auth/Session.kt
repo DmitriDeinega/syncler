@@ -1,5 +1,6 @@
 package app.syncler.core.auth
 
+import android.util.Base64
 import app.syncler.core.network.AuthTokenProvider
 import dagger.Binds
 import dagger.Module
@@ -12,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import org.json.JSONObject
 
 data class SessionState(
     val token: String?,
@@ -30,6 +32,22 @@ class Session @Inject constructor(
     val isUnlocked = sessionState.map { it.isUnlocked }
 
     override fun currentToken(): String? = state.value.token
+
+    /**
+     * Returns the `sub` claim from the current JWT (the user UUID) or null if
+     * no session is active or the token is malformed. Used by dev affordances
+     * that need to surface the user's identity (e.g. pairing-key copy screen).
+     */
+    fun currentUserId(): String? {
+        val token = state.value.token ?: return null
+        val segments = token.split('.')
+        if (segments.size < 2) return null
+        return runCatching {
+            val padded = segments[1].padEnd((segments[1].length + 3) / 4 * 4, '=')
+            val body = Base64.decode(padded, Base64.URL_SAFE or Base64.NO_WRAP)
+            JSONObject(String(body, Charsets.UTF_8)).optString("sub").takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
 
     fun authenticate(token: String, masterKey: ByteArray) {
         tokenStore.writeToken(token)

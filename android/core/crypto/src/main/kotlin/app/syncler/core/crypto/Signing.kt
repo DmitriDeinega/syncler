@@ -40,19 +40,28 @@ object Signing {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
         return runCatching {
             val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            val publicKey = if (keyStore.containsAlias(alias)) {
-                keyStore.getCertificate(alias).publicKey
-            } else {
-                val generator = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
-                generator.initialize(
-                    KeyGenParameterSpec.Builder(
-                        alias,
-                        KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
-                    ).build(),
-                )
-                generator.generateKeyPair().public
+            if (keyStore.containsAlias(alias)) {
+                val raw = SubjectPublicKeyInfo
+                    .getInstance(keyStore.getCertificate(alias).publicKey.encoded)
+                    .publicKeyData.bytes
+                if (raw.size == KEY_SIZE_BYTES) return@runCatching raw
+                // Stale alias from a previous build that stored a non-Ed25519 key
+                // (e.g. Samsung Keystore silently substituted P-256). Drop it so
+                // the next generation attempt — or the BC fallback — produces a
+                // valid 32-byte Ed25519 key.
+                keyStore.deleteEntry(alias)
             }
-            SubjectPublicKeyInfo.getInstance(publicKey.encoded).publicKeyData.bytes
+            val generator = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
+            generator.initialize(
+                KeyGenParameterSpec.Builder(
+                    alias,
+                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+                ).build(),
+            )
+            val generated = SubjectPublicKeyInfo
+                .getInstance(generator.generateKeyPair().public.encoded)
+                .publicKeyData.bytes
+            if (generated.size == KEY_SIZE_BYTES) generated else null
         }.getOrNull()
     }
 

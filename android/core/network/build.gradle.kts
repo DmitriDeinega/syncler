@@ -12,7 +12,9 @@ android {
     defaultConfig {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "SERVER_BASE_URL", "\"http://10.0.2.2:8000/\"")
+        val baseUrl = (project.findProperty("syncler.server.base.url") as? String)
+            ?: "http://10.0.2.2:8000/"
+        buildConfigField("String", "SERVER_BASE_URL", "\"$baseUrl\"")
     }
 
     buildFeatures {

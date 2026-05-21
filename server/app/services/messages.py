@@ -57,20 +57,6 @@ async def _active_devices(db: AsyncSession, user_id: uuid.UUID) -> list[Device]:
     return list(result.scalars().all())
 
 
-async def _active_devices_with_fcm(db: AsyncSession, user_id: uuid.UUID) -> list[Device]:
-    """Active devices with a non-null FCM token. Required for /send to succeed."""
-    result = await db.execute(
-        select(Device).where(
-            and_(
-                Device.user_id == user_id,
-                Device.revoked_at.is_(None),
-                Device.fcm_token.is_not(None),
-            ),
-        ),
-    )
-    return list(result.scalars().all())
-
-
 async def _pairing(db: AsyncSession, *, sender_id: uuid.UUID, user_id: uuid.UUID) -> Pairing | None:
     result = await db.execute(
         select(Pairing).where(
@@ -130,9 +116,15 @@ async def store_message(
     if plugin is None:
         raise PluginInactiveError("plugin missing, revoked, or not owned by sender")
 
-    fcm_devices = await _active_devices_with_fcm(db, user_id)
-    if not fcm_devices:
-        raise NoActiveDeviceWithPluginError("user has no active device with an FCM token")
+    # Storage is independent of the push channel. We require at least one
+    # non-revoked device so the message has a recipient; devices without an
+    # FCM token can still receive it via the /v1/messages/inbox pull endpoint
+    # (used in dev builds without google-services.json, and as a fallback for
+    # users who declined notification permission). FCM push, when available,
+    # is best-effort on top of storage — see push_message_to_user_devices.
+    devices = await _active_devices(db, user_id)
+    if not devices:
+        raise NoActiveDeviceWithPluginError("user has no active devices")
 
     # Encrypted body is opaque to the server; we keep it in a separate blob table or
     # inline. For V1 we keep it inline via an "encrypted_body_pointer" addressed JSON.

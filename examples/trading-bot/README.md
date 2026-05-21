@@ -20,10 +20,7 @@ python bot.py loop         # sends every SYNCLER_TICK_SECONDS (default 1800)
 This example doesn't ship a plugin; it just exercises the sender side. To
 make incoming messages render on the phone, you'd:
 
-1. Write a `TradingPlugin` similar to `docs/lottery-integration-spec.md`'s
-   shape, build + sign it.
+1. Write a `TradingPlugin` following the structure in `docs/integration-guide.md`,
+   build + sign it.
 2. `client.publish_plugin(...)` to get a `plugin_row_id`.
 3. Set `plugin_row_id` in `state.json`.
-
-For the M10 lottery dogfood test, see the lottery example which has the
-full plugin → publish → send flow.

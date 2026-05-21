@@ -141,7 +141,7 @@ def _identify_actor(name: str, request: Request) -> tuple[str, str]:
     if name in {"login", "signup", "message_send_ip"}:
         return "ip", _client_ip(request)
 
-    if name in {"pairing_initiate", "message_send"}:
+    if name in {"pairing_initiate", "message_send", "plugin_publish"}:
         return "sender", _required_actor_value(request, "sender_id", "X-Sender-ID")
 
     if name == "message_send_user_hour":
@@ -152,7 +152,11 @@ def _identify_actor(name: str, request: Request) -> tuple[str, str]:
         return "sender_user", f"{sender_id}:{user_id}"
 
     if name == "manifest_fetch":
-        return "device", _required_actor_value(request, "device_id", "X-Device-ID")
+        # `/v1/plugins/{sender_id}/{plugin_identifier}/latest` is unauthenticated
+        # (devices don't carry a session token on this lookup), so we key the
+        # bucket off the sender_id path param — protects each sender's catalog
+        # from being hammered without requiring callers to advertise a device id.
+        return "sender", _required_actor_value(request, "sender_id", "X-Sender-ID")
 
     if name == "action_callback":
         return "pairing", _required_actor_value(request, "pairing_id", "X-Pairing-ID")
