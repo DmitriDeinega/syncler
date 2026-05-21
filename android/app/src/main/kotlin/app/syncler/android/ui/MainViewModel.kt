@@ -10,7 +10,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-enum class TopLevelScreen { Inbox, Devices, Pairing }
+/**
+ * Three top-level destinations exposed via the [androidx.compose.material3.NavigationBar].
+ * Sub-screens (Pairing, Archive, Devices detail, etc.) are surfaced as overlays on the
+ * relevant tab by the tab's own ViewModel — they don't appear in the bottom nav.
+ */
+enum class TopLevelScreen { Inbox, Senders, Settings }
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -22,9 +27,7 @@ class MainViewModel @Inject constructor(
     private val _screen = MutableStateFlow(TopLevelScreen.Inbox)
     val screen: StateFlow<TopLevelScreen> = _screen
 
-    fun showInbox() { _screen.value = TopLevelScreen.Inbox }
-    fun showDevices() { _screen.value = TopLevelScreen.Devices }
-    fun showPairing() { _screen.value = TopLevelScreen.Pairing }
+    fun select(tab: TopLevelScreen) { _screen.value = tab }
 
     fun logout() {
         viewModelScope.launch {

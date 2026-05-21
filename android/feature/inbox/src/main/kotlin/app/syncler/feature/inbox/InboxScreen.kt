@@ -20,6 +20,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -46,6 +49,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import javax.inject.Inject
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -114,20 +120,37 @@ class InboxViewModel @Inject constructor(
         viewModelScope.launch { userState.markRead(itemId) }
     }
     fun closeDetail() { _selectedId.value = null }
+
+    val archivedMessageIds: StateFlow<Set<String>> = userState.state
+        .map { st -> st.archivedMessages.map { it.messageId }.toSet() }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = userState.state.value.archivedMessages.map { it.messageId }.toSet(),
+        )
+
+    fun archive(itemId: String) {
+        viewModelScope.launch { userState.markArchived(itemId) }
+    }
+
+    private val _showArchive = MutableStateFlow(false)
+    val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
+    fun openArchive() { _showArchive.value = true }
+    fun closeArchive() { _showArchive.value = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InboxScreen(
-    onLogout: () -> Unit,
-    onManageDevices: () -> Unit,
-    onPairSender: () -> Unit,
+    modifier: Modifier = Modifier,
     viewModel: InboxViewModel = hiltViewModel(),
 ) {
     val items by viewModel.items.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
     val selectedId by viewModel.selectedId.collectAsState()
     val readMessageIds by viewModel.readMessageIds.collectAsState()
+    val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
+    val showArchive by viewModel.showArchive.collectAsState()
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -136,28 +159,155 @@ fun InboxScreen(
         }
     }
 
+    // Sub-screens stack on top of the inbox: detail view (per item) and
+    // archive list. They handle their own back navigation and return here.
     val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
     if (selectedItem != null) {
-        DetailScreen(item = selectedItem, onBack = viewModel::closeDetail)
+        DetailScreen(
+            item = selectedItem,
+            onBack = viewModel::closeDetail,
+            isArchived = selectedItem.id in archivedMessageIds,
+            onArchive = { viewModel.archive(selectedItem.id) },
+        )
+        return
+    }
+    if (showArchive) {
+        ArchiveScreen(
+            items = items.filter { it.id in archivedMessageIds },
+            readMessageIds = readMessageIds,
+            onBack = viewModel::closeArchive,
+            onItemClick = { id -> viewModel.open(id) },
+        )
         return
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Inbox") }) },
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Inbox") },
+                actions = {
+                    if (refreshing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
+                        )
+                    }
+                    IconButton(onClick = { viewModel.refresh() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                    }
+                    IconButton(onClick = viewModel::openArchive) {
+                        Icon(Icons.Filled.Archive, contentDescription = "Archive")
+                    }
+                },
+            )
+        },
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = onPairSender) { Text("Pair sender") }
-                OutlinedButton(onClick = onManageDevices) { Text("Devices") }
-                OutlinedButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
-                if (refreshing) CircularProgressIndicator(Modifier.height(20.dp))
-                OutlinedButton(onClick = onLogout) { Text("Log out") }
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+            // The active inbox excludes archived messages — they live in the
+            // archive sub-screen and don't add to the unread badge / clutter
+            // the active feed.
+            val activeItems = items.filter { it.id !in archivedMessageIds }
+            if (activeItems.isEmpty()) {
+                Text(
+                    "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+                    modifier = Modifier.padding(top = 24.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                BucketedInboxList(
+                    items = activeItems,
+                    readMessageIds = readMessageIds,
+                    onItemClick = viewModel::open,
+                )
             }
-            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
 
+/**
+ * Groups inbox items into Today / Yesterday / Earlier buckets and renders
+ * them with sticky-ish section headers. Bucket boundaries are computed
+ * against the device's current local date (the row timestamp is the server's
+ * `sent_at`, which is UTC; we convert per-row to local for bucketing).
+ */
+@Composable
+private fun BucketedInboxList(
+    items: List<InboxItem>,
+    readMessageIds: Set<String>,
+    onItemClick: (String) -> Unit,
+) {
+    val today = LocalDate.now()
+    val buckets = remember(items, today) {
+        items.groupBy { item ->
+            bucketFor(item.sentAt, today)
+        }.toSortedMap(compareBy { it.order })
+    }
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        buckets.forEach { (bucket, bucketItems) ->
+            item(key = "header-${bucket.name}") {
+                Text(
+                    text = bucket.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                )
+            }
+            items(bucketItems, key = { it.id }) { item ->
+                InboxRow(
+                    item = item,
+                    isRead = item.id in readMessageIds,
+                    onClick = { onItemClick(item.id) },
+                )
+            }
+        }
+    }
+}
+
+private enum class DateBucket(val order: Int, val label: String) {
+    Today(0, "Today"),
+    Yesterday(1, "Yesterday"),
+    Earlier(2, "Earlier"),
+}
+
+private fun bucketFor(isoSentAt: String, today: LocalDate): DateBucket {
+    // sent_at is server-canonical UTC; project to the device's local date
+    // for bucketing so "Today" matches what the user sees on their clock.
+    val date = runCatching {
+        Instant.parse(isoSentAt).atZone(ZoneId.systemDefault()).toLocalDate()
+    }.getOrNull() ?: return DateBucket.Earlier
+    return when {
+        date == today -> DateBucket.Today
+        date == today.minusDays(1) -> DateBucket.Yesterday
+        else -> DateBucket.Earlier
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ArchiveScreen(
+    items: List<InboxItem>,
+    readMessageIds: Set<String>,
+    onBack: () -> Unit,
+    onItemClick: (String) -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Archive") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
             if (items.isEmpty()) {
                 Text(
-                    "No cards yet. Pair a sender and they can push to you.",
+                    "No archived cards.",
+                    modifier = Modifier.padding(top = 24.dp),
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
@@ -166,7 +316,7 @@ fun InboxScreen(
                         InboxRow(
                             item = item,
                             isRead = item.id in readMessageIds,
-                            onClick = { viewModel.open(item.id) },
+                            onClick = { onItemClick(item.id) },
                         )
                     }
                 }
@@ -278,7 +428,12 @@ private fun InboxRow(item: InboxItem, isRead: Boolean, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DetailScreen(item: InboxItem, onBack: () -> Unit) {
+private fun DetailScreen(
+    item: InboxItem,
+    onBack: () -> Unit,
+    isArchived: Boolean,
+    onArchive: () -> Unit,
+) {
     BackHandler(onBack = onBack)
     Scaffold(
         topBar = {
@@ -301,6 +456,16 @@ private fun DetailScreen(item: InboxItem, onBack: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (!isArchived) {
+                        IconButton(onClick = {
+                            onArchive()
+                            onBack()  // pop back to inbox so the archive transition feels active
+                        }) {
+                            Icon(Icons.Filled.Archive, contentDescription = "Archive")
+                        }
                     }
                 },
             )

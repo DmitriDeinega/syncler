@@ -130,6 +130,7 @@ sealed interface PairingState {
 @Composable
 fun PairingScreen(
     onDone: () -> Unit = {},
+    modifier: Modifier = Modifier,
     viewModel: PairingViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
@@ -145,7 +146,10 @@ fun PairingScreen(
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Pair a sender") }) }) { padding ->
+    Scaffold(
+        modifier = modifier,
+        topBar = { TopAppBar(title = { Text("Senders") }) },
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
