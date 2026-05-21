@@ -111,4 +111,20 @@ private class FakeApi(
         if (revokeSucceeds) Response.success(Unit) else Response.error(404, ByteArray(0).toResponseBody())
 
     override suspend fun deleteAccount(): Response<Unit> = Response.success(Unit)
+
+    // Methods unused by AuthRepository tests but required by the interface;
+    // they were stubbed when added to keep this fixture compiling alongside
+    // SynclerApi growth (state, pairing, plugin lookup, etc.).
+    override suspend fun getMessage(id: String) = stub()
+    override suspend fun inbox(since: String?) = stub()
+    override suspend fun dismissMessage(id: String, deviceId: String): Response<Unit> = stub()
+    override suspend fun previewPairing(token: String) = stub()
+    override suspend fun completePairing(body: app.syncler.core.network.PairingCompleteRequestDto) = stub()
+    override suspend fun revokePairing(id: String): Response<Unit> = stub()
+    override suspend fun listPairings() = stub()
+    override suspend fun getUserState() = stub()
+    override suspend fun putUserState(body: app.syncler.core.network.StatePutRequestDto): Response<app.syncler.core.network.StatePutResponseDto> = stub()
+    override suspend fun getPluginLatest(senderId: String, pluginIdentifier: String) = stub()
+
+    private fun stub(): Nothing = throw UnsupportedOperationException("not implemented by AuthRepositoryTest fake")
 }

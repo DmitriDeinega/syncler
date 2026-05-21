@@ -123,6 +123,25 @@ class StateMergerTest {
     }
 
     @Test
+    fun `timestamp comparison uses Instant not string lex`() {
+        // Real-time order: T2 (with .500 millis) is LATER than T1 (whole seconds).
+        // Lexicographic comparison would put "T1Z" AFTER "T0.500Z" because 'Z' > '.'
+        // in ASCII, which would let the wrong entry win the merge.
+        val earlier = "2026-05-21T10:00:00Z"
+        val later = "2026-05-21T10:00:00.500Z"
+        val local = EncryptedUserState(
+            readMessages = listOf(ReadMessageEntry("m1", earlier)),
+        )
+        val remote = EncryptedUserState(
+            readMessages = listOf(ReadMessageEntry("m1", later)),
+        )
+        val merged = StateMerger.merge(local, remote)
+        val m1 = merged.readMessages.first { it.messageId == "m1" }
+        // The .500ms timestamp must win — that's the genuinely later one.
+        assertEquals(later, m1.readAt)
+    }
+
+    @Test
     fun `V1 blob without read messages parses as empty list and forward-migrates`() {
         // Simulate a blob written by a pre-M11.2 device that lacked the
         // read_messages and archived_messages fields entirely.

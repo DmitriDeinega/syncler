@@ -1,0 +1,2933 @@
+Reading additional input from stdin...
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, C:\Users\Dima\.codex\memories]
+reasoning effort: high
+reasoning summaries: none
+session id: 019e4890-bfb8-7103-be0c-85fac0f0d143
+--------
+user
+# Review 38 — Phase 2: read state + M7 CAS sync
+
+Shipped commit `M11.2` (head). Adds per-message read + archive state to the M7 encrypted user-state blob, wires the inbox UI to show unread visual treatment, marks read on detail-view open, and pulls/pushes through the existing M7 `/v1/state` CAS endpoints.
+
+## What to pressure-test
+
+### Schema + merge
+
+1. **`EncryptedUserState.fromJson` forward-migration.** Pre-V2 blobs (V0 and V1) get `readMessages = []` and `archivedMessages = []`, schemaVersion gets coerced to `SCHEMA_CURRENT`. Verify the migration is non-destructive: an old V1 blob with installedPlugins/dismissedMessages/pluginSettings round-trips through fromJson → toJson with no field loss. The included test covers V1 blob → V2 with read/archived defaulting empty — is that enough, or do we need a stronger compatibility guarantee (e.g., a separate test that an unknown V3 schema_version doesn't crash)?
+
+2. **Merger semantics for read state.** `max(read_at) wins per message_id`. Two cases to validate:
+   - Device A marks read at T1, device B marks read at T2 (T2 > T1): merged blob keeps T2. ✓ tested.
+   - Device A marks read at T, device B never marks read: A's entry survives in the merged blob. ✓ tested implicitly via the union behavior.
+   - Edge case the test doesn't cover: same timestamp, different devices. The current `>=` operator means "local wins" if equal; that's deterministic but biased. Is the bias acceptable, or should we add device-id tiebreaker?
+
+3. **`StateMerger.merge` schema-version handling.** The function takes `maxOf(local, remote)`. Combined with `fromJson` forward-migration: if a device with V2 client pulls from a server that still has a V1 blob (legacy), it forward-migrates to V2 locally. On push back, the blob is V2. But: a V1 client pulling a V2 blob written by a V2 device would NOT understand `read_messages` or `archived_messages` — fromJson on the V1 client doesn't know to skip them; it would ignore them via `optJSONArray` (returns null → empty list), then on push it would write a blob WITHOUT those fields, *destroying read marks*. Is that a problem in practice? V1 client doesn't exist (we own all clients), but as a forward-compat lesson, should the V1 client preserve unknown fields rather than dropping them on write?
+
+### UserStateRepository
+
+4. **Concurrent markRead + push** ([UserStateRepository.kt:88-100](android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt)). `markRead` updates `_state` then calls `push()`. If the user marks two messages read in quick succession, the second `applyLocal` happens between the first `push` and its server response. The second push enters `syncMutex.withLock` after the first releases. Is this safe? Specifically:
+   - Second push uses `lastKnownRemoteVersion()` which was just updated by the first push's success — good.
+   - But if the first push 409s and the conflict-handler pulls + re-pushes, the second markRead's data is now in the local state but hadn't been written when the conflict-handler did its merge. The conflict-handler's `merged = StateMerger.merge(local = _state.value, remote = ...)` reads the current `_state.value` which INCLUDES the second markRead. So the conflict-handler push includes both reads. ✓
+   - But the second `push()` call still runs after the first finishes. It will re-encrypt and re-push the same state. Redundant but not wrong.
+   - Worth debouncing? Not in V1, but flag if there's a correctness issue I'm missing.
+
+5. **`pull()` and `push()` are both gated on `syncMutex`** but `applyLocal` is not. `markRead` updates `_state.value` outside the mutex. Is there a race where `pull` finishes its merge and is about to call `applyLocal` while `markRead` ALSO calls `applyLocal` with stale data? The MutableStateFlow assignment is atomic but the read-then-write pattern in markRead (`_state.value.let { ... }.copy(...)`) is NOT atomic. Two concurrent markReads could lose one.
+   - Likely fix: synchronize the local-mutation paths too, or use `update {}` on the MutableStateFlow.
+
+6. **Master-key dependence.** Both pull and push no-op if `session.sessionState.value.masterKey == null`. Is that the right behavior, or should the calls raise/return an error so the caller knows the operation didn't happen? Currently `markRead` issues a `push()` that silently no-ops if locked — local state is updated but never syncs.
+
+### UI
+
+7. **Unread dot + bold title.** The dot is 8dp, primary-colored, sits to the left of the row content. Bold title (FontWeight.SemiBold) for unread. When read, dot is invisible but its 8dp slot is preserved so the row doesn't reflow. Trade-off: 8dp of horizontal whitespace permanently consumed for read rows. Is that the right call, or should the layout reflow when read (and accept a one-time jitter when the user marks read)?
+
+8. **Mark-read trigger.** Currently fires on `viewModel.open(itemId)`, which is the click handler that sets `_selectedId` and the detail screen mounts. If the user taps and immediately backs out (<200ms), we still mark read. Is that the right behavior, or should we wait for the detail screen to actually mount + briefly dwell? The review-35 consensus was "mark on detail open" — opening IS the trigger, regardless of dwell.
+
+9. **`readMessageIds` derived flow.** Uses `stateIn(WhileSubscribed(5_000))` with an initial value from `userState.state.value` at construction. Confirm: when the inbox is recomposed (config change, navigation), the InboxViewModel survives, so the flow stays subscribed. When the user logs out and back in, the new InboxViewModel re-reads from the current `userState.state` which still has the OLD user's read state (UserStateRepository is @Singleton). Is logout supposed to clear the user state blob?
+
+### Sync correctness
+
+10. **CAS retry on 409.** [`handleConflictAndRetry`](android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:153-175) pulls the latest blob, merges, and pushes once. If that retry also 409s, we log and bail. Next foreground tick / next markRead would pull-merge-push again. Is one retry the right policy? Codex's earlier review (#31) on M7.1 might have an opinion on this; check `.triad/31-codex-review.txt` for prior signal.
+
+11. **Encryption format compatibility.** The blob is encrypted as `nonce || ciphertext+tag` via `Aead.encrypt` — same primitive the message body uses. Is that the right format for the server's `encrypted_blob` field? The server treats it as opaque base64, so any format works; the question is whether the encryption format matches what a future V1.5 client would expect.
+
+### What's NOT in scope
+
+- Bottom nav, date buckets, archive UI (Phase 3 — `archivedMessages` schema added now, but no swipe-to-archive / archive screen yet)
+- Bundle-by-hash retention (Phase 4)
+- Host-side search (Phase 5)
+- Mark-unread feature (deliberately not in V1)
+- UserStateRepository unit tests (deferred — needs Hilt + Context fixtures)
+
+Skip cosmetic feedback. Pressure-test the merge semantics and the concurrent-write story above all.
+codex
+I’ll review this as a code review, focusing on correctness risks in the schema migration, merge logic, and repository concurrency. I’m going to inspect the touched files and prior review note first, then I’ll trace the race cases against the actual implementation.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short; git log --oneline -5' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "data class EncryptedUserState|class EncryptedUserState|object StateMerger|fun merge|read_messages|archived_messages|schema_version|markRead|handleConflictAndRetry|syncMutex|readMessageIds|class InboxViewModel" android -S' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw .triad/31-codex-review.txt' in D:\Projects\syncler
+ succeeded in 280ms:
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:8: * metadata (message_id, created_at, schema_version) is NOT part of AAD —
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:66:    private val syncMutex = Mutex()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:74:    suspend fun markRead(messageId: String) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:83:            Timber.tag(TAG).w(it, "markRead push failed; will retry")
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:104:    suspend fun pull(): Result<Unit> = syncMutex.withLock {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:119:    suspend fun push(): Result<Unit> = syncMutex.withLock {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:138:                    handleConflictAndRetry(masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:146:            if (e.code() == 409) handleConflictAndRetry(masterKey) else throw e
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:150:    private suspend fun handleConflictAndRetry(masterKey: ByteArray) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:62:class InboxViewModel @Inject constructor(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:74:    val readMessageIds: StateFlow<Set<String>> = userState.state
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:107:        viewModelScope.launch { userState.markRead(itemId) }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:123:    val readMessageIds by viewModel.readMessageIds.collectAsState()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:161:                            isRead = item.id in readMessageIds,
+android\core\storage\src\main\kotlin\app\syncler\core\storage\StateMerger.kt:27:object StateMerger {
+android\core\storage\src\main\kotlin\app\syncler\core\storage\StateMerger.kt:28:    fun merge(
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:13:data class EncryptedUserState(
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:26:        put("schema_version", schemaVersion)
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:41:        put("read_messages", JSONArray().apply {
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:44:        put("archived_messages", JSONArray().apply {
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:54:        /** Pre-V1 blobs (no schema_version field) — migrated forward at parse. */
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:60:            // Absent schema_version = V0 (pre-V1). We treat it explicitly
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:63:            val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:105:                readMessages = obj.optJSONArray("read_messages")
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:112:                archivedMessages = obj.optJSONArray("archived_messages")
+android\core\storage\src\test\kotlin\app\syncler\core\storage\StateMergerTest.kt:128:        // read_messages and archived_messages fields entirely.
+android\core\storage\src\test\kotlin\app\syncler\core\storage\StateMergerTest.kt:130:            "schema_version": 1,
+
+ succeeded in 280ms:
+**Findings**
+
+- **High: concurrent update CAS can falsely return success for the loser.**  
+  [server/app/services/state.py](d:/Projects/syncler/server/app/services/state.py:77) runs `UPDATE ... WHERE state_version = expected`, but never checks `rowcount` or uses `RETURNING`. If two clients read version `1`, both compute `new_version = 2`; one update wins, the other updates zero rows, commits, then [re-reads](d:/Projects/syncler/server/app/services/state.py:88) version `2` and returns success. With SQLAlchemyג€™s identity map this re-read may be even less reliable. Fix by treating `rowcount == 0` / no `RETURNING` row as conflict, then rollback/expire and fetch current state for the 409 body.
+
+- **High: initial create race returns an unhandled DB error instead of CAS conflict.**  
+  In the no-row path, both first writers with `expected_state_version = 0` can reach [db.add + commit](d:/Projects/syncler/server/app/services/state.py:63). The primary key prevents double insert, so they will not both succeed, but the loser gets an unhandled `IntegrityError`/500 rather than a 409 with current state. Catch `IntegrityError`, rollback, read current, raise `StateConflictError`.
+
+- **Medium: `StateMerger` is not actually three-way, and user-scoped deletes/conflicts can lose data.**  
+  [StateMerger.merge](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:18) only has `local` and `remote`, no base/ancestor. For [userScopedStorage](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:83), remote overwrites same keys and absent keys are treated as ג€unchangedג€, not deletions. Since `StorageBridge` supports delete at [StorageBridge.kt](d:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/capabilities/StorageBridge.kt:44), a local delete will be resurrected if remote still has the key, and a local edit to the same key is dropped on conflict. Remote-wins is acceptable only if this storage is cache-like/disposable; for durable user plugin state, add per-key metadata/tombstones or exclude this class from V1 sync.
+
+- **Medium: 409 DTO does not match the actual FastAPI error envelope.**  
+  Server returns `{"detail": {"current_state_version": ..., "current_encrypted_blob": ...}}` from [routers/state.py](d:/Projects/syncler/server/app/routers/state.py:69). FastAPI does not stringify the dict; it nests it under `detail`. Android defines [StateConflictBodyDto](d:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/SynclerApi.kt:83) as if the body were top-level, so parsing `errorBody()` directly into that DTO will fail. Add a `StateConflictResponseDto(detail: StateConflictBodyDto)` or change the server to return a direct JSON response for 409.
+
+- **Medium: schema-v0/missing-field migration is only partially safe.**  
+  Top-level missing arrays/maps are safe via `optJSONArray`/`optJSONObject`, but missing `schema_version` defaults to `SCHEMA_V1` at [EncryptedUserState.kt](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:46), so older blobs are silently treated as v1 instead of routed through a v0 migration. Nested records still use required `getString` calls, for example [installed plugin fields](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:83) and [modified_at](d:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:126), so older partial entries can still throw.
+
+**Verification Notes**
+
+1. **CAS race:** update path is not safe; two concurrent PUTs can both receive 200 for the same target version.
+2. **`userScopedStorage` remote-wins:** too lossy for durable state, especially same-key edits and deletes.
+3. **Missing fields:** top-level missing collections parse safely; true schema-v0 handling and nested missing fields are not safe enough.
+4. **Base64:** no mismatch found. Server uses standard padded base64; Android helpers also produce standard/no-wrap strings.
+5. **PUT empty blob:** rejecting length `0` is reasonable. Empty GET blob is the ג€no row/version 0ג€ sentinel; persisted encrypted state should not be empty.
+6. **409 parseability:** server body is valid JSON but nested under `detail`; Android needs an envelope DTO or server should return a direct body.
+
+I did not run tests because the workspace sandbox is read-only and the test runners are likely to write cache/build artifacts.
+
+ succeeded in 305ms:
+?? .triad/38-codex-review-log.txt
+?? .triad/38-codex-review.txt
+?? .triad/38-gemini-review-log.txt
+?? .triad/38-gemini-review.txt
+?? .triad/38-phase2-review-prompt.md
+37bc825 M11.2: read state + M7 CAS cross-device sync
+5ebff47 M11.1: address Phase 1 triad review (review 37)
+3056ffc M11.1: hostPreview contract + inbox preview/detail split
+d7c006c M11: lottery dogfood end-to-end (rate-limit fixes, FCM decoupling, QR scanner, real pairing key, inbox WebView render with platform.network bridge)
+174e6f3 M11: Android first-build fixes (5 real-build issues surfaced)
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+codex
+The prior review matters here: #31 found real CAS server issues and a 409 envelope mismatch. I’m checking whether M11.2’s client retry path assumes those are fixed, because otherwise the read-state merge can be correct locally but still lose at the transport boundary.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/storage/src/test/kotlin/app/syncler/core/storage/StateMergerTest.kt' in D:\Projects\syncler
+ succeeded in 302ms:
+package app.syncler.core.storage
+
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Structured user state ג€” what the encrypted blob deserializes to after
+ * the client decrypts it with the master key.
+ *
+ * Schema version is embedded so future migrations can detect old blobs
+ * and run a one-shot migration step before merging.
+ */
+data class EncryptedUserState(
+    val schemaVersion: Int = SCHEMA_CURRENT,
+    val installedPlugins: List<InstalledPluginRef> = emptyList(),
+    val dismissedMessages: List<DismissedMessageEntry> = emptyList(),
+    val pluginSettings: Map<String, PluginSettings> = emptyMap(),
+    /** Per-plugin user-scoped storage (I1 storage scope = "user"). */
+    val userScopedStorage: Map<String, Map<String, String>> = emptyMap(),
+    /** M11.2: per-message read state, synced across user's devices. */
+    val readMessages: List<ReadMessageEntry> = emptyList(),
+    /** M11.2: per-message archive state, distinct from dismissal. */
+    val archivedMessages: List<ArchivedMessageEntry> = emptyList(),
+) {
+    fun toJson(): String = JSONObject().apply {
+        put("schema_version", schemaVersion)
+        put("installed_plugins", JSONArray().apply {
+            installedPlugins.forEach { put(it.toJson()) }
+        })
+        put("dismissed_messages", JSONArray().apply {
+            dismissedMessages.forEach { put(it.toJson()) }
+        })
+        put("plugin_settings", JSONObject().apply {
+            pluginSettings.forEach { (k, v) -> put(k, v.toJson()) }
+        })
+        put("user_scoped_storage", JSONObject().apply {
+            userScopedStorage.forEach { (pluginId, kvs) ->
+                put(pluginId, JSONObject().apply { kvs.forEach { (k, v) -> put(k, v) } })
+            }
+        })
+        put("read_messages", JSONArray().apply {
+            readMessages.forEach { put(it.toJson()) }
+        })
+        put("archived_messages", JSONArray().apply {
+            archivedMessages.forEach { put(it.toJson()) }
+        })
+    }.toString()
+
+    companion object {
+        const val SCHEMA_V1 = 1
+        const val SCHEMA_V2 = 2
+        const val SCHEMA_CURRENT = SCHEMA_V2
+
+        /** Pre-V1 blobs (no schema_version field) ג€” migrated forward at parse. */
+        const val SCHEMA_V0 = 0
+
+        fun fromJson(json: String): EncryptedUserState {
+            if (json.isEmpty()) return EncryptedUserState()
+            val obj = JSONObject(json)
+            // Absent schema_version = V0 (pre-V1). We treat it explicitly
+            // rather than silently calling it V1, so future migrations can
+            // route the blob through a dedicated upgrade step.
+            val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
+            return EncryptedUserState(
+                schemaVersion = when (schema) {
+                    SCHEMA_V0, SCHEMA_V1 -> SCHEMA_CURRENT  // forward-migrate
+                    else -> schema
+                },
+                installedPlugins = obj.optJSONArray("installed_plugins")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { InstalledPluginRef.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+                dismissedMessages = obj.optJSONArray("dismissed_messages")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { DismissedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+                pluginSettings = obj.optJSONObject("plugin_settings")
+                    ?.let { o ->
+                        o.keys().asSequence().mapNotNull { key ->
+                            runCatching { key to PluginSettings.fromJson(o.getJSONObject(key)) }.getOrNull()
+                        }.toMap()
+                    }
+                    .orEmpty(),
+                userScopedStorage = obj.optJSONObject("user_scoped_storage")
+                    ?.let { o ->
+                        o.keys().asSequence().mapNotNull { pluginId ->
+                            runCatching {
+                                val nested = o.getJSONObject(pluginId)
+                                pluginId to nested.keys().asSequence().mapNotNull { k ->
+                                    runCatching { k to nested.getString(k) }.getOrNull()
+                                }.toMap()
+                            }.getOrNull()
+                        }.toMap()
+                    }
+                    .orEmpty(),
+                // V1 blobs lack these fields ג€” fromJson returns empty lists,
+                // which is the correct semantics (no messages read/archived
+                // yet from the V1 device's perspective).
+                readMessages = obj.optJSONArray("read_messages")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { ReadMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+                archivedMessages = obj.optJSONArray("archived_messages")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { ArchivedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+            )
+        }
+    }
+}
+
+data class InstalledPluginRef(
+    val pluginId: String,
+    val senderId: String,
+    val version: String,
+    val installedAt: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("plugin_id", pluginId)
+        put("sender_id", senderId)
+        put("version", version)
+        put("installed_at", installedAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = InstalledPluginRef(
+            pluginId = o.getString("plugin_id"),
+            senderId = o.getString("sender_id"),
+            version = o.getString("version"),
+            installedAt = o.getString("installed_at"),
+        )
+    }
+}
+
+data class DismissedMessageEntry(
+    val messageId: String,
+    val dismissedAt: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("message_id", messageId)
+        put("dismissed_at", dismissedAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = DismissedMessageEntry(
+            messageId = o.getString("message_id"),
+            dismissedAt = o.getString("dismissed_at"),
+        )
+    }
+}
+
+/**
+ * M11.2: a message the user has marked read on at least one device. Synced
+ * via the M7 CAS state blob. Merge resolves conflicts by max(readAt) per
+ * messageId ג€” i.e. the most recently-set read timestamp wins, which works
+ * because "read" is a monotone state (you don't go from read to unread
+ * silently; a manual "mark unread" would be a separate action that writes a
+ * tombstone, not in V1).
+ */
+data class ReadMessageEntry(
+    val messageId: String,
+    val readAt: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("message_id", messageId)
+        put("read_at", readAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = ReadMessageEntry(
+            messageId = o.getString("message_id"),
+            readAt = o.getString("read_at"),
+        )
+    }
+}
+
+/**
+ * M11.2: a message the user has archived. Distinct from dismissal: archive
+ * means "keep around past the server's 30-day expiry"; dismiss means "hide
+ * from the active inbox view but the message still exists on the server
+ * until expiry." Synced via the M7 CAS state blob.
+ */
+data class ArchivedMessageEntry(
+    val messageId: String,
+    val archivedAt: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("message_id", messageId)
+        put("archived_at", archivedAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = ArchivedMessageEntry(
+            messageId = o.getString("message_id"),
+            archivedAt = o.getString("archived_at"),
+        )
+    }
+}
+
+data class PluginSettings(
+    val grantedCapabilities: List<String> = emptyList(),
+    val dismissBehaviorOverride: String? = null,
+    val modifiedAt: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("granted_capabilities", JSONArray().apply { grantedCapabilities.forEach { put(it) } })
+        put("dismiss_behavior_override", dismissBehaviorOverride ?: JSONObject.NULL)
+        put("modified_at", modifiedAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = PluginSettings(
+            grantedCapabilities = o.optJSONArray("granted_capabilities")
+                ?.let { arr -> (0 until arr.length()).map { arr.getString(it) } }
+                .orEmpty(),
+            dismissBehaviorOverride = o.optString("dismiss_behavior_override").takeIf { it.isNotEmpty() && it != "null" },
+            modifiedAt = o.getString("modified_at"),
+        )
+    }
+}
+
+
+ succeeded in 286ms:
+package app.syncler.core.storage
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class StateMergerTest {
+
+    @Test
+    fun `installed plugins merge by id with last-installed wins`() {
+        val local = EncryptedUserState(
+            installedPlugins = listOf(
+                InstalledPluginRef("com.lottery", "s1", "1.0.0", "2026-05-20T10:00:00Z"),
+            ),
+        )
+        val remote = EncryptedUserState(
+            installedPlugins = listOf(
+                InstalledPluginRef("com.lottery", "s1", "1.0.1", "2026-05-20T11:00:00Z"),
+                InstalledPluginRef("com.trading", "s2", "1.0.0", "2026-05-20T09:00:00Z"),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(2, merged.installedPlugins.size)
+        val lottery = merged.installedPlugins.first { it.pluginId == "com.lottery" }
+        assertEquals("1.0.1", lottery.version)  // newer installedAt wins
+    }
+
+    @Test
+    fun `dismissed messages take union`() {
+        val local = EncryptedUserState(
+            dismissedMessages = listOf(
+                DismissedMessageEntry("m1", "2026-05-20T10:00:00Z"),
+            ),
+        )
+        val remote = EncryptedUserState(
+            dismissedMessages = listOf(
+                DismissedMessageEntry("m1", "2026-05-20T11:00:00Z"),
+                DismissedMessageEntry("m2", "2026-05-20T12:00:00Z"),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(2, merged.dismissedMessages.size)
+        assertTrue(merged.dismissedMessages.any { it.messageId == "m1" })
+        assertTrue(merged.dismissedMessages.any { it.messageId == "m2" })
+    }
+
+    @Test
+    fun `plugin settings merge by id with last-modified wins`() {
+        val local = EncryptedUserState(
+            pluginSettings = mapOf(
+                "com.lottery" to PluginSettings(
+                    grantedCapabilities = listOf("network"),
+                    modifiedAt = "2026-05-20T10:00:00Z",
+                ),
+            ),
+        )
+        val remote = EncryptedUserState(
+            pluginSettings = mapOf(
+                "com.lottery" to PluginSettings(
+                    grantedCapabilities = listOf("network", "camera"),
+                    modifiedAt = "2026-05-20T11:00:00Z",
+                ),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(listOf("network", "camera"), merged.pluginSettings["com.lottery"]!!.grantedCapabilities)
+    }
+
+    @Test
+    fun `json round-trips through fromJson and toJson`() {
+        val original = EncryptedUserState(
+            installedPlugins = listOf(InstalledPluginRef("a", "s", "1.0", "2026-05-20T10:00:00Z")),
+            dismissedMessages = listOf(DismissedMessageEntry("m1", "2026-05-20T10:00:00Z")),
+            pluginSettings = mapOf("a" to PluginSettings(modifiedAt = "2026-05-20T10:00:00Z")),
+            userScopedStorage = mapOf("a" to mapOf("k" to "v")),
+            readMessages = listOf(ReadMessageEntry("m2", "2026-05-21T08:00:00Z")),
+            archivedMessages = listOf(ArchivedMessageEntry("m3", "2026-05-21T09:00:00Z")),
+        )
+        val roundtrip = EncryptedUserState.fromJson(original.toJson())
+        assertEquals(original.installedPlugins, roundtrip.installedPlugins)
+        assertEquals(original.dismissedMessages, roundtrip.dismissedMessages)
+        assertEquals(original.pluginSettings, roundtrip.pluginSettings)
+        assertEquals(original.userScopedStorage, roundtrip.userScopedStorage)
+        assertEquals(original.readMessages, roundtrip.readMessages)
+        assertEquals(original.archivedMessages, roundtrip.archivedMessages)
+    }
+
+    @Test
+    fun `read messages merge by id with max readAt wins`() {
+        val local = EncryptedUserState(
+            readMessages = listOf(
+                ReadMessageEntry("m1", "2026-05-20T10:00:00Z"),
+                ReadMessageEntry("m2", "2026-05-20T12:00:00Z"),
+            ),
+        )
+        val remote = EncryptedUserState(
+            readMessages = listOf(
+                ReadMessageEntry("m1", "2026-05-20T11:00:00Z"),  // newer
+                ReadMessageEntry("m3", "2026-05-20T13:00:00Z"),  // only on remote
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(3, merged.readMessages.size)
+        val m1 = merged.readMessages.first { it.messageId == "m1" }
+        assertEquals("2026-05-20T11:00:00Z", m1.readAt)  // newer remote read time wins
+    }
+
+    @Test
+    fun `archived messages merge by id with max archivedAt wins`() {
+        val local = EncryptedUserState(
+            archivedMessages = listOf(ArchivedMessageEntry("m1", "2026-05-20T10:00:00Z")),
+        )
+        val remote = EncryptedUserState(
+            archivedMessages = listOf(
+                ArchivedMessageEntry("m1", "2026-05-20T11:00:00Z"),
+                ArchivedMessageEntry("m2", "2026-05-20T12:00:00Z"),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(2, merged.archivedMessages.size)
+        val m1 = merged.archivedMessages.first { it.messageId == "m1" }
+        assertEquals("2026-05-20T11:00:00Z", m1.archivedAt)
+    }
+
+    @Test
+    fun `V1 blob without read messages parses as empty list and forward-migrates`() {
+        // Simulate a blob written by a pre-M11.2 device that lacked the
+        // read_messages and archived_messages fields entirely.
+        val v1Json = """{
+            "schema_version": 1,
+            "installed_plugins": [],
+            "dismissed_messages": [{"message_id":"m1","dismissed_at":"2026-05-20T10:00:00Z"}],
+            "plugin_settings": {},
+            "user_scoped_storage": {}
+        }""".trimIndent()
+        val parsed = EncryptedUserState.fromJson(v1Json)
+        assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
+        assertEquals(emptyList<ReadMessageEntry>(), parsed.readMessages)
+        assertEquals(emptyList<ArchivedMessageEntry>(), parsed.archivedMessages)
+        assertEquals(1, parsed.dismissedMessages.size)
+    }
+}
+
+
+ succeeded in 295ms:
+package app.syncler.core.storage
+
+/**
+ * Two-way merge over [EncryptedUserState] (M7.1 ג€” refined per Codex review;
+ * M11.2 ג€” added readMessages and archivedMessages):
+ *
+ *   - installedPlugins: merge by plugin_id, newer installedAt wins.
+ *   - dismissedMessages: union by message_id (a dismissal anywhere is final;
+ *     no "un-dismiss" path in V1, so first dismissedAt is fine).
+ *   - pluginSettings: merge by plugin_id, newer modifiedAt wins.
+ *   - readMessages (M11.2): merge by message_id, max(readAt) wins. Read is a
+ *     monotone state in V1 ג€” no "mark unread" ג€” so taking the most recent
+ *     timestamp gives consistent cross-device semantics.
+ *   - archivedMessages (M11.2): same as readMessages.
+ *   - userScopedStorage: **NOT MERGED in V1**. Per Codex M7 review, naive
+ *     remote-wins risks resurrecting locally-deleted keys and dropping
+ *     local edits on same-key conflicts. Without per-key timestamps or
+ *     tombstones the merge cannot distinguish "remote is fresher" from
+ *     "remote never saw the local delete." V1 keeps userScopedStorage
+ *     device-local; cross-device plugin state sync lands V1.5 alongside
+ *     per-key metadata. Plugins that need cross-device state today must
+ *     sync through their own sender backend.
+ *
+ * Schema-version mismatch: take the max; [EncryptedUserState.fromJson] is
+ * responsible for forward-migrating older blobs at parse time.
+ */
+object StateMerger {
+    fun merge(
+        local: EncryptedUserState,
+        remote: EncryptedUserState,
+    ): EncryptedUserState {
+        val schema = maxOf(local.schemaVersion, remote.schemaVersion)
+
+        val installedPlugins = mergeByKey(
+            local.installedPlugins + remote.installedPlugins,
+            key = { it.pluginId },
+            pickWinner = { a, b -> if (a.installedAt >= b.installedAt) a else b },
+        )
+
+        val dismissedMessages = (local.dismissedMessages + remote.dismissedMessages)
+            .distinctBy { it.messageId }
+
+        val pluginSettings = mergeMapByKey(
+            local.pluginSettings,
+            remote.pluginSettings,
+        ) { a, b -> if (a.modifiedAt >= b.modifiedAt) a else b }
+
+        val readMessages = mergeByKey(
+            local.readMessages + remote.readMessages,
+            key = { it.messageId },
+            pickWinner = { a, b -> if (a.readAt >= b.readAt) a else b },
+        )
+
+        val archivedMessages = mergeByKey(
+            local.archivedMessages + remote.archivedMessages,
+            key = { it.messageId },
+            pickWinner = { a, b -> if (a.archivedAt >= b.archivedAt) a else b },
+        )
+
+        // userScopedStorage NOT merged in V1 ג€” local wins. See class kdoc.
+        return EncryptedUserState(
+            schemaVersion = schema,
+            installedPlugins = installedPlugins,
+            dismissedMessages = dismissedMessages,
+            pluginSettings = pluginSettings,
+            userScopedStorage = local.userScopedStorage,
+            readMessages = readMessages,
+            archivedMessages = archivedMessages,
+        )
+    }
+
+    private fun <T> mergeByKey(
+        items: List<T>,
+        key: (T) -> String,
+        pickWinner: (T, T) -> T,
+    ): List<T> {
+        val byKey = linkedMapOf<String, T>()
+        for (item in items) {
+            val k = key(item)
+            byKey[k] = byKey[k]?.let { pickWinner(it, item) } ?: item
+        }
+        return byKey.values.toList()
+    }
+
+    private fun <V> mergeMapByKey(
+        local: Map<String, V>,
+        remote: Map<String, V>,
+        pickWinner: (V, V) -> V,
+    ): Map<String, V> {
+        val merged = local.toMutableMap()
+        for ((k, v) in remote) {
+            merged[k] = merged[k]?.let { pickWinner(it, v) } ?: v
+        }
+        return merged
+    }
+
+}
+
+
+ succeeded in 294ms:
+package app.syncler.feature.inbox
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.util.Base64
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import app.syncler.core.auth.Session
+import app.syncler.core.crypto.Aead
+import app.syncler.core.network.StatePutRequestDto
+import app.syncler.core.network.SynclerApi
+import app.syncler.core.storage.ArchivedMessageEntry
+import app.syncler.core.storage.EncryptedUserState
+import app.syncler.core.storage.ReadMessageEntry
+import app.syncler.core.storage.StateMerger
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.time.Clock
+import java.time.Instant
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import retrofit2.HttpException
+import timber.log.Timber
+
+/**
+ * Owns the user's [EncryptedUserState] across the app lifecycle.
+ *
+ *  - **Local-first:** writes go to disk immediately (encrypted at rest via
+ *    EncryptedSharedPreferences); UI reactions don't wait for the network.
+ *  - **M7 CAS sync:** [pull] fetches the server blob, decrypts with the
+ *    user's master key, merges with local via [StateMerger], persists, and
+ *    rewrites the local state. [push] encrypts the local state, PUTs to
+ *    `/v1/state` with the last-known version, and on 409 conflict pulls
+ *    the freshest blob, re-merges, and retries once.
+ *  - **Master-key dependence:** sync no-ops when the session is locked
+ *    (no master key in memory). Local writes still proceed ג€” the app
+ *    works offline; pushes happen when the user next unlocks.
+ *
+ * Read state is the V1 primary use case. Archived state is wired through
+ * the same channel for Phase 3.
+ */
+@Singleton
+class UserStateRepository @Inject constructor(
+    @ApplicationContext context: Context,
+    private val api: SynclerApi,
+    private val session: Session,
+) {
+    // Not injected: the @Singleton has no Hilt provider for Clock. Tests use
+    // the secondary constructor below to inject a fake.
+    private val clock: Clock = Clock.systemUTC()
+    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
+        context,
+        PREFS_NAME,
+        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
+
+    private val _state = MutableStateFlow(loadFromDisk())
+    val state: StateFlow<EncryptedUserState> = _state.asStateFlow()
+
+    private val syncMutex = Mutex()
+
+    /**
+     * Marks the message as read locally (immediate) and schedules a push.
+     * Idempotent ג€” re-marking an already-read message refreshes the
+     * timestamp, which is harmless and lets future "most-recent device"
+     * conflict resolution pick the right winner.
+     */
+    suspend fun markRead(messageId: String) {
+        val now = Instant.now(clock).toString()
+        val updated = _state.value.let { current ->
+            val others = current.readMessages.filterNot { it.messageId == messageId }
+            current.copy(readMessages = others + ReadMessageEntry(messageId, now))
+        }
+        applyLocal(updated)
+        runCatching { push() }.onFailure {
+            // Local already updated; push will be retried on next foreground.
+            Timber.tag(TAG).w(it, "markRead push failed; will retry")
+        }
+    }
+
+    /** Archives a message locally; pushes asynchronously. */
+    suspend fun markArchived(messageId: String) {
+        val now = Instant.now(clock).toString()
+        val updated = _state.value.let { current ->
+            val others = current.archivedMessages.filterNot { it.messageId == messageId }
+            current.copy(archivedMessages = others + ArchivedMessageEntry(messageId, now))
+        }
+        applyLocal(updated)
+        runCatching { push() }.onFailure {
+            Timber.tag(TAG).w(it, "markArchived push failed; will retry")
+        }
+    }
+
+    /**
+     * Fetches the remote state, merges with local, persists. Safe to call
+     * on app foreground / inbox refresh. No-op when the session is locked.
+     */
+    suspend fun pull(): Result<Unit> = syncMutex.withLock {
+        val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+        runCatching {
+            val response = api.getUserState()
+            val remoteState = decodeRemote(response.encryptedBlob, masterKey)
+            val merged = StateMerger.merge(local = _state.value, remote = remoteState)
+            applyLocal(merged, remoteVersion = response.stateVersion)
+        }.onFailure { Timber.tag(TAG).w(it, "pull failed") }
+    }
+
+    /**
+     * Encrypts the local state and PUTs to the server with the last-known
+     * CAS version. On 409 conflict: pull-merge-retry once. No-op when the
+     * session is locked.
+     */
+    suspend fun push(): Result<Unit> = syncMutex.withLock {
+        val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+        runCatching {
+            attemptPush(masterKey)
+        }.onFailure { Timber.tag(TAG).w(it, "push failed (after retry)") }
+    }
+
+    private suspend fun attemptPush(masterKey: ByteArray) {
+        val blob = encodeLocal(_state.value, masterKey)
+        val expected = lastKnownRemoteVersion()
+        try {
+            val response = api.putUserState(
+                StatePutRequestDto(
+                    expectedStateVersion = expected,
+                    newEncryptedBlob = blob,
+                ),
+            )
+            if (!response.isSuccessful) {
+                if (response.code() == 409) {
+                    handleConflictAndRetry(masterKey)
+                } else {
+                    throw HttpException(response)
+                }
+            } else {
+                response.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
+            }
+        } catch (e: HttpException) {
+            if (e.code() == 409) handleConflictAndRetry(masterKey) else throw e
+        }
+    }
+
+    private suspend fun handleConflictAndRetry(masterKey: ByteArray) {
+        // Server has a newer blob. Pull, merge, re-push exactly once. If the
+        // retry also conflicts, give up and rely on the next foreground tick.
+        val response = api.getUserState()
+        val remoteState = decodeRemote(response.encryptedBlob, masterKey)
+        val merged = StateMerger.merge(local = _state.value, remote = remoteState)
+        applyLocal(merged, remoteVersion = response.stateVersion)
+
+        val newBlob = encodeLocal(_state.value, masterKey)
+        val retry = api.putUserState(
+            StatePutRequestDto(
+                expectedStateVersion = response.stateVersion,
+                newEncryptedBlob = newBlob,
+            ),
+        )
+        if (retry.isSuccessful) {
+            retry.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
+        } else {
+            Timber.tag(TAG).w("CAS retry still conflicted (HTTP %d); will retry later", retry.code())
+        }
+    }
+
+    private fun applyLocal(state: EncryptedUserState, remoteVersion: Int? = null) {
+        _state.value = state
+        prefs.edit()
+            .putString(KEY_STATE_JSON, state.toJson())
+            .apply {
+                if (remoteVersion != null) putInt(KEY_REMOTE_VERSION, remoteVersion)
+            }
+            .apply()
+    }
+
+    private fun loadFromDisk(): EncryptedUserState =
+        prefs.getString(KEY_STATE_JSON, null)?.let {
+            runCatching { EncryptedUserState.fromJson(it) }.getOrNull()
+        } ?: EncryptedUserState()
+
+    private fun lastKnownRemoteVersion(): Int = prefs.getInt(KEY_REMOTE_VERSION, 0)
+    private fun setLastKnownRemoteVersion(v: Int) {
+        prefs.edit().putInt(KEY_REMOTE_VERSION, v).apply()
+    }
+
+    private fun encodeLocal(state: EncryptedUserState, masterKey: ByteArray): String {
+        val plaintext = state.toJson().toByteArray(Charsets.UTF_8)
+        val wire = Aead.encrypt(masterKey, plaintext)
+        return Base64.encodeToString(wire, Base64.NO_WRAP)
+    }
+
+    private fun decodeRemote(blobB64: String, masterKey: ByteArray): EncryptedUserState {
+        if (blobB64.isBlank()) return EncryptedUserState()
+        val wire = Base64.decode(blobB64, Base64.NO_WRAP)
+        val plaintext = Aead.decrypt(masterKey, wire)
+        return EncryptedUserState.fromJson(plaintext.toString(Charsets.UTF_8))
+    }
+
+    private companion object {
+        const val TAG = "UserStateRepo"
+        const val PREFS_NAME = "syncler.user_state.enc"
+        const val KEY_STATE_JSON = "state_json"
+        const val KEY_REMOTE_VERSION = "remote_version"
+    }
+}
+
+
+ succeeded in 303ms:
+package app.syncler.feature.inbox
+
+import android.annotation.SuppressLint
+import android.webkit.WebSettings
+import android.webkit.WebView
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+
+@HiltViewModel
+class InboxViewModel @Inject constructor(
+    private val repository: InboxRepository,
+    private val userState: UserStateRepository,
+) : ViewModel() {
+
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+    val items: StateFlow<List<InboxItem>> = repository.items
+
+    // Derived: set of message IDs already read on any of the user's devices.
+    // Collected from UserStateRepository.state and exposed as a snapshot the
+    // UI can pick from directly.
+    val readMessageIds: StateFlow<Set<String>> = userState.state
+        .map { st -> st.readMessages.map { it.messageId }.toSet() }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = userState.state.value.readMessages.map { it.messageId }.toSet(),
+        )
+
+    private val _selectedId = MutableStateFlow<String?>(null)
+    val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+
+    init {
+        // Pull the latest cross-device state at startup so the inbox shows
+        // read marks set on the user's other devices. No-ops if locked.
+        viewModelScope.launch { userState.pull() }
+    }
+
+    fun refresh() {
+        viewModelScope.launch {
+            _refreshing.value = true
+            repository.refresh()
+            // Opportunistically pull state ג€” cheap, and catches read marks
+            // pushed from another device between polls.
+            userState.pull()
+            _refreshing.value = false
+        }
+    }
+
+    fun open(itemId: String) {
+        _selectedId.value = itemId
+        // Mark-read trigger: opening the detail view (the conservative trigger
+        // both Codex and Gemini argued for in review 35 ג€” scanning the list
+        // alone should not punish unread state).
+        viewModelScope.launch { userState.markRead(itemId) }
+    }
+    fun closeDetail() { _selectedId.value = null }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun InboxScreen(
+    onLogout: () -> Unit,
+    onManageDevices: () -> Unit,
+    onPairSender: () -> Unit,
+    viewModel: InboxViewModel = hiltViewModel(),
+) {
+    val items by viewModel.items.collectAsState()
+    val refreshing by viewModel.refreshing.collectAsState()
+    val selectedId by viewModel.selectedId.collectAsState()
+    val readMessageIds by viewModel.readMessageIds.collectAsState()
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            viewModel.refresh()
+            delay(POLL_INTERVAL_MS)
+        }
+    }
+
+    val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
+    if (selectedItem != null) {
+        DetailScreen(item = selectedItem, onBack = viewModel::closeDetail)
+        return
+    }
+
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("Inbox") }) },
+    ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = onPairSender) { Text("Pair sender") }
+                OutlinedButton(onClick = onManageDevices) { Text("Devices") }
+                OutlinedButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
+                if (refreshing) CircularProgressIndicator(Modifier.height(20.dp))
+                OutlinedButton(onClick = onLogout) { Text("Log out") }
+            }
+            Spacer(Modifier.height(16.dp))
+
+            if (items.isEmpty()) {
+                Text(
+                    "No cards yet. Pair a sender and they can push to you.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(items, key = { it.id }) { item ->
+                        InboxRow(
+                            item = item,
+                            isRead = item.id in readMessageIds,
+                            onClick = { viewModel.open(item.id) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Native Compose row ג€” no WebView. The plugin's `render()` runs only in
+ * [DetailScreen] when the user taps a row. Senders fill in `hostPreview` via
+ * the sdk-python / sdk-plugin contract; rows without it use the generic
+ * fallback.
+ *
+ * Unread state (M11.2): a small dot + bold title until the user opens the
+ * detail view. Read state syncs across devices via the M7 CAS user-state
+ * blob ג€” opening on one phone marks the row read on every device on the
+ * next pull.
+ */
+@Composable
+private fun InboxRow(item: InboxItem, isRead: Boolean, onClick: () -> Unit) {
+    val preview = item.hostPreview
+    val titleStyle = if (isRead) {
+        MaterialTheme.typography.titleMedium
+    } else {
+        MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Unread dot: leading affordance, reserves space when read so the
+            // row geometry stays stable across the state transition.
+            Box(
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .size(UNREAD_DOT_SIZE)
+                    .then(
+                        if (isRead) Modifier
+                        else Modifier.background(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = CircleShape,
+                        )
+                    ),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        item.senderName,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(item.sentAt, style = MaterialTheme.typography.labelSmall)
+                }
+                if (preview != null) {
+                    Text(
+                        preview.title,
+                        style = titleStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    preview.subtitle?.let { sub ->
+                        Text(
+                            sub,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    preview.summary?.let { sum ->
+                        Text(
+                            sum,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                } else {
+                    Text(
+                        "New message from ${item.senderName}",
+                        style = titleStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "Open to view",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DetailScreen(item: InboxItem, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            item.hostPreview?.title ?: "Message",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            item.senderName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            when {
+                item.bundleJs != null -> PluginRenderView(
+                    bundleJs = item.bundleJs,
+                    payloadJson = item.payloadJson,
+                    declaredEndpoints = item.declaredEndpoints,
+                )
+                else -> Column(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Plugin not loaded",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "Couldn't fetch or verify the sender's plugin bundle. " +
+                            "Raw decrypted payload shown below for diagnostics.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    PayloadFallbackView(item.payloadJson)
+                }
+            }
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+@Composable
+private fun PluginRenderView(
+    bundleJs: String,
+    payloadJson: String,
+    declaredEndpoints: List<String>,
+) {
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                with(settings) {
+                    javaScriptEnabled = true
+                    allowFileAccess = false
+                    allowContentAccess = false
+                    allowFileAccessFromFileURLs = false
+                    allowUniversalAccessFromFileURLs = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    domStorageEnabled = false
+                    databaseEnabled = false
+                }
+                setBackgroundColor(0x00000000)
+                val bridge = CardBridge(webView = this, declaredEndpoints = declaredEndpoints)
+                addJavascriptInterface(bridge, CardBridge.NATIVE_BRIDGE_NAME)
+                tag = bridge
+                val html = RenderShell.build(bundleJs, payloadJson)
+                loadDataWithBaseURL("https://syncler-plugin-host/inbox", html, "text/html", "utf-8", null)
+            }
+        },
+        onRelease = { webView ->
+            (webView.tag as? CardBridge)?.destroy()
+            webView.removeJavascriptInterface(CardBridge.NATIVE_BRIDGE_NAME)
+            webView.stopLoading()
+            webView.destroy()
+        },
+    )
+}
+
+@Composable
+private fun PayloadFallbackView(payloadJson: String) {
+    val parsed = runCatching { JSONObject(payloadJson) }.getOrNull()
+    if (parsed == null) {
+        Text(payloadJson, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        parsed.keys().asSequence().forEach { key ->
+            Row(verticalAlignment = Alignment.Top) {
+                Text("$key: ", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    formatValue(parsed.get(key)),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+private fun formatValue(value: Any?): String = when (value) {
+    null, JSONObject.NULL -> "null"
+    is JSONArray -> value.toString()
+    is JSONObject -> value.toString(2)
+    else -> value.toString()
+}
+
+private const val POLL_INTERVAL_MS = 15_000L
+private val UNREAD_DOT_SIZE = 8.dp
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/network/src/main/kotlin/app/syncler/core/network/SynclerApi.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw server/app/services/state.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw server/app/routers/state.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "logout|clear.*UserState|sessionState|masterKey|UserStateRepository|KEY_STATE_JSON|syncler.user_state" android -S' in D:\Projects\syncler
+ succeeded in 261ms:
+"""Encrypted user state ג€” opaque blob, optimistic concurrency control.
+
+The server is content-blind to the blob. Clients decrypt locally with
+their master key and apply structural merging on conflict.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import EncryptedUserState
+
+
+class StateError(Exception):
+    """Base."""
+
+
+class StateConflictError(StateError):
+    """Optimistic concurrency check failed; client must merge + retry."""
+
+    def __init__(self, current: EncryptedUserState) -> None:
+        self.current = current
+        super().__init__("state_version conflict")
+
+
+async def get_state(db: AsyncSession, user_id: uuid.UUID) -> EncryptedUserState | None:
+    result = await db.execute(
+        select(EncryptedUserState).where(EncryptedUserState.user_id == user_id),
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_state_cas(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    expected_state_version: int,
+    new_encrypted_blob: bytes,
+) -> EncryptedUserState:
+    """Compare-and-swap update of the user's encrypted state.
+
+    - If the row doesn't exist and expected_state_version == 0: insert new.
+    - If exists and current.state_version == expected_state_version: update.
+    - Otherwise: raise StateConflictError with the current row so the client
+      can pull, merge locally, and retry.
+
+    CAS uses ``UPDATE ... WHERE state_version = expected RETURNING`` for
+    atomic check-and-set; loser receives no row (rowcount=0) and we raise
+    StateConflictError without ever returning success.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    current = await get_state(db, user_id)
+
+    if current is None:
+        if expected_state_version != 0:
+            raise StateConflictError(
+                current=EncryptedUserState(
+                    user_id=user_id,
+                    state_version=0,
+                    encrypted_blob=b"",
+                    updated_at=datetime.now(UTC),
+                ),
+            )
+        row = EncryptedUserState(
+            user_id=user_id,
+            state_version=1,
+            encrypted_blob=new_encrypted_blob,
+        )
+        db.add(row)
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Initial-create race: another writer beat us. Convert the DB
+            # error into a clean 409 with the current state.
+            await db.rollback()
+            current_now = await get_state(db, user_id)
+            raise StateConflictError(
+                current=current_now
+                or EncryptedUserState(
+                    user_id=user_id,
+                    state_version=0,
+                    encrypted_blob=b"",
+                    updated_at=datetime.now(UTC),
+                ),
+            ) from None
+        await db.refresh(row)
+        return row
+
+    if current.state_version != expected_state_version:
+        raise StateConflictError(current=current)
+
+    new_version = current.state_version + 1
+    # RETURNING the row makes "did this UPDATE actually hit?" unambiguous ג€”
+    # no row returned = lost the race, not a silent success.
+    stmt = (
+        update(EncryptedUserState)
+        .where(EncryptedUserState.user_id == user_id)
+        .where(EncryptedUserState.state_version == expected_state_version)
+        .values(
+            state_version=new_version,
+            encrypted_blob=new_encrypted_blob,
+            updated_at=datetime.now(UTC),
+        )
+        .returning(
+            EncryptedUserState.user_id,
+            EncryptedUserState.state_version,
+        )
+    )
+    result = await db.execute(stmt)
+    row_data = result.first()
+    if row_data is None:
+        # Lost the race. Pull fresh and surface conflict.
+        await db.rollback()
+        fresh = await get_state(db, user_id)
+        raise StateConflictError(current=fresh or current)
+
+    await db.commit()
+    refreshed = await get_state(db, user_id)
+    # Sanity: refreshed must report the version we wrote (else somehow yet
+    # another concurrent writer flipped past us).
+    if refreshed is None or refreshed.state_version != new_version:
+        raise StateConflictError(current=refreshed or current)
+    return refreshed
+
+
+ succeeded in 263ms:
+package app.syncler.core.network
+
+import com.squareup.moshi.Json
+import com.squareup.moshi.JsonClass
+import retrofit2.Response
+import retrofit2.http.Body
+import retrofit2.http.DELETE
+import retrofit2.http.GET
+import retrofit2.http.POST
+import retrofit2.http.Path
+
+interface SynclerApi {
+    @POST("/v1/auth/signup")
+    suspend fun signup(@Body body: SignupRequest): SignupResponse
+
+    @POST("/v1/auth/pre-login")
+    suspend fun preLogin(@Body body: PreLoginRequest): PreLoginResponse
+
+    @POST("/v1/auth/login")
+    suspend fun login(@Body body: LoginRequest): LoginResponse
+
+    @POST("/v1/auth/devices/enroll")
+    suspend fun enrollDevice(@Body body: DeviceEnrollRequest): DeviceEnrollResponse
+
+    @GET("/v1/auth/devices")
+    suspend fun listDevices(): List<DeviceItem>
+
+    @POST("/v1/auth/devices/{id}/revoke")
+    suspend fun revokeDevice(@Path("id") id: String): Response<Unit>
+
+    @DELETE("/v1/account")
+    suspend fun deleteAccount(): Response<Unit>
+
+    @GET("/v1/messages/{id}")
+    suspend fun getMessage(@Path("id") id: String): MessageInboxItemDto
+
+    @GET("/v1/messages/inbox")
+    suspend fun inbox(@retrofit2.http.Query("since") since: String? = null): MessageInboxResponseDto
+
+    @POST("/v1/messages/{id}/dismiss")
+    suspend fun dismissMessage(
+        @Path("id") id: String,
+        @retrofit2.http.Query("device_id") deviceId: String,
+    ): Response<Unit>
+
+    @GET("/v1/pairing/preview")
+    suspend fun previewPairing(@retrofit2.http.Query("token") token: String): PairingPreviewResponseDto
+
+    @POST("/v1/pairing/complete")
+    suspend fun completePairing(@Body body: PairingCompleteRequestDto): PairingCompleteResponseDto
+
+    @POST("/v1/pairing/{id}/revoke")
+    suspend fun revokePairing(@Path("id") id: String): Response<Unit>
+
+    @GET("/v1/pairing")
+    suspend fun listPairings(): List<PairingItemDto>
+
+    @GET("/v1/state")
+    suspend fun getUserState(): StateGetResponseDto
+
+    @retrofit2.http.PUT("/v1/state")
+    suspend fun putUserState(@Body body: StatePutRequestDto): Response<StatePutResponseDto>
+
+    @GET("/v1/plugins/{sender_id}/{plugin_identifier}/latest")
+    suspend fun getPluginLatest(
+        @Path("sender_id") senderId: String,
+        @Path("plugin_identifier") pluginIdentifier: String,
+    ): PluginLatestDto
+}
+
+@JsonClass(generateAdapter = true)
+data class PluginLatestDto(
+    @Json(name = "plugin_row_id") val pluginRowId: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    val version: String,
+    @Json(name = "signed_bundle_url") val signedBundleUrl: String,
+    @Json(name = "manifest_hash") val manifestHash: String,
+    @Json(name = "bundle_hash") val bundleHash: String,
+    val signature: String,
+    val capabilities: List<String>,
+    val endpoints: List<String>,
+    @Json(name = "created_at") val createdAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class StateGetResponseDto(
+    @Json(name = "state_version") val stateVersion: Int,
+    @Json(name = "encrypted_blob") val encryptedBlob: String,
+    @Json(name = "updated_at") val updatedAt: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class StatePutRequestDto(
+    @Json(name = "expected_state_version") val expectedStateVersion: Int,
+    @Json(name = "new_encrypted_blob") val newEncryptedBlob: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class StatePutResponseDto(
+    @Json(name = "new_state_version") val newStateVersion: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class StateConflictBodyDto(
+    @Json(name = "current_state_version") val currentStateVersion: Int,
+    @Json(name = "current_encrypted_blob") val currentEncryptedBlob: String,
+)
+
+/**
+ * FastAPI nests HTTPException(detail=...) under a top-level ``detail`` key,
+ * so the actual 409 body shape is ``{"detail": {ג€¦}}``. Retrofit error-body
+ * parsing must go through this envelope to reach the conflict fields.
+ */
+@JsonClass(generateAdapter = true)
+data class StateConflictResponseDto(
+    val detail: StateConflictBodyDto,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingPreviewResponseDto(
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "sender_name") val senderName: String,
+    @Json(name = "sender_public_key") val senderPublicKey: String,
+    @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
+    @Json(name = "sender_name_hash") val senderNameHash: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingCompleteRequestDto(
+    @Json(name = "pairing_token") val pairingToken: String,
+    @Json(name = "encrypted_initial_state") val encryptedInitialState: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingCompleteResponseDto(
+    @Json(name = "pairing_id") val pairingId: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "sender_name") val senderName: String,
+    @Json(name = "sender_public_key") val senderPublicKey: String,
+    @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
+    @Json(name = "sender_name_hash") val senderNameHash: String,
+    @Json(name = "paired_at") val pairedAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "created_at") val createdAt: String?,
+    @Json(name = "revoked_at") val revokedAt: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class MessageInboxItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String?,
+    @Json(name = "encrypted_body") val encryptedBody: String,
+    val nonce: String,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
+    @Json(name = "sent_at") val sentAt: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class MessageInboxResponseDto(
+    val messages: List<MessageInboxItemDto>,
+    @Json(name = "next_since") val nextSince: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class SignupRequest(
+    val email: String,
+    @Json(name = "auth_key_hash") val authKeyHash: String,
+    @Json(name = "encrypted_master_key") val encryptedMasterKey: String,
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class SignupResponse(
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "created_at") val createdAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PreLoginRequest(
+    val email: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PreLoginResponse(
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class LoginRequest(
+    val email: String,
+    @Json(name = "auth_key_hash") val authKeyHash: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class LoginResponse(
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "session_token") val sessionToken: String,
+    @Json(name = "encrypted_master_key") val encryptedMasterKey: String,
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceEnrollRequest(
+    @Json(name = "public_key") val publicKey: String,
+    @Json(name = "fcm_token") val fcmToken: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceEnrollResponse(
+    @Json(name = "device_id") val deviceId: String,
+    @Json(name = "created_at") val createdAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceItem(
+    val id: String,
+    @Json(name = "created_at") val createdAt: String?,
+    @Json(name = "last_seen") val lastSeen: String?,
+    @Json(name = "revoked_at") val revokedAt: String?,
+    @Json(name = "has_fcm_token") val hasFcmToken: Boolean,
+)
+
+
+ succeeded in 258ms:
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:45:                            onLogout = mainViewModel::logout,
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:29:    fun logout() {
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:31:            authRepository.logout()
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:25:    private val masterKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".hexToBytes()
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:52:        val derivedHash = keys.authKey + keys.masterKeyWrapKey
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:56:        assertEquals(WRAP_KEY_HEX, keys.masterKeyWrapKey.toHex())
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:62:        val pairingKey = Hkdf.derivePairingKey(masterKey, senderId)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:65:        assertArrayEquals(pairingKey, Hkdf.derivePairingKey(masterKey, senderId))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:66:        assertFalse(pairingKey.contentEquals(Hkdf.derivePairingKey(masterKey, "sender-beta".encodeToByteArray())))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:19:        assertEquals("c8327524d69330d1993ba67e26a3576718d29f0602e44a881d924ca36836699c", keys.masterKeyWrapKey.toHex())
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:23:    fun masterKeyWrapRoundTrip() {
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:24:        val masterKey = MasterKey.generate()
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:27:        val encrypted = MasterKey.wrap(masterKey, wrapKey)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:30:        assertArrayEquals(masterKey, decrypted)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:31:        assertNotEquals(masterKey.toHex(), encrypted.toHex())
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:36:        val masterKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".hexToBytes()
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:39:        val pairingKey = Hkdf.derivePairingKey(masterKey, senderId)
+android\core\auth\src\test\kotlin\app\syncler\core\auth\SessionTest.kt:28:            session.logout()
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Hkdf.kt:10:    fun derivePairingKey(masterKey: ByteArray, senderId: ByteArray): ByteArray {
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Hkdf.kt:11:        require(masterKey.size == KEY_SIZE_BYTES)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Hkdf.kt:13:        return deriveSha256(ikm = masterKey, salt = senderId, info = info, length = KEY_SIZE_BYTES)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:19:    fun wrap(masterKey: ByteArray, masterKeyWrapKey: ByteArray): ByteArray {
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:20:        require(masterKey.size == KEY_SIZE_BYTES)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:21:        return Aead.encrypt(masterKeyWrapKey, masterKey)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:24:    fun unwrap(encryptedMasterKey: ByteArray, masterKeyWrapKey: ByteArray): ByteArray =
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:25:        Aead.decrypt(masterKeyWrapKey, encryptedMasterKey)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\KeyDerivation.kt:10:    val masterKeyWrapKey: ByteArray,
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\KeyDerivation.kt:14:        require(masterKeyWrapKey.size == KEY_SIZE_BYTES)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\KeyDerivation.kt:68:            masterKeyWrapKey = output.copyOfRange(KEY_SIZE_BYTES, HASH_LENGTH_BYTES),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:64:    private val userState: UserStateRepository,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:72:    // Collected from UserStateRepository.state and exposed as a snapshot the
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:47:class UserStateRepository @Inject constructor(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:105:        val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:108:            val remoteState = decodeRemote(response.encryptedBlob, masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:120:        val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:122:            attemptPush(masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:126:    private suspend fun attemptPush(masterKey: ByteArray) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:127:        val blob = encodeLocal(_state.value, masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:138:                    handleConflictAndRetry(masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:146:            if (e.code() == 409) handleConflictAndRetry(masterKey) else throw e
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:150:    private suspend fun handleConflictAndRetry(masterKey: ByteArray) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:154:        val remoteState = decodeRemote(response.encryptedBlob, masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:158:        val newBlob = encodeLocal(_state.value, masterKey)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:175:            .putString(KEY_STATE_JSON, state.toJson())
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:183:        prefs.getString(KEY_STATE_JSON, null)?.let {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:192:    private fun encodeLocal(state: EncryptedUserState, masterKey: ByteArray): String {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:194:        val wire = Aead.encrypt(masterKey, plaintext)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:198:    private fun decodeRemote(blobB64: String, masterKey: ByteArray): EncryptedUserState {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:201:        val plaintext = Aead.decrypt(masterKey, wire)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:207:        const val PREFS_NAME = "syncler.user_state.enc"
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:208:        const val KEY_STATE_JSON = "state_json"
+android\core\storage\src\main\kotlin\app\syncler\core\storage\SecurePrefs.kt:15:    private val masterKey = MasterKey.Builder(context)
+android\core\storage\src\main\kotlin\app\syncler\core\storage\SecurePrefs.kt:22:        masterKey,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:138:    private val masterKey = MasterKey.Builder(appContext)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:149:            masterKey,
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:35:        val masterKey = MasterKey.generate()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:37:            val encryptedMasterKey = MasterKey.wrap(masterKey, keys.masterKeyWrapKey)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:51:            masterKey.fill(0)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:53:            keys.masterKeyWrapKey.fill(0)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:76:        val masterKey = MasterKey.unwrap(response.encryptedMasterKey.base64ToBytes(), keys.masterKeyWrapKey)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:78:            session.authenticate(response.sessionToken, masterKey)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:81:                    session.logout()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:85:            masterKey.fill(0)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:87:            keys.masterKeyWrapKey.fill(0)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:92:    suspend fun logout() {
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:93:        session.logout()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:20:    val masterKey: ByteArray?,
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:22:    val isUnlocked: Boolean = !token.isNullOrBlank() && masterKey != null
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:29:    private val state = MutableStateFlow(SessionState(token = tokenStore.readToken(), masterKey = null))
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:31:    val sessionState: StateFlow<SessionState> = state.asStateFlow()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:32:    val isUnlocked = sessionState.map { it.isUnlocked }
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:52:    fun authenticate(token: String, masterKey: ByteArray) {
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:54:        state.value = SessionState(token = token, masterKey = masterKey.copyOf())
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:57:    fun logout() {
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:58:        state.value.masterKey?.fill(0)
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:60:        state.value = SessionState(token = null, masterKey = null)
+
+ succeeded in 263ms:
+"""Encrypted user state sync endpoints (GET/PUT with CAS)."""
+
+from __future__ import annotations
+
+import base64
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import current_user
+from app.db import get_db
+from app.models import User
+from app.schemas import (
+    StateConflictBody,
+    StateGetResponse,
+    StatePutRequest,
+    StatePutResponse,
+    decode_base64,
+)
+from app.services.state import (
+    StateConflictError,
+    get_state,
+    upsert_state_cas,
+)
+
+router = APIRouter(tags=["state"])
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+@router.get("", response_model=StateGetResponse)
+async def get_user_state(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> StateGetResponse:
+    state = await get_state(db, user.id)
+    if state is None:
+        return StateGetResponse(state_version=0, encrypted_blob="", updated_at=None)
+    return StateGetResponse(
+        state_version=state.state_version,
+        encrypted_blob=_b64(state.encrypted_blob),
+        updated_at=state.updated_at,
+    )
+
+
+@router.put("", response_model=StatePutResponse)
+async def put_user_state(
+    payload: StatePutRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> StatePutResponse:
+    new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
+    try:
+        updated = await upsert_state_cas(
+            db,
+            user_id=user.id,
+            expected_state_version=payload.expected_state_version,
+            new_encrypted_blob=new_blob,
+        )
+    except StateConflictError as exc:
+        # 409 with the current state so client can merge and retry.
+        current_blob = _b64(exc.current.encrypted_blob)
+        body = StateConflictBody(
+            current_state_version=exc.current.state_version,
+            current_encrypted_blob=current_blob,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=body.model_dump(),
+        ) from exc
+    return StatePutResponse(new_state_version=updated.state_version)
+
+
+codex
+The server-side CAS defects called out in #31 appear fixed at head: update uses `RETURNING`, insert races are caught, and the Android DTO has the 409 envelope type. The M11.2 repository does not parse the conflict body anyway; it resolves by `GET /v1/state`, so the remaining risk is mostly local mutation ordering.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/auth/src/main/kotlin/app/syncler/core/auth/Session.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/auth/src/main/kotlin/app/syncler/core/auth/AuthRepository.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/app/src/main/kotlin/app/syncler/android/ui/MainViewModel.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "fun update|MutableStateFlow|kotlinx-coroutines-core|coroutines" android/**/build.gradle* android/build.gradle* build.gradle* settings.gradle* -S' in D:\Projects\syncler
+ succeeded in 256ms:
+package app.syncler.core.auth
+
+import android.util.Base64
+import app.syncler.core.network.AuthTokenProvider
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import dagger.multibindings.IntoSet
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import org.json.JSONObject
+
+data class SessionState(
+    val token: String?,
+    val masterKey: ByteArray?,
+) {
+    val isUnlocked: Boolean = !token.isNullOrBlank() && masterKey != null
+}
+
+@Singleton
+class Session @Inject constructor(
+    private val tokenStore: TokenStore,
+) : AuthTokenProvider {
+    private val state = MutableStateFlow(SessionState(token = tokenStore.readToken(), masterKey = null))
+
+    val sessionState: StateFlow<SessionState> = state.asStateFlow()
+    val isUnlocked = sessionState.map { it.isUnlocked }
+
+    override fun currentToken(): String? = state.value.token
+
+    /**
+     * Returns the `sub` claim from the current JWT (the user UUID) or null if
+     * no session is active or the token is malformed. Used by dev affordances
+     * that need to surface the user's identity (e.g. pairing-key copy screen).
+     */
+    fun currentUserId(): String? {
+        val token = state.value.token ?: return null
+        val segments = token.split('.')
+        if (segments.size < 2) return null
+        return runCatching {
+            val padded = segments[1].padEnd((segments[1].length + 3) / 4 * 4, '=')
+            val body = Base64.decode(padded, Base64.URL_SAFE or Base64.NO_WRAP)
+            JSONObject(String(body, Charsets.UTF_8)).optString("sub").takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun authenticate(token: String, masterKey: ByteArray) {
+        tokenStore.writeToken(token)
+        state.value = SessionState(token = token, masterKey = masterKey.copyOf())
+    }
+
+    fun logout() {
+        state.value.masterKey?.fill(0)
+        tokenStore.clearToken()
+        state.value = SessionState(token = null, masterKey = null)
+    }
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+abstract class SessionBindings {
+    @Binds
+    abstract fun bindTokenStore(store: SessionStore): TokenStore
+
+    @Binds
+    @IntoSet
+    abstract fun bindAuthTokenProvider(session: Session): AuthTokenProvider
+
+    @Binds
+    abstract fun bindDevicePublicKeyProvider(provider: DeviceKeyProvider): DevicePublicKeyProvider
+}
+
+
+ succeeded in 248ms:
+package app.syncler.core.auth
+
+import app.syncler.core.crypto.KeyDerivation
+import app.syncler.core.crypto.MasterKey
+import app.syncler.core.crypto.base64ToBytes
+import app.syncler.core.crypto.toBase64
+import app.syncler.core.network.DeviceEnrollRequest
+import app.syncler.core.network.DeviceItem
+import app.syncler.core.network.LoginRequest
+import app.syncler.core.network.PreLoginRequest
+import app.syncler.core.network.SignupRequest
+import app.syncler.core.network.SynclerApi
+import java.security.SecureRandom
+import java.util.Locale
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+data class SignupResult(val userId: String)
+data class LoginResult(val userId: String)
+
+@Singleton
+class AuthRepository @Inject constructor(
+    private val api: SynclerApi,
+    private val session: Session,
+    private val deviceKeyProvider: DevicePublicKeyProvider,
+) {
+    suspend fun signup(email: String, password: CharArray): Result<SignupResult> = runCatching {
+        val normalizedEmail = normalizedEmail(email)
+        val salt = generateAuthSalt()
+        val keys = withContext(Dispatchers.Default) {
+            KeyDerivation.derive(password, salt)
+        }
+        val masterKey = MasterKey.generate()
+        try {
+            val encryptedMasterKey = MasterKey.wrap(masterKey, keys.masterKeyWrapKey)
+            api.signup(
+                SignupRequest(
+                    email = normalizedEmail,
+                    authKeyHash = keys.authKey.toBase64(),
+                    encryptedMasterKey = encryptedMasterKey.toBase64(),
+                    authSalt = salt.toBase64(),
+                    argon2ParamsVersion = KeyDerivation.PARAMS_VERSION,
+                ),
+            )
+
+            val loginResult = login(normalizedEmail, password).getOrThrow()
+            SignupResult(userId = loginResult.userId)
+        } finally {
+            masterKey.fill(0)
+            keys.authKey.fill(0)
+            keys.masterKeyWrapKey.fill(0)
+        }
+    }
+
+    suspend fun login(email: String, password: CharArray): Result<LoginResult> = runCatching {
+        val normalizedEmail = normalizedEmail(email)
+        val preLogin = api.preLogin(PreLoginRequest(email = normalizedEmail))
+        require(preLogin.argon2ParamsVersion == KeyDerivation.PARAMS_VERSION) {
+            "Unsupported Argon2 params version: ${preLogin.argon2ParamsVersion}"
+        }
+        val salt = preLogin.authSalt.base64ToBytes()
+        val keys = withContext(Dispatchers.Default) {
+            KeyDerivation.derive(password, salt)
+        }
+        val response = api.login(
+            LoginRequest(
+                email = normalizedEmail,
+                authKeyHash = keys.authKey.toBase64(),
+            ),
+        )
+        require(response.argon2ParamsVersion == KeyDerivation.PARAMS_VERSION) {
+            "Unsupported Argon2 params version: ${response.argon2ParamsVersion}"
+        }
+        val masterKey = MasterKey.unwrap(response.encryptedMasterKey.base64ToBytes(), keys.masterKeyWrapKey)
+        try {
+            session.authenticate(response.sessionToken, masterKey)
+            runCatching { enrollCurrentDevice() }
+                .onFailure {
+                    session.logout()
+                    throw it
+                }
+        } finally {
+            masterKey.fill(0)
+            keys.authKey.fill(0)
+            keys.masterKeyWrapKey.fill(0)
+        }
+        LoginResult(userId = response.userId)
+    }
+
+    suspend fun logout() {
+        session.logout()
+    }
+
+    suspend fun listDevices(): Result<List<DeviceItem>> = runCatching {
+        api.listDevices()
+    }
+
+    suspend fun revokeDevice(id: String): Result<Unit> = runCatching {
+        val response = api.revokeDevice(id)
+        if (!response.isSuccessful) error("Device revoke failed: HTTP ${response.code()}")
+    }
+
+    private suspend fun enrollCurrentDevice() {
+        api.enrollDevice(DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()))
+    }
+
+    private fun normalizedEmail(email: String): String = email.trim().lowercase(Locale.US)
+
+    private fun generateAuthSalt(): ByteArray =
+        ByteArray(KeyDerivation.SALT_LENGTH_BYTES).also(SecureRandom()::nextBytes)
+}
+
+
+ exited 1 in 248ms:
+rg: android/**/build.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+rg: android/build.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+rg: build.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+rg: settings.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+
+2026-05-21T03:25:35.568683Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.2 seconds
+Output:
+rg: android/**/build.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+rg: android/build.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+rg: build.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+rg: settings.gradle*: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+
+ succeeded in 277ms:
+package app.syncler.android.ui
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import app.syncler.core.auth.AuthRepository
+import app.syncler.core.auth.Session
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+
+enum class TopLevelScreen { Inbox, Devices, Pairing }
+
+@HiltViewModel
+class MainViewModel @Inject constructor(
+    session: Session,
+    private val authRepository: AuthRepository,
+) : ViewModel() {
+    val isUnlocked = session.isUnlocked
+
+    private val _screen = MutableStateFlow(TopLevelScreen.Inbox)
+    val screen: StateFlow<TopLevelScreen> = _screen
+
+    fun showInbox() { _screen.value = TopLevelScreen.Inbox }
+    fun showDevices() { _screen.value = TopLevelScreen.Devices }
+    fun showPairing() { _screen.value = TopLevelScreen.Pairing }
+
+    fun logout() {
+        viewModelScope.launch {
+            authRepository.logout()
+            _screen.value = TopLevelScreen.Inbox
+        }
+    }
+}
+
+
+codex
+Logout does not clear `UserStateRepository` state or its encrypted prefs at head. That turns the derived-flow question into a real cross-account contamination issue, not just a stale view-model concern.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Force' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"fun logout|SessionState\\(token = null|state.value = SessionState|val readMessageIds|stateIn|fun open|LaunchedEffect\\(Unit\\)|userState.pull\" android/core/auth/src/main/kotlin/app/syncler/core/auth android/app/src/main/kotlin android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt -S" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "fun markRead|fun markArchived|fun pull|fun push|private suspend fun attemptPush|private suspend fun handleConflictAndRetry|private fun applyLocal|private fun loadFromDisk|KEY_REMOTE_VERSION" android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Force android' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"schemaVersion = when|else -> schema|readMessages = obj.optJSONArray|archivedMessages = obj.optJSONArray|put\\(\\\"read_messages\\\"|put\\(\\\"archived_messages\\\"\" android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"val readMessages = mergeByKey|pickWinner = \\{ a, b -> if \\(a.readAt >= b.readAt\\)|val schema = maxOf|schemaVersion = schema|userScopedStorage = local.userScopedStorage\" android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt" in D:\Projects\syncler
+ succeeded in 281ms:
+74:    suspend fun markRead(messageId: String) {
+88:    suspend fun markArchived(messageId: String) {
+104:    suspend fun pull(): Result<Unit> = syncMutex.withLock {
+119:    suspend fun push(): Result<Unit> = syncMutex.withLock {
+126:    private suspend fun attemptPush(masterKey: ByteArray) {
+150:    private suspend fun handleConflictAndRetry(masterKey: ByteArray) {
+172:    private fun applyLocal(state: EncryptedUserState, remoteVersion: Int? = null) {
+177:                if (remoteVersion != null) putInt(KEY_REMOTE_VERSION, remoteVersion)
+182:    private fun loadFromDisk(): EncryptedUserState =
+187:    private fun lastKnownRemoteVersion(): Int = prefs.getInt(KEY_REMOTE_VERSION, 0)
+189:        prefs.edit().putInt(KEY_REMOTE_VERSION, v).apply()
+209:        const val KEY_REMOTE_VERSION = "remote_version"
+
+ exited 1 in 280ms:
+ succeeded in 278ms:
+32:        val schema = maxOf(local.schemaVersion, remote.schemaVersion)
+48:        val readMessages = mergeByKey(
+51:            pickWinner = { a, b -> if (a.readAt >= b.readAt) a else b },
+62:            schemaVersion = schema,
+66:            userScopedStorage = local.userScopedStorage,
+
+2026-05-21T03:25:47.898974Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+
+ succeeded in 285ms:
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:56:import kotlinx.coroutines.flow.stateIn
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:74:    val readMessageIds: StateFlow<Set<String>> = userState.state
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:76:        .stateIn(
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:88:        viewModelScope.launch { userState.pull() }
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:97:            userState.pull()
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:102:    fun open(itemId: String) {
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:123:    val readMessageIds by viewModel.readMessageIds.collectAsState()
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:125:    LaunchedEffect(Unit) {
+android/app/src/main/kotlin\app\syncler\android\ui\SettingsDevicesScreen.kt:71:    LaunchedEffect(Unit) {
+android/app/src/main/kotlin\app\syncler\android\ui\MainViewModel.kt:29:    fun logout() {
+android/core/auth/src/main/kotlin/app/syncler/core/auth\AuthRepository.kt:92:    suspend fun logout() {
+android/core/auth/src/main/kotlin/app/syncler/core/auth\Session.kt:54:        state.value = SessionState(token = token, masterKey = masterKey.copyOf())
+android/core/auth/src/main/kotlin/app/syncler/core/auth\Session.kt:57:    fun logout() {
+android/core/auth/src/main/kotlin/app/syncler/core/auth\Session.kt:60:        state.value = SessionState(token = null, masterKey = null)
+
+ succeeded in 367ms:
+
+
+    Directory: D:\Projects\syncler
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+d-----        20/05/2026   5:59 AM                .claude                                                              
+d--h--        21/05/2026   6:22 AM                .git                                                                 
+d-----        21/05/2026   6:25 AM                .triad                                                               
+d-----        21/05/2026   6:17 AM                android                                                              
+d-----        21/05/2026   5:51 AM                docs                                                                 
+d-----        20/05/2026   4:01 PM                examples                                                             
+d-----        21/05/2026   2:15 AM                sdk-plugin                                                           
+d-----        21/05/2026   5:39 AM                sdk-python                                                           
+d-----        21/05/2026  12:54 AM                server                                                               
+-a----        20/05/2026   3:25 AM            670 .gitignore                                                           
+-a----        20/05/2026  11:54 PM           6591 README.md                                                            
+
+
+
+ succeeded in 355ms:
+
+
+    Directory: D:\Projects\syncler\android
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+d-----        20/05/2026   7:39 PM                .gradle                                                              
+d-----        20/05/2026   7:53 PM                .kotlin                                                              
+d-----        20/05/2026   9:17 PM                app                                                                  
+d-----        21/05/2026   6:17 AM                build                                                                
+d-----        20/05/2026   7:29 AM                core                                                                 
+d-----        20/05/2026   8:20 AM                feature                                                              
+d-----        20/05/2026   7:39 PM                gradle                                                               
+-a----        20/05/2026   4:25 AM            101 .gitignore                                                           
+-a----        20/05/2026   4:25 AM            344 build.gradle.kts                                                     
+-a----        20/05/2026   9:17 PM            626 gradle.properties                                                    
+-a----        20/05/2026   7:39 PM           8762 gradlew                                                              
+-a----        20/05/2026   7:39 PM           2966 gradlew.bat                                                          
+-a----        20/05/2026   7:37 PM            104 local.properties                                                     
+-a----        20/05/2026   7:52 PM            841 settings.gradle.kts                                                  
+
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "schemaVersion = when|else -> schema|readMessages = obj|archivedMessages = obj|read_messages|archived_messages" android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "V1 blob without read messages|json round-trips|read messages merge|archived messages merge" android/core/storage/src/test/kotlin/app/syncler/core/storage/StateMergerTest.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "RETURNING|IntegrityError|row_data is None|HTTP_409|detail=body.model_dump" server/app/services/state.py server/app/routers/state.py' in D:\Projects\syncler
+ succeeded in 229ms:
+41:        put("read_messages", JSONArray().apply {
+44:        put("archived_messages", JSONArray().apply {
+65:                schemaVersion = when (schema) {
+67:                    else -> schema
+105:                readMessages = obj.optJSONArray("read_messages")
+112:                archivedMessages = obj.optJSONArray("archived_messages")
+
+ succeeded in 245ms:
+70:    fun `json round-trips through fromJson and toJson`() {
+89:    fun `read messages merge by id with max readAt wins`() {
+109:    fun `archived messages merge by id with max archivedAt wins`() {
+126:    fun `V1 blob without read messages parses as empty list and forward-migrates`() {
+
+ succeeded in 229ms:
+server/app/routers/state.py:70:            status_code=status.HTTP_409_CONFLICT,
+server/app/routers/state.py:71:            detail=body.model_dump(),
+server/app/services/state.py:51:    CAS uses ``UPDATE ... WHERE state_version = expected RETURNING`` for
+server/app/services/state.py:55:    from sqlalchemy.exc import IntegrityError
+server/app/services/state.py:77:        except IntegrityError:
+server/app/services/state.py:98:    # RETURNING the row makes "did this UPDATE actually hit?" unambiguous —
+server/app/services/state.py:116:    if row_data is None:
+
+codex
+I’m going to run the focused storage unit tests if Gradle cooperates. That won’t prove the repository races, but it checks the migration and merger tests that are already in scope.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command ".\\gradlew.bat :core:storage:testDebugUnitTest" in D:\Projects\syncler\android
+2026-05-21T03:26:00.846332Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck (Access is denied)
+	at java.base/java.io.IoOverNioFileSystem.convertNioToIoExceptionInStreams(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamsUsingNio0(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamUsingNio(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.newFileChannel(Unknown Source)
+	... 5 more
+
+ exited 1 in 405ms:
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck (Access is denied)
+	at java.base/java.io.IoOverNioFileSystem.convertNioToIoExceptionInStreams(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamsUsingNio0(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamUsingNio(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.newFileChannel(Unknown Source)
+	... 5 more
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"\\.push\\(|userState\\.push|markRead\\(|markArchived\\(\" android -S" in D:\Projects\syncler
+ succeeded in 229ms:
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:74:    suspend fun markRead(messageId: String) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:88:    suspend fun markArchived(messageId: String) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\RenderShell.kt:49:                window.__syncler_bundleLoadErrors.push(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\RenderShell.kt:55:                window.__syncler_bundleLoadErrors.push(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:107:        viewModelScope.launch { userState.markRead(itemId) }
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/crypto/src/main/kotlin/app/syncler/core/crypto/Aead.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"Aead\\.encrypt|nonce \\|\\||ciphertext|encrypted_blob|new_encrypted_blob|Pairing|encrypted_initial_state|MasterKey.wrap\" android server docs -S" in D:\Projects\syncler
+2026-05-21T03:27:16.361819Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.2 seconds
+Output:
+docs\crypto-spec.md:33:## 3. Pairing Key Derivation
+docs\crypto-spec.md:35:Pairing keys are derived client-side with HKDF-SHA256:
+docs\crypto-spec.md:53:wire = nonce || ciphertext_with_tag
+docs\crypto-spec.md:55:ciphertext_with_tag = wire[12:]
+docs\crypto-spec.md:58:AAD (additional authenticated data passed to AES-GCM) contains the **protocol context** that binds the ciphertext but does NOT include the ciphertext itself. It is JSON-encoded UTF-8 with sorted keys and compact separators (no whitespace):
+docs\crypto-spec.md:74:The sender ALSO signs an envelope with Ed25519. The envelope is AAD plus the ciphertext and nonce so a server / network adversary cannot swap one ciphertext for another while leaving the AAD intact. Canonical envelope JSON (UTF-8, sorted keys, compact separators):
+docs\crypto-spec.md:81:  "encrypted_body": "<base64 ciphertext_with_tag>",
+docs\crypto-spec.md:88:> **V1 contract change (M5.1):** previous draft of this spec required `message_id`, `created_at`, and `schema_version` in AAD — those fields are server-generated and unknowable to the sender at signing time, so they have been removed from both AAD and the envelope. They remain server metadata stored next to the message but are not signed by the sender. AAD and the envelope are intentionally distinct: AAD authenticates context to AES-GCM (no ciphertext); the envelope is what Ed25519 signs (AAD + ciphertext + nonce). Replay protection is enforced at the server via the per-sender nonce registry (see §7).
+docs\crypto-spec.md:129:### HKDF Pairing Key
+docs\crypto-spec.md:148:Ciphertext is verified via round-trip in both `server/tests/test_crypto.py` and `android/core/crypto/.../SpecVectorsTest.kt` rather than via a fixed hex assertion — the ciphertext depends on AAD bytes, and the V1.1 AAD shape is the contract going forward. Old AAD bytes (with `message_id`/`created_at`/`schema_version`) are obsolete.
+docs\crypto-spec.md:153:envelope_json = {"encrypted_body":"<base64 ciphertext_with_tag>","expires_at":"2026-05-20T00:00:00Z","min_plugin_version":"1.0.0","nonce":"<base64 nonce>","plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}
+docs\crypto-spec.md:203:ciphertext_with_tag = AESGCM(pairing_key).encrypt(nonce, plaintext, aad)
+docs\crypto-spec.md:241:    ciphertext_with_tag = wire[12:]
+docs\crypto-spec.md:242:    return AESGCM(pairing_key).decrypt(nonce, ciphertext_with_tag, aad)
+server\app\crypto\wire.py:12:def pack_message(nonce: bytes, ciphertext_with_tag: bytes) -> bytes:
+server\app\crypto\wire.py:13:    """Pack nonce and ciphertext into V1 wire format."""
+server\app\crypto\wire.py:17:    if len(ciphertext_with_tag) < WIRE_TAG_BYTES:
+server\app\crypto\wire.py:18:        raise ValueError("ciphertext_with_tag must include a 16-byte tag")
+server\app\crypto\wire.py:19:    return nonce + ciphertext_with_tag
+server\app\crypto\wire.py:23:    """Unpack V1 wire format into nonce and ciphertext-with-tag."""
+server\alembic\versions\0001_initial_schema.py:136:        sa.Column("encrypted_blob", postgresql.BYTEA(), nullable=False),
+server\app\services\state.py:42:    new_encrypted_blob: bytes,
+server\app\services\state.py:65:                    encrypted_blob=b"",
+server\app\services\state.py:72:            encrypted_blob=new_encrypted_blob,
+server\app\services\state.py:87:                    encrypted_blob=b"",
+server\app\services\state.py:106:            encrypted_blob=new_encrypted_blob,
+server\app\crypto\aead.py:39:    ciphertext_with_tag = wire[AES_GCM_NONCE_BYTES:]
+server\app\crypto\aead.py:40:    return AESGCM(pairing_key).decrypt(nonce, ciphertext_with_tag, aad)
+server\app\crypto\aead.py:46:    AAD authenticates the protocol context bound to the ciphertext but does
+server\app\crypto\aead.py:47:    NOT include the ciphertext itself. See ``assemble_envelope`` for the
+server\app\services\pairing.py:1:"""Pairing service — broker-mediated sender↔user pairing."""
+server\app\services\pairing.py:15:from app.models import Pairing, PendingPairing, Sender, User
+server\app\services\pairing.py:23:class PairingError(Exception):
+server\app\services\pairing.py:27:class PairingTokenNotFoundError(PairingError):
+server\app\services\pairing.py:31:class PairingTokenExpiredError(PairingError):
+server\app\services\pairing.py:35:class PairingTokenConsumedError(PairingError):
+server\app\services\pairing.py:39:class PairingAlreadyExistsError(PairingError):
+server\app\services\pairing.py:63:) -> PendingPairing:
+server\app\services\pairing.py:67:    pending = PendingPairing(
+server\app\services\pairing.py:82:) -> tuple[PendingPairing, Sender]:
+server\app\services\pairing.py:87:        select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
+server\app\services\pairing.py:91:        raise PairingTokenNotFoundError("unknown pairing token")
+server\app\services\pairing.py:93:        raise PairingTokenConsumedError("pairing token already consumed")
+server\app\services\pairing.py:95:        raise PairingTokenExpiredError("pairing token expired")
+server\app\services\pairing.py:105:    encrypted_initial_state: bytes,
+server\app\services\pairing.py:106:) -> tuple[Pairing, Sender, PendingPairing]:
+server\app\services\pairing.py:114:        update(PendingPairing)
+server\app\services\pairing.py:117:                PendingPairing.pairing_token == pairing_token,
+server\app\services\pairing.py:118:                PendingPairing.consumed_at.is_(None),
+server\app\services\pairing.py:119:                PendingPairing.expires_at > now,
+server\app\services\pairing.py:123:        .returning(PendingPairing)
+server\app\services\pairing.py:130:            select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
+server\app\services\pairing.py:135:            raise PairingTokenNotFoundError("unknown pairing token")
+server\app\services\pairing.py:138:            raise PairingTokenConsumedError("pairing token already consumed")
+server\app\services\pairing.py:140:        raise PairingTokenExpiredError("pairing token expired")
+server\app\services\pairing.py:147:        select(Pairing).where(
+server\app\services\pairing.py:149:                Pairing.user_id == user.id,
+server\app\services\pairing.py:150:                Pairing.sender_id == sender.id,
+server\app\services\pairing.py:151:                Pairing.revoked_at.is_(None),
+server\app\services\pairing.py:157:        raise PairingAlreadyExistsError("user is already paired with this sender")
+server\app\services\pairing.py:159:    pairing = Pairing(
+server\app\services\pairing.py:163:        encrypted_state=encrypted_initial_state,
+server\app\services\pairing.py:173:) -> Pairing:
+server\app\services\pairing.py:175:        select(Pairing).where(
+server\app\services\pairing.py:176:            and_(Pairing.id == pairing_id, Pairing.user_id == user.id),
+server\app\services\pairing.py:181:        raise PairingTokenNotFoundError(f"pairing {pairing_id} not found")
+server\app\models.py:60:class Pairing(Base):
+server\app\models.py:181:    encrypted_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+server\app\models.py:185:class PendingPairing(Base):
+server\app\services\messages.py:11:from app.models import DeliveryStatus, Device, Message, Pairing, Plugin
+server\app\services\messages.py:26:class PairingMissingError(MessageError):
+server\app\services\messages.py:60:async def _pairing(db: AsyncSession, *, sender_id: uuid.UUID, user_id: uuid.UUID) -> Pairing | None:
+server\app\services\messages.py:62:        select(Pairing).where(
+server\app\services\messages.py:64:                Pairing.sender_id == sender_id,
+server\app\services\messages.py:65:                Pairing.user_id == user_id,
+server\app\services\messages.py:66:                Pairing.revoked_at.is_(None),
+server\app\services\messages.py:113:        raise PairingMissingError("no active pairing")
+server\app\services\messages.py:248:    V1 stores the ciphertext inline as base64 segments separated by ``|`` so the
+server\app\schemas.py:211:class PairingInitiateRequest(BaseModel):
+server\app\schemas.py:224:class PairingInitiateResponse(BaseModel):
+server\app\schemas.py:231:class PairingPreviewResponse(BaseModel):
+server\app\schemas.py:240:class PairingCompleteRequest(BaseModel):
+server\app\schemas.py:242:    encrypted_initial_state: str  # base64
+server\app\schemas.py:259:    @field_validator("encrypted_initial_state")
+server\app\schemas.py:262:        decode_base64(value, field_name="encrypted_initial_state", minimum=16)
+server\app\schemas.py:266:class PairingCompleteResponse(BaseModel):
+server\app\schemas.py:276:class PairingItem(BaseModel):
+server\app\schemas.py:287:    encrypted_blob: str  # base64
+server\app\schemas.py:293:    new_encrypted_blob: str  # base64
+server\app\schemas.py:295:    @field_validator("new_encrypted_blob")
+server\app\schemas.py:298:        decode_base64(value, field_name="new_encrypted_blob", minimum=1)
+server\app\schemas.py:308:    current_encrypted_blob: str
+server\app\middleware\rate_limit.py:162:        return "pairing", _required_actor_value(request, "pairing_id", "X-Pairing-ID")
+server\tests\test_crypto.py:143:    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
+server\tests\test_crypto.py:144:    wire = pack_message(NONCE, ciphertext_with_tag)
+server\tests\test_crypto.py:149:    assert AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad) == ciphertext_with_tag
+server\tests\test_crypto.py:154:        pack_message(NONCE[:-1], ciphertext_with_tag)
+server\tests\test_crypto.py:187:    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
+server\tests\test_crypto.py:188:    wire = pack_message(NONCE, ciphertext_with_tag)
+server\tests\test_crypto.py:189:    unpacked_nonce, unpacked_ciphertext = unpack_message(wire)
+server\tests\test_crypto.py:192:    assert unpacked_ciphertext == ciphertext_with_tag
+server\tests\test_messages.py:16:from app.models import Pairing, Plugin
+server\tests\test_messages.py:88:    pairing = Pairing(
+server\tests\test_messages.py:146:    encrypted_body = _b64(b"ciphertext-and-tag-padding")
+server\tests\test_messages.py:226:        Pairing(
+server\tests\test_messages.py:361:        "encrypted_body": _b64(b"ciphertext-and-tag-padding"),
+server\app\routers\state.py:40:        return StateGetResponse(state_version=0, encrypted_blob="", updated_at=None)
+server\app\routers\state.py:43:        encrypted_blob=_b64(state.encrypted_blob),
+server\app\routers\state.py:54:    new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
+server\app\routers\state.py:60:            new_encrypted_blob=new_blob,
+server\app\routers\state.py:64:        current_blob = _b64(exc.current.encrypted_blob)
+server\app\routers\state.py:67:            current_encrypted_blob=current_blob,
+server\tests\test_pairing.py:15:from app.models import PendingPairing
+server\tests\test_pairing.py:81:            "encrypted_initial_state": _b64(b"opaque-initial-state-blob"),
+server\tests\test_pairing.py:115:    expired = PendingPairing(
+server\tests\test_pairing.py:129:            "encrypted_initial_state": _b64(b"opaque-state"),
+server\tests\test_pairing.py:154:            "encrypted_initial_state": _b64(b"opaque-initial-state"),
+server\app\jobs\retention.py:9:from app.models import Message, Pairing, RateLimitEvent
+server\app\jobs\retention.py:17:        delete(Pairing).where(
+server\app\jobs\retention.py:18:            Pairing.revoked_at.is_not(None),
+server\app\jobs\retention.py:19:            Pairing.revoked_at < now - timedelta(days=180),
+server\app\routers\pairing.py:1:"""Pairing routes — sender initiates, user completes, either revokes."""
+server\app\routers\pairing.py:19:from app.models import Pairing, User
+server\app\routers\pairing.py:21:    PairingCompleteRequest,
+server\app\routers\pairing.py:22:    PairingCompleteResponse,
+server\app\routers\pairing.py:23:    PairingInitiateRequest,
+server\app\routers\pairing.py:24:    PairingInitiateResponse,
+server\app\routers\pairing.py:25:    PairingItem,
+server\app\routers\pairing.py:26:    PairingPreviewResponse,
+server\app\routers\pairing.py:30:    PairingAlreadyExistsError,
+server\app\routers\pairing.py:31:    PairingTokenConsumedError,
+server\app\routers\pairing.py:32:    PairingTokenExpiredError,
+server\app\routers\pairing.py:33:    PairingTokenNotFoundError,
+server\app\routers\pairing.py:64:def _initiate_envelope_bytes(payload: PairingInitiateRequest) -> bytes:
+server\app\routers\pairing.py:74:@router.post("/initiate", response_model=PairingInitiateResponse, status_code=status.HTTP_201_CREATED)
+server\app\routers\pairing.py:76:    payload: PairingInitiateRequest,
+server\app\routers\pairing.py:80:) -> PairingInitiateResponse:
+server\app\routers\pairing.py:106:    return PairingInitiateResponse(
+server\app\routers\pairing.py:114:@router.get("/preview", response_model=PairingPreviewResponse)
+server\app\routers\pairing.py:119:) -> PairingPreviewResponse:
+server\app\routers\pairing.py:132:    except PairingTokenNotFoundError as exc:
+server\app\routers\pairing.py:134:    except PairingTokenExpiredError as exc:
+server\app\routers\pairing.py:136:    except PairingTokenConsumedError as exc:
+server\app\routers\pairing.py:142:    return PairingPreviewResponse(
+server\app\routers\pairing.py:152:@router.post("/complete", response_model=PairingCompleteResponse, status_code=status.HTTP_201_CREATED)
+server\app\routers\pairing.py:154:    payload: PairingCompleteRequest,
+server\app\routers\pairing.py:157:) -> PairingCompleteResponse:
+server\app\routers\pairing.py:170:    encrypted_initial_state = decode_base64(
+server\app\routers\pairing.py:171:        payload.encrypted_initial_state, field_name="encrypted_initial_state", minimum=16
+server\app\routers\pairing.py:178:            encrypted_initial_state=encrypted_initial_state,
+server\app\routers\pairing.py:180:    except PairingTokenNotFoundError as exc:
+server\app\routers\pairing.py:182:    except PairingTokenExpiredError as exc:
+server\app\routers\pairing.py:184:    except PairingTokenConsumedError as exc:
+server\app\routers\pairing.py:188:    except PairingAlreadyExistsError as exc:
+server\app\routers\pairing.py:192:    return PairingCompleteResponse(
+server\app\routers\pairing.py:211:    except PairingTokenNotFoundError as exc:
+server\app\routers\pairing.py:216:@router.get("", response_model=list[PairingItem])
+server\app\routers\pairing.py:220:) -> list[PairingItem]:
+server\app\routers\pairing.py:222:        select(Pairing).where(Pairing.user_id == user.id).order_by(Pairing.created_at.desc()),
+server\app\routers\pairing.py:224:    return [PairingItem.model_validate(p) for p in result.scalars().all()]
+server\app\routers\messages.py:38:    PairingMissingError,
+server\app\routers\messages.py:134:    except PairingMissingError as exc:
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:13:enum class TopLevelScreen { Inbox, Devices, Pairing }
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:27:    fun showPairing() { _screen.value = TopLevelScreen.Pairing }
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:18:import app.syncler.feature.pairing.PairingScreen
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:41:                        screen == TopLevelScreen.Pairing -> PairingScreen(
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:47:                            onPairSender = mainViewModel::showPairing,
+server\tests\test_state.py:42:    assert body["encrypted_blob"] == ""
+server\tests\test_state.py:52:        json={"expected_state_version": 0, "new_encrypted_blob": _b64(b"first-state")},
+server\tests\test_state.py:60:        json={"expected_state_version": 1, "new_encrypted_blob": _b64(b"second-state")},
+server\tests\test_state.py:73:        json={"expected_state_version": 0, "new_encrypted_blob": _b64(b"first-state")},
+server\tests\test_state.py:79:        json={"expected_state_version": 0, "new_encrypted_blob": _b64(b"would-overwrite")},
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:12: * ciphertext output is verified via round-trip decrypt since the spec
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:13: * no longer fixes a hex vector for ciphertext (AAD changes invalidate it).
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:62:        val pairingKey = Hkdf.derivePairingKey(masterKey, senderId)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:65:        assertArrayEquals(pairingKey, Hkdf.derivePairingKey(masterKey, senderId))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:66:        assertFalse(pairingKey.contentEquals(Hkdf.derivePairingKey(masterKey, "sender-beta".encodeToByteArray())))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:98:        val wire = Aead.encrypt(pairingKey, plaintext, aadBytes, nonce)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:100:        // AES-GCM is deterministic — same inputs → same ciphertext.
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:101:        assertArrayEquals(wire, Aead.encrypt(pairingKey, plaintext, aadBytes, nonce))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:27:        val encrypted = MasterKey.wrap(masterKey, wrapKey)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:35:    fun hkdfPairingKeyMatchesSpecVector() {
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:39:        val pairingKey = Hkdf.derivePairingKey(masterKey, senderId)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:82:        val wire = Aead.encrypt(key, plaintext, aad, nonce)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:5:import app.syncler.core.network.PairingCompleteRequestDto
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:6:import app.syncler.core.network.PairingPreviewResponseDto
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:18: *   1. parseBrokerUrl(url) -> PairingCandidate
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:19: *   2. preview(candidate) -> PairingPreviewResponseDto  [non-consuming]
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:29:class PairingRepository @Inject constructor(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:33:    fun parseBrokerUrl(url: String): PairingCandidate? {
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:43:        return PairingCandidate(brokerUrl = url, pairingToken = token)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:46:    suspend fun preview(candidate: PairingCandidate): Result<PairingPreviewResponseDto> =
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:47:        runCatching { api.previewPairing(candidate.pairingToken) }
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:54:        candidate: PairingCandidate,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:55:        preview: PairingPreviewResponseDto,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:59:        val response = api.completePairing(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:60:            PairingCompleteRequestDto(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:80:            val revoked = runCatching { api.revokePairing(response.pairingId) }
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:103:        val response = api.revokePairing(pairingId)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:110:        const val TAG = "PairingRepo"
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:114:data class PairingCandidate(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:42:import app.syncler.core.network.PairingPreviewResponseDto
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:56:class PairingViewModel @Inject constructor(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:57:    private val repository: PairingRepository,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:62:    private val _state = MutableStateFlow<PairingState>(PairingState.Idle)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:63:    val state: StateFlow<PairingState> = _state.asStateFlow()
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:71:            _state.value = PairingState.Error("Invalid pairing URL — must be https://… (http:// allowed in debug)")
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:74:        _state.value = PairingState.PreviewLoading
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:77:                onSuccess = { _state.value = PairingState.PreviewReady(candidate, it) },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:78:                onFailure = { _state.value = PairingState.Error(it.message ?: "Failed to load preview") },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:84:        val current = _state.value as? PairingState.PreviewReady ?: return
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:85:        _state.value = PairingState.Confirming(current.preview)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:96:                onSuccess = { _state.value = PairingState.Success(it) },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:97:                onFailure = { _state.value = PairingState.Error(it.message ?: "Pairing failed") },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:109:        _state.value = PairingState.Idle
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:113:        _state.value = PairingState.Idle
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:117:sealed interface PairingState {
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:118:    data object Idle : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:119:    data object PreviewLoading : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:121:        val candidate: PairingCandidate,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:122:        val preview: PairingPreviewResponseDto,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:123:    ) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:124:    data class Confirming(val preview: PairingPreviewResponseDto) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:125:    data class Success(val sender: PairedSender) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:126:    data class Error(val message: String) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:131:fun PairingScreen(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:133:    viewModel: PairingViewModel = hiltViewModel(),
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:172:                    enabled = (state is PairingState.Idle || state is PairingState.Error) && url.isNotBlank(),
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:182:                PairingState.Idle -> Unit
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:183:                PairingState.PreviewLoading -> Text("Loading sender preview…")
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:184:                is PairingState.PreviewReady -> FingerprintConfirmation(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:189:                is PairingState.Confirming -> Text("Pairing with ${s.preview.senderName}…")
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:190:                is PairingState.Success -> PairingSuccessCard(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:196:                is PairingState.Error -> Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:213:    preview: PairingPreviewResponseDto,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:235:private fun PairingSuccessCard(
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:53:    suspend fun byPairingId(pairingId: String): PairedSender?
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:88:    override suspend fun byPairingId(pairingId: String): PairedSender? =
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:37:            val encryptedMasterKey = MasterKey.wrap(masterKey, keys.masterKeyWrapKey)
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:47:    suspend fun previewPairing(@retrofit2.http.Query("token") token: String): PairingPreviewResponseDto
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:50:    suspend fun completePairing(@Body body: PairingCompleteRequestDto): PairingCompleteResponseDto
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:53:    suspend fun revokePairing(@Path("id") id: String): Response<Unit>
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:56:    suspend fun listPairings(): List<PairingItemDto>
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:89:    @Json(name = "encrypted_blob") val encryptedBlob: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:96:    @Json(name = "new_encrypted_blob") val newEncryptedBlob: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:107:    @Json(name = "current_encrypted_blob") val currentEncryptedBlob: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:121:data class PairingPreviewResponseDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:131:data class PairingCompleteRequestDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:133:    @Json(name = "encrypted_initial_state") val encryptedInitialState: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:137:data class PairingCompleteResponseDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:148:data class PairingItemDto(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:194:        val wire = Aead.encrypt(masterKey, plaintext)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:6: * Protocol context bound to the ciphertext but NOT including the ciphertext
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:32: * Envelope (Ed25519 signing input) — AAD plus base64 ciphertext and nonce.
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:40:    /** Base64 of the AES-GCM ciphertext_with_tag (no nonce prefix). */
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:156:        val ciphertext = dto.encryptedBody.base64ToBytes()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:157:        // Aead.decrypt expects (nonce || ciphertext) concatenated; wire splits
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:159:        val wire = nonce + ciphertext
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Hkdf.kt:10:    fun derivePairingKey(masterKey: ByteArray, senderId: ByteArray): ByteArray {
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:21:        return Aead.encrypt(masterKeyWrapKey, masterKey)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:35:        val ciphertext = cipher.doFinal(plaintext)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:36:        return nonce + ciphertext
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:43:        val ciphertext = wire.copyOfRange(NONCE_SIZE_BYTES, wire.size)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:47:        return cipher.doFinal(ciphertext)
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ exited 1 in 223ms:
+docs\crypto-spec.md:33:## 3. Pairing Key Derivation
+docs\crypto-spec.md:35:Pairing keys are derived client-side with HKDF-SHA256:
+docs\crypto-spec.md:53:wire = nonce || ciphertext_with_tag
+docs\crypto-spec.md:55:ciphertext_with_tag = wire[12:]
+docs\crypto-spec.md:58:AAD (additional authenticated data passed to AES-GCM) contains the **protocol context** that binds the ciphertext but does NOT include the ciphertext itself. It is JSON-encoded UTF-8 with sorted keys and compact separators (no whitespace):
+docs\crypto-spec.md:74:The sender ALSO signs an envelope with Ed25519. The envelope is AAD plus the ciphertext and nonce so a server / network adversary cannot swap one ciphertext for another while leaving the AAD intact. Canonical envelope JSON (UTF-8, sorted keys, compact separators):
+docs\crypto-spec.md:81:  "encrypted_body": "<base64 ciphertext_with_tag>",
+docs\crypto-spec.md:88:> **V1 contract change (M5.1):** previous draft of this spec required `message_id`, `created_at`, and `schema_version` in AAD — those fields are server-generated and unknowable to the sender at signing time, so they have been removed from both AAD and the envelope. They remain server metadata stored next to the message but are not signed by the sender. AAD and the envelope are intentionally distinct: AAD authenticates context to AES-GCM (no ciphertext); the envelope is what Ed25519 signs (AAD + ciphertext + nonce). Replay protection is enforced at the server via the per-sender nonce registry (see §7).
+docs\crypto-spec.md:129:### HKDF Pairing Key
+docs\crypto-spec.md:148:Ciphertext is verified via round-trip in both `server/tests/test_crypto.py` and `android/core/crypto/.../SpecVectorsTest.kt` rather than via a fixed hex assertion — the ciphertext depends on AAD bytes, and the V1.1 AAD shape is the contract going forward. Old AAD bytes (with `message_id`/`created_at`/`schema_version`) are obsolete.
+docs\crypto-spec.md:153:envelope_json = {"encrypted_body":"<base64 ciphertext_with_tag>","expires_at":"2026-05-20T00:00:00Z","min_plugin_version":"1.0.0","nonce":"<base64 nonce>","plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}
+docs\crypto-spec.md:203:ciphertext_with_tag = AESGCM(pairing_key).encrypt(nonce, plaintext, aad)
+docs\crypto-spec.md:241:    ciphertext_with_tag = wire[12:]
+docs\crypto-spec.md:242:    return AESGCM(pairing_key).decrypt(nonce, ciphertext_with_tag, aad)
+server\app\crypto\wire.py:12:def pack_message(nonce: bytes, ciphertext_with_tag: bytes) -> bytes:
+server\app\crypto\wire.py:13:    """Pack nonce and ciphertext into V1 wire format."""
+server\app\crypto\wire.py:17:    if len(ciphertext_with_tag) < WIRE_TAG_BYTES:
+server\app\crypto\wire.py:18:        raise ValueError("ciphertext_with_tag must include a 16-byte tag")
+server\app\crypto\wire.py:19:    return nonce + ciphertext_with_tag
+server\app\crypto\wire.py:23:    """Unpack V1 wire format into nonce and ciphertext-with-tag."""
+server\alembic\versions\0001_initial_schema.py:136:        sa.Column("encrypted_blob", postgresql.BYTEA(), nullable=False),
+server\app\services\state.py:42:    new_encrypted_blob: bytes,
+server\app\services\state.py:65:                    encrypted_blob=b"",
+server\app\services\state.py:72:            encrypted_blob=new_encrypted_blob,
+server\app\services\state.py:87:                    encrypted_blob=b"",
+server\app\services\state.py:106:            encrypted_blob=new_encrypted_blob,
+server\app\crypto\aead.py:39:    ciphertext_with_tag = wire[AES_GCM_NONCE_BYTES:]
+server\app\crypto\aead.py:40:    return AESGCM(pairing_key).decrypt(nonce, ciphertext_with_tag, aad)
+server\app\crypto\aead.py:46:    AAD authenticates the protocol context bound to the ciphertext but does
+server\app\crypto\aead.py:47:    NOT include the ciphertext itself. See ``assemble_envelope`` for the
+server\app\services\pairing.py:1:"""Pairing service — broker-mediated sender↔user pairing."""
+server\app\services\pairing.py:15:from app.models import Pairing, PendingPairing, Sender, User
+server\app\services\pairing.py:23:class PairingError(Exception):
+server\app\services\pairing.py:27:class PairingTokenNotFoundError(PairingError):
+server\app\services\pairing.py:31:class PairingTokenExpiredError(PairingError):
+server\app\services\pairing.py:35:class PairingTokenConsumedError(PairingError):
+server\app\services\pairing.py:39:class PairingAlreadyExistsError(PairingError):
+server\app\services\pairing.py:63:) -> PendingPairing:
+server\app\services\pairing.py:67:    pending = PendingPairing(
+server\app\services\pairing.py:82:) -> tuple[PendingPairing, Sender]:
+server\app\services\pairing.py:87:        select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
+server\app\services\pairing.py:91:        raise PairingTokenNotFoundError("unknown pairing token")
+server\app\services\pairing.py:93:        raise PairingTokenConsumedError("pairing token already consumed")
+server\app\services\pairing.py:95:        raise PairingTokenExpiredError("pairing token expired")
+server\app\services\pairing.py:105:    encrypted_initial_state: bytes,
+server\app\services\pairing.py:106:) -> tuple[Pairing, Sender, PendingPairing]:
+server\app\services\pairing.py:114:        update(PendingPairing)
+server\app\services\pairing.py:117:                PendingPairing.pairing_token == pairing_token,
+server\app\services\pairing.py:118:                PendingPairing.consumed_at.is_(None),
+server\app\services\pairing.py:119:                PendingPairing.expires_at > now,
+server\app\services\pairing.py:123:        .returning(PendingPairing)
+server\app\services\pairing.py:130:            select(PendingPairing).where(PendingPairing.pairing_token == pairing_token),
+server\app\services\pairing.py:135:            raise PairingTokenNotFoundError("unknown pairing token")
+server\app\services\pairing.py:138:            raise PairingTokenConsumedError("pairing token already consumed")
+server\app\services\pairing.py:140:        raise PairingTokenExpiredError("pairing token expired")
+server\app\services\pairing.py:147:        select(Pairing).where(
+server\app\services\pairing.py:149:                Pairing.user_id == user.id,
+server\app\services\pairing.py:150:                Pairing.sender_id == sender.id,
+server\app\services\pairing.py:151:                Pairing.revoked_at.is_(None),
+server\app\services\pairing.py:157:        raise PairingAlreadyExistsError("user is already paired with this sender")
+server\app\services\pairing.py:159:    pairing = Pairing(
+server\app\services\pairing.py:163:        encrypted_state=encrypted_initial_state,
+server\app\services\pairing.py:173:) -> Pairing:
+server\app\services\pairing.py:175:        select(Pairing).where(
+server\app\services\pairing.py:176:            and_(Pairing.id == pairing_id, Pairing.user_id == user.id),
+server\app\services\pairing.py:181:        raise PairingTokenNotFoundError(f"pairing {pairing_id} not found")
+server\app\models.py:60:class Pairing(Base):
+server\app\models.py:181:    encrypted_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+server\app\models.py:185:class PendingPairing(Base):
+server\app\services\messages.py:11:from app.models import DeliveryStatus, Device, Message, Pairing, Plugin
+server\app\services\messages.py:26:class PairingMissingError(MessageError):
+server\app\services\messages.py:60:async def _pairing(db: AsyncSession, *, sender_id: uuid.UUID, user_id: uuid.UUID) -> Pairing | None:
+server\app\services\messages.py:62:        select(Pairing).where(
+server\app\services\messages.py:64:                Pairing.sender_id == sender_id,
+server\app\services\messages.py:65:                Pairing.user_id == user_id,
+server\app\services\messages.py:66:                Pairing.revoked_at.is_(None),
+server\app\services\messages.py:113:        raise PairingMissingError("no active pairing")
+server\app\services\messages.py:248:    V1 stores the ciphertext inline as base64 segments separated by ``|`` so the
+server\app\schemas.py:211:class PairingInitiateRequest(BaseModel):
+server\app\schemas.py:224:class PairingInitiateResponse(BaseModel):
+server\app\schemas.py:231:class PairingPreviewResponse(BaseModel):
+server\app\schemas.py:240:class PairingCompleteRequest(BaseModel):
+server\app\schemas.py:242:    encrypted_initial_state: str  # base64
+server\app\schemas.py:259:    @field_validator("encrypted_initial_state")
+server\app\schemas.py:262:        decode_base64(value, field_name="encrypted_initial_state", minimum=16)
+server\app\schemas.py:266:class PairingCompleteResponse(BaseModel):
+server\app\schemas.py:276:class PairingItem(BaseModel):
+server\app\schemas.py:287:    encrypted_blob: str  # base64
+server\app\schemas.py:293:    new_encrypted_blob: str  # base64
+server\app\schemas.py:295:    @field_validator("new_encrypted_blob")
+server\app\schemas.py:298:        decode_base64(value, field_name="new_encrypted_blob", minimum=1)
+server\app\schemas.py:308:    current_encrypted_blob: str
+server\app\middleware\rate_limit.py:162:        return "pairing", _required_actor_value(request, "pairing_id", "X-Pairing-ID")
+server\tests\test_crypto.py:143:    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
+server\tests\test_crypto.py:144:    wire = pack_message(NONCE, ciphertext_with_tag)
+server\tests\test_crypto.py:149:    assert AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad) == ciphertext_with_tag
+server\tests\test_crypto.py:154:        pack_message(NONCE[:-1], ciphertext_with_tag)
+server\tests\test_crypto.py:187:    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
+server\tests\test_crypto.py:188:    wire = pack_message(NONCE, ciphertext_with_tag)
+server\tests\test_crypto.py:189:    unpacked_nonce, unpacked_ciphertext = unpack_message(wire)
+server\tests\test_crypto.py:192:    assert unpacked_ciphertext == ciphertext_with_tag
+server\tests\test_messages.py:16:from app.models import Pairing, Plugin
+server\tests\test_messages.py:88:    pairing = Pairing(
+server\tests\test_messages.py:146:    encrypted_body = _b64(b"ciphertext-and-tag-padding")
+server\tests\test_messages.py:226:        Pairing(
+server\tests\test_messages.py:361:        "encrypted_body": _b64(b"ciphertext-and-tag-padding"),
+server\app\routers\state.py:40:        return StateGetResponse(state_version=0, encrypted_blob="", updated_at=None)
+server\app\routers\state.py:43:        encrypted_blob=_b64(state.encrypted_blob),
+server\app\routers\state.py:54:    new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
+server\app\routers\state.py:60:            new_encrypted_blob=new_blob,
+server\app\routers\state.py:64:        current_blob = _b64(exc.current.encrypted_blob)
+server\app\routers\state.py:67:            current_encrypted_blob=current_blob,
+server\tests\test_pairing.py:15:from app.models import PendingPairing
+server\tests\test_pairing.py:81:            "encrypted_initial_state": _b64(b"opaque-initial-state-blob"),
+server\tests\test_pairing.py:115:    expired = PendingPairing(
+server\tests\test_pairing.py:129:            "encrypted_initial_state": _b64(b"opaque-state"),
+server\tests\test_pairing.py:154:            "encrypted_initial_state": _b64(b"opaque-initial-state"),
+server\app\jobs\retention.py:9:from app.models import Message, Pairing, RateLimitEvent
+server\app\jobs\retention.py:17:        delete(Pairing).where(
+server\app\jobs\retention.py:18:            Pairing.revoked_at.is_not(None),
+server\app\jobs\retention.py:19:            Pairing.revoked_at < now - timedelta(days=180),
+server\app\routers\pairing.py:1:"""Pairing routes — sender initiates, user completes, either revokes."""
+server\app\routers\pairing.py:19:from app.models import Pairing, User
+server\app\routers\pairing.py:21:    PairingCompleteRequest,
+server\app\routers\pairing.py:22:    PairingCompleteResponse,
+server\app\routers\pairing.py:23:    PairingInitiateRequest,
+server\app\routers\pairing.py:24:    PairingInitiateResponse,
+server\app\routers\pairing.py:25:    PairingItem,
+server\app\routers\pairing.py:26:    PairingPreviewResponse,
+server\app\routers\pairing.py:30:    PairingAlreadyExistsError,
+server\app\routers\pairing.py:31:    PairingTokenConsumedError,
+server\app\routers\pairing.py:32:    PairingTokenExpiredError,
+server\app\routers\pairing.py:33:    PairingTokenNotFoundError,
+server\app\routers\pairing.py:64:def _initiate_envelope_bytes(payload: PairingInitiateRequest) -> bytes:
+server\app\routers\pairing.py:74:@router.post("/initiate", response_model=PairingInitiateResponse, status_code=status.HTTP_201_CREATED)
+server\app\routers\pairing.py:76:    payload: PairingInitiateRequest,
+server\app\routers\pairing.py:80:) -> PairingInitiateResponse:
+server\app\routers\pairing.py:106:    return PairingInitiateResponse(
+server\app\routers\pairing.py:114:@router.get("/preview", response_model=PairingPreviewResponse)
+server\app\routers\pairing.py:119:) -> PairingPreviewResponse:
+server\app\routers\pairing.py:132:    except PairingTokenNotFoundError as exc:
+server\app\routers\pairing.py:134:    except PairingTokenExpiredError as exc:
+server\app\routers\pairing.py:136:    except PairingTokenConsumedError as exc:
+server\app\routers\pairing.py:142:    return PairingPreviewResponse(
+server\app\routers\pairing.py:152:@router.post("/complete", response_model=PairingCompleteResponse, status_code=status.HTTP_201_CREATED)
+server\app\routers\pairing.py:154:    payload: PairingCompleteRequest,
+server\app\routers\pairing.py:157:) -> PairingCompleteResponse:
+server\app\routers\pairing.py:170:    encrypted_initial_state = decode_base64(
+server\app\routers\pairing.py:171:        payload.encrypted_initial_state, field_name="encrypted_initial_state", minimum=16
+server\app\routers\pairing.py:178:            encrypted_initial_state=encrypted_initial_state,
+server\app\routers\pairing.py:180:    except PairingTokenNotFoundError as exc:
+server\app\routers\pairing.py:182:    except PairingTokenExpiredError as exc:
+server\app\routers\pairing.py:184:    except PairingTokenConsumedError as exc:
+server\app\routers\pairing.py:188:    except PairingAlreadyExistsError as exc:
+server\app\routers\pairing.py:192:    return PairingCompleteResponse(
+server\app\routers\pairing.py:211:    except PairingTokenNotFoundError as exc:
+server\app\routers\pairing.py:216:@router.get("", response_model=list[PairingItem])
+server\app\routers\pairing.py:220:) -> list[PairingItem]:
+server\app\routers\pairing.py:222:        select(Pairing).where(Pairing.user_id == user.id).order_by(Pairing.created_at.desc()),
+server\app\routers\pairing.py:224:    return [PairingItem.model_validate(p) for p in result.scalars().all()]
+server\app\routers\messages.py:38:    PairingMissingError,
+server\app\routers\messages.py:134:    except PairingMissingError as exc:
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:13:enum class TopLevelScreen { Inbox, Devices, Pairing }
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:27:    fun showPairing() { _screen.value = TopLevelScreen.Pairing }
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:18:import app.syncler.feature.pairing.PairingScreen
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:41:                        screen == TopLevelScreen.Pairing -> PairingScreen(
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:47:                            onPairSender = mainViewModel::showPairing,
+server\tests\test_state.py:42:    assert body["encrypted_blob"] == ""
+server\tests\test_state.py:52:        json={"expected_state_version": 0, "new_encrypted_blob": _b64(b"first-state")},
+server\tests\test_state.py:60:        json={"expected_state_version": 1, "new_encrypted_blob": _b64(b"second-state")},
+server\tests\test_state.py:73:        json={"expected_state_version": 0, "new_encrypted_blob": _b64(b"first-state")},
+server\tests\test_state.py:79:        json={"expected_state_version": 0, "new_encrypted_blob": _b64(b"would-overwrite")},
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:12: * ciphertext output is verified via round-trip decrypt since the spec
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:13: * no longer fixes a hex vector for ciphertext (AAD changes invalidate it).
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:62:        val pairingKey = Hkdf.derivePairingKey(masterKey, senderId)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:65:        assertArrayEquals(pairingKey, Hkdf.derivePairingKey(masterKey, senderId))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:66:        assertFalse(pairingKey.contentEquals(Hkdf.derivePairingKey(masterKey, "sender-beta".encodeToByteArray())))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:98:        val wire = Aead.encrypt(pairingKey, plaintext, aadBytes, nonce)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:100:        // AES-GCM is deterministic — same inputs → same ciphertext.
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:101:        assertArrayEquals(wire, Aead.encrypt(pairingKey, plaintext, aadBytes, nonce))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:27:        val encrypted = MasterKey.wrap(masterKey, wrapKey)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:35:    fun hkdfPairingKeyMatchesSpecVector() {
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:39:        val pairingKey = Hkdf.derivePairingKey(masterKey, senderId)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:82:        val wire = Aead.encrypt(key, plaintext, aad, nonce)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:5:import app.syncler.core.network.PairingCompleteRequestDto
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:6:import app.syncler.core.network.PairingPreviewResponseDto
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:18: *   1. parseBrokerUrl(url) -> PairingCandidate
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:19: *   2. preview(candidate) -> PairingPreviewResponseDto  [non-consuming]
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:29:class PairingRepository @Inject constructor(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:33:    fun parseBrokerUrl(url: String): PairingCandidate? {
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:43:        return PairingCandidate(brokerUrl = url, pairingToken = token)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:46:    suspend fun preview(candidate: PairingCandidate): Result<PairingPreviewResponseDto> =
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:47:        runCatching { api.previewPairing(candidate.pairingToken) }
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:54:        candidate: PairingCandidate,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:55:        preview: PairingPreviewResponseDto,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:59:        val response = api.completePairing(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:60:            PairingCompleteRequestDto(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:80:            val revoked = runCatching { api.revokePairing(response.pairingId) }
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:103:        val response = api.revokePairing(pairingId)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:110:        const val TAG = "PairingRepo"
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:114:data class PairingCandidate(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:42:import app.syncler.core.network.PairingPreviewResponseDto
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:56:class PairingViewModel @Inject constructor(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:57:    private val repository: PairingRepository,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:62:    private val _state = MutableStateFlow<PairingState>(PairingState.Idle)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:63:    val state: StateFlow<PairingState> = _state.asStateFlow()
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:71:            _state.value = PairingState.Error("Invalid pairing URL — must be https://… (http:// allowed in debug)")
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:74:        _state.value = PairingState.PreviewLoading
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:77:                onSuccess = { _state.value = PairingState.PreviewReady(candidate, it) },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:78:                onFailure = { _state.value = PairingState.Error(it.message ?: "Failed to load preview") },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:84:        val current = _state.value as? PairingState.PreviewReady ?: return
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:85:        _state.value = PairingState.Confirming(current.preview)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:96:                onSuccess = { _state.value = PairingState.Success(it) },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:97:                onFailure = { _state.value = PairingState.Error(it.message ?: "Pairing failed") },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:109:        _state.value = PairingState.Idle
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:113:        _state.value = PairingState.Idle
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:117:sealed interface PairingState {
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:118:    data object Idle : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:119:    data object PreviewLoading : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:121:        val candidate: PairingCandidate,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:122:        val preview: PairingPreviewResponseDto,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:123:    ) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:124:    data class Confirming(val preview: PairingPreviewResponseDto) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:125:    data class Success(val sender: PairedSender) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:126:    data class Error(val message: String) : PairingState
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:131:fun PairingScreen(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:133:    viewModel: PairingViewModel = hiltViewModel(),
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:172:                    enabled = (state is PairingState.Idle || state is PairingState.Error) && url.isNotBlank(),
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:182:                PairingState.Idle -> Unit
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:183:                PairingState.PreviewLoading -> Text("Loading sender preview…")
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:184:                is PairingState.PreviewReady -> FingerprintConfirmation(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:189:                is PairingState.Confirming -> Text("Pairing with ${s.preview.senderName}…")
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:190:                is PairingState.Success -> PairingSuccessCard(
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:196:                is PairingState.Error -> Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:213:    preview: PairingPreviewResponseDto,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:235:private fun PairingSuccessCard(
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:53:    suspend fun byPairingId(pairingId: String): PairedSender?
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:88:    override suspend fun byPairingId(pairingId: String): PairedSender? =
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:37:            val encryptedMasterKey = MasterKey.wrap(masterKey, keys.masterKeyWrapKey)
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:47:    suspend fun previewPairing(@retrofit2.http.Query("token") token: String): PairingPreviewResponseDto
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:50:    suspend fun completePairing(@Body body: PairingCompleteRequestDto): PairingCompleteResponseDto
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:53:    suspend fun revokePairing(@Path("id") id: String): Response<Unit>
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:56:    suspend fun listPairings(): List<PairingItemDto>
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:89:    @Json(name = "encrypted_blob") val encryptedBlob: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:96:    @Json(name = "new_encrypted_blob") val newEncryptedBlob: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:107:    @Json(name = "current_encrypted_blob") val currentEncryptedBlob: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:121:data class PairingPreviewResponseDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:131:data class PairingCompleteRequestDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:133:    @Json(name = "encrypted_initial_state") val encryptedInitialState: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:137:data class PairingCompleteResponseDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:148:data class PairingItemDto(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStateRepository.kt:194:        val wire = Aead.encrypt(masterKey, plaintext)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:6: * Protocol context bound to the ciphertext but NOT including the ciphertext
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:32: * Envelope (Ed25519 signing input) — AAD plus base64 ciphertext and nonce.
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:40:    /** Base64 of the AES-GCM ciphertext_with_tag (no nonce prefix). */
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:156:        val ciphertext = dto.encryptedBody.base64ToBytes()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:157:        // Aead.decrypt expects (nonce || ciphertext) concatenated; wire splits
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:159:        val wire = nonce + ciphertext
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Hkdf.kt:10:    fun derivePairingKey(masterKey: ByteArray, senderId: ByteArray): ByteArray {
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:21:        return Aead.encrypt(masterKeyWrapKey, masterKey)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:35:        val ciphertext = cipher.doFinal(plaintext)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:36:        return nonce + ciphertext
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:43:        val ciphertext = wire.copyOfRange(NONCE_SIZE_BYTES, wire.size)
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\MasterKey.kt:47:        return cipher.doFinal(ciphertext)
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+2026-05-21T03:27:16.413834Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+Get-Content : Cannot find path 
+'D:\Projects\syncler\android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aead.kt' because it does not exist.
+At line:2 char:1
++ Get-Content -Raw android/core/crypto/src/main/kotlin/app/syncler/core ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\Projects\syn...\crypto\Aead.kt:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+
+ exited 1 in 297ms:
+Get-Content : Cannot find path 
+'D:\Projects\syncler\android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aead.kt' because it does not exist.
+At line:2 char:1
++ Get-Content -Raw android/core/crypto/src/main/kotlin/app/syncler/core ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\Projects\syn...\crypto\Aead.kt:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw android/core/crypto/src/main/kotlin/app/syncler/core/crypto/MasterKey.kt' in D:\Projects\syncler
+ succeeded in 228ms:
+package app.syncler.core.crypto
+
+import java.security.SecureRandom
+import java.util.Base64
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
+
+const val KEY_SIZE_BYTES = 32
+private const val NONCE_SIZE_BYTES = 12
+private const val GCM_TAG_BITS = 128
+private const val AES_GCM = "AES/GCM/NoPadding"
+
+object MasterKey {
+    private val secureRandom = SecureRandom()
+
+    fun generate(): ByteArray = ByteArray(KEY_SIZE_BYTES).also(secureRandom::nextBytes)
+
+    fun wrap(masterKey: ByteArray, masterKeyWrapKey: ByteArray): ByteArray {
+        require(masterKey.size == KEY_SIZE_BYTES)
+        return Aead.encrypt(masterKeyWrapKey, masterKey)
+    }
+
+    fun unwrap(encryptedMasterKey: ByteArray, masterKeyWrapKey: ByteArray): ByteArray =
+        Aead.decrypt(masterKeyWrapKey, encryptedMasterKey)
+}
+
+object Aead {
+    fun encrypt(key: ByteArray, plaintext: ByteArray, aad: ByteArray? = null, nonce: ByteArray = randomNonce()): ByteArray {
+        require(key.size == KEY_SIZE_BYTES) { "AES-256-GCM key must be 32 bytes" }
+        require(nonce.size == NONCE_SIZE_BYTES) { "AES-GCM nonce must be 12 bytes" }
+        val cipher = Cipher.getInstance(AES_GCM)
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, nonce))
+        aad?.let(cipher::updateAAD)
+        val ciphertext = cipher.doFinal(plaintext)
+        return nonce + ciphertext
+    }
+
+    fun decrypt(key: ByteArray, wire: ByteArray, aad: ByteArray? = null): ByteArray {
+        require(key.size == KEY_SIZE_BYTES) { "AES-256-GCM key must be 32 bytes" }
+        require(wire.size >= NONCE_SIZE_BYTES + 16) { "AES-GCM wire payload is too short" }
+        val nonce = wire.copyOfRange(0, NONCE_SIZE_BYTES)
+        val ciphertext = wire.copyOfRange(NONCE_SIZE_BYTES, wire.size)
+        val cipher = Cipher.getInstance(AES_GCM)
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, nonce))
+        aad?.let(cipher::updateAAD)
+        return cipher.doFinal(ciphertext)
+    }
+
+    private fun randomNonce(): ByteArray = ByteArray(NONCE_SIZE_BYTES).also(SecureRandom()::nextBytes)
+}
+
+fun ByteArray.toBase64(): String =
+    Base64.getEncoder().encodeToString(this)
+
+fun String.base64ToBytes(): ByteArray =
+    Base64.getDecoder().decode(this)
+
+fun ByteArray.toHex(): String = joinToString(separator = "") { "%02x".format(it) }
+
+fun String.hexToBytes(): ByteArray {
+    require(length % 2 == 0) { "hex length must be even" }
+    return chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+}
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"object Aead|fun encrypt|return nonce \\+ ciphertext|fun decrypt|wire.copyOfRange\" android/core/crypto/src/main/kotlin/app/syncler/core/crypto/MasterKey.kt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"wire = nonce \\|\\| ciphertext_with_tag|ciphertext_with_tag = wire\\[12|AES-GCM\" docs/crypto-spec.md" in D:\Projects\syncler
+ succeeded in 217ms:
+53:wire = nonce || ciphertext_with_tag
+55:ciphertext_with_tag = wire[12:]
+58:AAD (additional authenticated data passed to AES-GCM) contains the **protocol context** that binds the ciphertext but does NOT include the ciphertext itself. It is JSON-encoded UTF-8 with sorted keys and compact separators (no whitespace):
+88:> **V1 contract change (M5.1):** previous draft of this spec required `message_id`, `created_at`, and `schema_version` in AAD — those fields are server-generated and unknowable to the sender at signing time, so they have been removed from both AAD and the envelope. They remain server metadata stored next to the message but are not signed by the sender. AAD and the envelope are intentionally distinct: AAD authenticates context to AES-GCM (no ciphertext); the envelope is what Ed25519 signs (AAD + ciphertext + nonce). Replay protection is enforced at the server via the per-sender nonce registry (see §7).
+216:Never reuse an AES-GCM nonce with the same key. Clients must generate 12-byte nonces with a CSPRNG.
+241:    ciphertext_with_tag = wire[12:]
+250:AES-GCM: javax.crypto.Cipher or androidx.security.crypto
+
+ succeeded in 217ms:
+28:object Aead {
+29:    fun encrypt(key: ByteArray, plaintext: ByteArray, aad: ByteArray? = null, nonce: ByteArray = randomNonce()): ByteArray {
+36:        return nonce + ciphertext
+39:    fun decrypt(key: ByteArray, wire: ByteArray, aad: ByteArray? = null): ByteArray {
+42:        val nonce = wire.copyOfRange(0, NONCE_SIZE_BYTES)
+43:        val ciphertext = wire.copyOfRange(NONCE_SIZE_BYTES, wire.size)
+
+codex
+**Findings**
+
+- **High: state is not cleared or account-scoped on logout.**  
+  [UserStateRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:58) loads one singleton encrypted-pref blob, while logout only clears `Session` in [Session.kt](D:/Projects/syncler/android/core/auth/src/main/kotlin/app/syncler/core/auth/Session.kt:57). A different user logging in during the same app install can inherit the previous user’s local read/plugin state; if the new user’s remote state is empty, `pull()` merges old local state into that account and a later `push()` can upload it encrypted under the new user’s key. Fix by clearing `UserStateRepository` on logout or keying local state by user id.
+
+- **High: local mutations can lose read/archive entries.**  
+  `markRead()` and `markArchived()` do `_state.value` read, transform, then `applyLocal()` outside any mutex in [UserStateRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:74). Two concurrent marks can both read the same base state and the later assignment wins. There is also a pull race: `pull()` can merge/apply remote state while `markRead()` is holding a stale computed copy, and the later `applyLocal()` can overwrite the pull merge. Use a serialized local mutation path, or atomic `update {}` plus serialized disk persistence and merge application.
+
+- **High: failed pushes are not actually retried on foreground.**  
+  The log says failed mark-read push “will retry”, and CAS retry failure says “will retry later”, but only `markRead()`/`markArchived()` call `push()`. `InboxViewModel` init and refresh only call `pull()` in [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:88). A read mark whose push fails can remain local forever unless another local mutation happens. Add a dirty flag/outbox and flush on unlock/foreground after pull.
+
+- **Medium: timestamp string comparison does not reliably implement `max(read_at)`.**  
+  [StateMerger.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:51) compares ISO strings directly. `Instant.toString()` may emit `...00Z` or `...00.500Z`; lexicographically, `...00Z` sorts after `...00.500Z`, even though it is earlier. Compare parsed `Instant`s or serialize fixed-width timestamps. This also affects archive merge at line 57.
+
+- **Medium: future schema handling can silently corrupt unknown fields.**  
+  `fromJson()` preserves unknown `schema_version` values in [EncryptedUserState.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:65), but `toJson()` only writes known fields. A V2 client reading V3 will drop V3-only fields while still writing `schema_version: 3`. Unknown future schema should either be preserved as raw JSON or treated as read-only / non-pushable.
+
+**Answers To The Review Points**
+
+The V1 migration test is useful but not enough. Add a full V1 compatibility test with `installed_plugins`, `dismissed_messages`, `plugin_settings`, and `user_scoped_storage` round-tripping through `fromJson()->toJson()->fromJson`. An unknown V3 test is also worthwhile, but it should assert your policy: preserve unknowns or refuse to write, not merely “doesn’t crash”.
+
+Same-timestamp read tiebreaker is fine for now because `ReadMessageEntry` has no device id, so the bias is unobservable. If you add device metadata later, add a deterministic tiebreaker.
+
+One CAS retry is acceptable only with a real dirty retry path. Right now the server CAS defects from review #31 appear fixed, and Android doesn’t depend on parsing the 409 body, but the client has no durable retry scheduling.
+
+Encryption format looks compatible: [Aead.encrypt](D:/Projects/syncler/android/core/crypto/src/main/kotlin/app/syncler/core/crypto/MasterKey.kt:29) returns `nonce + ciphertext`, matching [docs/crypto-spec.md](D:/Projects/syncler/docs/crypto-spec.md:53). Server stores the state blob opaquely.
+
+I tried to run `:core:storage:testDebugUnitTest`, but Gradle failed before test execution due an access-denied lock under `C:\Users\Dima\.gradle\wrapper\...gradle-8.11.1-bin.zip.lck`.
+tokens used
+97,097

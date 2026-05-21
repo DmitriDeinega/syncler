@@ -54,7 +54,16 @@ class Session @Inject constructor(
         state.value = SessionState(token = token, masterKey = masterKey.copyOf())
     }
 
-    fun logout() {
+    /**
+     * Wipes the in-memory session. User-scoped singletons (read marks,
+     * paired-sender store, archives, ...) observe [sessionState] and
+     * react to the transition to a locked state by clearing themselves —
+     * see [app.syncler.feature.inbox.UserStateRepository] for the
+     * canonical pattern. The observer model avoids the Hilt dep cycle
+     * that a clearable multibinding would introduce (clearables need the
+     * Session for the master key; Session would need the clearable Set).
+     */
+    suspend fun logout() {
         state.value.masterKey?.fill(0)
         tokenStore.clearToken()
         state.value = SessionState(token = null, masterKey = null)

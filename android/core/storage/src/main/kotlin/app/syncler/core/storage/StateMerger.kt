@@ -1,5 +1,7 @@
 package app.syncler.core.storage
 
+import java.time.Instant
+
 /**
  * Two-way merge over [EncryptedUserState] (M7.1 — refined per Codex review;
  * M11.2 — added readMessages and archivedMessages):
@@ -34,7 +36,7 @@ object StateMerger {
         val installedPlugins = mergeByKey(
             local.installedPlugins + remote.installedPlugins,
             key = { it.pluginId },
-            pickWinner = { a, b -> if (a.installedAt >= b.installedAt) a else b },
+            pickWinner = { a, b -> if (compareTimestamps(a.installedAt, b.installedAt) >= 0) a else b },
         )
 
         val dismissedMessages = (local.dismissedMessages + remote.dismissedMessages)
@@ -43,18 +45,18 @@ object StateMerger {
         val pluginSettings = mergeMapByKey(
             local.pluginSettings,
             remote.pluginSettings,
-        ) { a, b -> if (a.modifiedAt >= b.modifiedAt) a else b }
+        ) { a, b -> if (compareTimestamps(a.modifiedAt, b.modifiedAt) >= 0) a else b }
 
         val readMessages = mergeByKey(
             local.readMessages + remote.readMessages,
             key = { it.messageId },
-            pickWinner = { a, b -> if (a.readAt >= b.readAt) a else b },
+            pickWinner = { a, b -> if (compareTimestamps(a.readAt, b.readAt) >= 0) a else b },
         )
 
         val archivedMessages = mergeByKey(
             local.archivedMessages + remote.archivedMessages,
             key = { it.messageId },
-            pickWinner = { a, b -> if (a.archivedAt >= b.archivedAt) a else b },
+            pickWinner = { a, b -> if (compareTimestamps(a.archivedAt, b.archivedAt) >= 0) a else b },
         )
 
         // userScopedStorage NOT merged in V1 — local wins. See class kdoc.
@@ -94,4 +96,23 @@ object StateMerger {
         return merged
     }
 
+    /**
+     * Compare two ISO-8601 timestamps as [Instant]s. Bug Codex flagged in
+     * Phase 2 review: string-lexical comparison is fragile because
+     * `Instant.toString()` is variable-length — `2026-05-21T10:00:00Z`
+     * sorts AFTER `2026-05-21T10:00:00.500Z` lexicographically even though
+     * the latter is later in real time. Parsing both sides through
+     * `Instant.parse` and using `compareTo` gives the right answer.
+     *
+     * On unparseable input (corrupt blob), we fall back to string compare —
+     * the wrong-but-deterministic behavior — so the merge always returns
+     * a valid blob rather than throwing.
+     */
+    private fun compareTimestamps(a: String, b: String): Int {
+        return try {
+            Instant.parse(a).compareTo(Instant.parse(b))
+        } catch (_: Exception) {
+            a.compareTo(b)
+        }
+    }
 }

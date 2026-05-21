@@ -83,18 +83,25 @@ class InboxViewModel @Inject constructor(
     val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
 
     init {
-        // Pull the latest cross-device state at startup so the inbox shows
-        // read marks set on the user's other devices. No-ops if locked.
-        viewModelScope.launch { userState.pull() }
+        // Pull cross-device state, then retry any push that failed previously
+        // (network blip, 409 conflict that couldn't resolve in one retry,
+        // session was locked when the mark was issued, etc.). No-ops if
+        // currently locked or if no dirty changes are pending.
+        viewModelScope.launch {
+            userState.pull()
+            userState.flushPendingPush()
+        }
     }
 
     fun refresh() {
         viewModelScope.launch {
             _refreshing.value = true
             repository.refresh()
-            // Opportunistically pull state — cheap, and catches read marks
-            // pushed from another device between polls.
+            // Opportunistically pull state — cheap, catches read marks
+            // pushed from another device between polls — and flush any
+            // dirty local change that hasn't been pushed yet.
             userState.pull()
+            userState.flushPendingPush()
             _refreshing.value = false
         }
     }

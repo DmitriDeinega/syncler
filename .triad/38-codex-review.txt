@@ -1,0 +1,28 @@
+**Findings**
+
+- **High: state is not cleared or account-scoped on logout.**  
+  [UserStateRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:58) loads one singleton encrypted-pref blob, while logout only clears `Session` in [Session.kt](D:/Projects/syncler/android/core/auth/src/main/kotlin/app/syncler/core/auth/Session.kt:57). A different user logging in during the same app install can inherit the previous user’s local read/plugin state; if the new user’s remote state is empty, `pull()` merges old local state into that account and a later `push()` can upload it encrypted under the new user’s key. Fix by clearing `UserStateRepository` on logout or keying local state by user id.
+
+- **High: local mutations can lose read/archive entries.**  
+  `markRead()` and `markArchived()` do `_state.value` read, transform, then `applyLocal()` outside any mutex in [UserStateRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:74). Two concurrent marks can both read the same base state and the later assignment wins. There is also a pull race: `pull()` can merge/apply remote state while `markRead()` is holding a stale computed copy, and the later `applyLocal()` can overwrite the pull merge. Use a serialized local mutation path, or atomic `update {}` plus serialized disk persistence and merge application.
+
+- **High: failed pushes are not actually retried on foreground.**  
+  The log says failed mark-read push “will retry”, and CAS retry failure says “will retry later”, but only `markRead()`/`markArchived()` call `push()`. `InboxViewModel` init and refresh only call `pull()` in [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:88). A read mark whose push fails can remain local forever unless another local mutation happens. Add a dirty flag/outbox and flush on unlock/foreground after pull.
+
+- **Medium: timestamp string comparison does not reliably implement `max(read_at)`.**  
+  [StateMerger.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:51) compares ISO strings directly. `Instant.toString()` may emit `...00Z` or `...00.500Z`; lexicographically, `...00Z` sorts after `...00.500Z`, even though it is earlier. Compare parsed `Instant`s or serialize fixed-width timestamps. This also affects archive merge at line 57.
+
+- **Medium: future schema handling can silently corrupt unknown fields.**  
+  `fromJson()` preserves unknown `schema_version` values in [EncryptedUserState.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/EncryptedUserState.kt:65), but `toJson()` only writes known fields. A V2 client reading V3 will drop V3-only fields while still writing `schema_version: 3`. Unknown future schema should either be preserved as raw JSON or treated as read-only / non-pushable.
+
+**Answers To The Review Points**
+
+The V1 migration test is useful but not enough. Add a full V1 compatibility test with `installed_plugins`, `dismissed_messages`, `plugin_settings`, and `user_scoped_storage` round-tripping through `fromJson()->toJson()->fromJson`. An unknown V3 test is also worthwhile, but it should assert your policy: preserve unknowns or refuse to write, not merely “doesn’t crash”.
+
+Same-timestamp read tiebreaker is fine for now because `ReadMessageEntry` has no device id, so the bias is unobservable. If you add device metadata later, add a deterministic tiebreaker.
+
+One CAS retry is acceptable only with a real dirty retry path. Right now the server CAS defects from review #31 appear fixed, and Android doesn’t depend on parsing the 409 body, but the client has no durable retry scheduling.
+
+Encryption format looks compatible: [Aead.encrypt](D:/Projects/syncler/android/core/crypto/src/main/kotlin/app/syncler/core/crypto/MasterKey.kt:29) returns `nonce + ciphertext`, matching [docs/crypto-spec.md](D:/Projects/syncler/docs/crypto-spec.md:53). Server stores the state blob opaquely.
+
+I tried to run `:core:storage:testDebugUnitTest`, but Gradle failed before test execution due an access-denied lock under `C:\Users\Dima\.gradle\wrapper\...gradle-8.11.1-bin.zip.lck`.
