@@ -62,11 +62,16 @@ fun SettingsScreen(
                 Text("Loading…", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
             }
+            // Hide revoked devices. They pile up across re-signups during
+            // dev (every fresh login enrolls a new device row server-side)
+            // and the user has no useful action to take on a revoked one.
+            // Server still records them; we just don't surface them.
+            val activeDevices = state.devices.filter { it.revokedAt == null }
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(state.devices, key = { it.id }) { device ->
+                items(activeDevices, key = { it.id }) { device ->
                     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
                         Column(Modifier.padding(16.dp)) {
                             Text(device.id, style = MaterialTheme.typography.titleSmall)
@@ -78,18 +83,8 @@ fun SettingsScreen(
                                 "Last seen: ${device.lastSeen ?: "never"}",
                                 style = MaterialTheme.typography.bodySmall,
                             )
-                            if (device.revokedAt != null) {
-                                Text(
-                                    "Revoked at ${device.revokedAt}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                )
-                            }
                             Spacer(Modifier.height(8.dp))
-                            Button(
-                                enabled = device.revokedAt == null,
-                                onClick = { devicesViewModel.revoke(device.id) },
-                            ) {
+                            Button(onClick = { devicesViewModel.revoke(device.id) }) {
                                 Text("Revoke")
                             }
                         }

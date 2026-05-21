@@ -21,6 +21,8 @@ data class EncryptedUserState(
     val readMessages: List<ReadMessageEntry> = emptyList(),
     /** M11.2: per-message archive state, distinct from dismissal. */
     val archivedMessages: List<ArchivedMessageEntry> = emptyList(),
+    /** M11.6: per-message delete state. Hidden from all surfaces; merges as union. */
+    val deletedMessages: List<DeletedMessageEntry> = emptyList(),
 ) {
     fun toJson(): String = JSONObject().apply {
         put("schema_version", schemaVersion)
@@ -43,6 +45,9 @@ data class EncryptedUserState(
         })
         put("archived_messages", JSONArray().apply {
             archivedMessages.forEach { put(it.toJson()) }
+        })
+        put("deleted_messages", JSONArray().apply {
+            deletedMessages.forEach { put(it.toJson()) }
         })
     }.toString()
 
@@ -113,6 +118,13 @@ data class EncryptedUserState(
                     ?.let { arr ->
                         (0 until arr.length()).mapNotNull {
                             runCatching { ArchivedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+                deletedMessages = obj.optJSONArray("deleted_messages")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { DeletedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
                         }
                     }
                     .orEmpty(),
@@ -216,6 +228,33 @@ data class ArchivedMessageEntry(
         fun fromJson(o: JSONObject) = ArchivedMessageEntry(
             messageId = o.getString("message_id"),
             archivedAt = o.getString("archived_at"),
+        )
+    }
+}
+
+/**
+ * M11.6: per-message deletion. Distinct from archive: deleted messages are
+ * hidden from BOTH the inbox AND the archive screen — the user said "make
+ * it go away." Synced via the M7 CAS blob so deleting on one device hides
+ * the card everywhere. Like archive, this is local state only; the server
+ * still has the message until its retention cap expires.
+ *
+ * Merge semantics: union by message_id, max(deleted_at) wins on conflict.
+ * No undelete in V1 — the entry is monotone.
+ */
+data class DeletedMessageEntry(
+    val messageId: String,
+    val deletedAt: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("message_id", messageId)
+        put("deleted_at", deletedAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = DeletedMessageEntry(
+            messageId = o.getString("message_id"),
+            deletedAt = o.getString("deleted_at"),
         )
     }
 }

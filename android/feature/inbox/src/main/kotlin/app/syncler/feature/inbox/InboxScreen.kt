@@ -22,9 +22,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -154,12 +156,24 @@ class InboxViewModel @Inject constructor(
             initialValue = userState.state.value.archivedMessages.map { it.messageId }.toSet(),
         )
 
+    val deletedMessageIds: StateFlow<Set<String>> = userState.state
+        .map { st -> st.deletedMessages.map { it.messageId }.toSet() }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = userState.state.value.deletedMessages.map { it.messageId }.toSet(),
+        )
+
     fun archive(itemId: String) {
         viewModelScope.launch { userState.markArchived(itemId) }
     }
 
     fun unarchive(itemId: String) {
         viewModelScope.launch { userState.markUnarchived(itemId) }
+    }
+
+    fun delete(itemId: String) {
+        viewModelScope.launch { userState.markDeleted(itemId) }
     }
 
     private val _showArchive = MutableStateFlow(false)
@@ -179,6 +193,7 @@ fun InboxScreen(
     val selectedId by viewModel.selectedId.collectAsState()
     val readMessageIds by viewModel.readMessageIds.collectAsState()
     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
+    val deletedMessageIds by viewModel.deletedMessageIds.collectAsState()
     val showArchive by viewModel.showArchive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val searchActive by viewModel.searchActive.collectAsState()
@@ -202,13 +217,16 @@ fun InboxScreen(
             isArchived = selectedItem.id in archivedMessageIds,
             onArchive = { viewModel.archive(selectedItem.id) },
             onUnarchive = { viewModel.unarchive(selectedItem.id) },
+            onDelete = { viewModel.delete(selectedItem.id) },
             modifier = modifier,
         )
         return
     }
     if (showArchive) {
         ArchiveScreen(
-            items = items.filter { it.id in archivedMessageIds },
+            // Deleted items are hidden EVERYWHERE — archive view too. The
+            // archive screen shows only archived-but-not-deleted.
+            items = items.filter { it.id in archivedMessageIds && it.id !in deletedMessageIds },
             readMessageIds = readMessageIds,
             onBack = viewModel::closeArchive,
             onItemClick = { id -> viewModel.open(id) },
@@ -254,7 +272,9 @@ fun InboxScreen(
             // by matching the trimmed query against title/subtitle/summary/
             // searchText/senderName (case-insensitive substring match — host
             // metadata only; plugin-scoped content search is V1.5).
-            val activeItems = items.filter { it.id !in archivedMessageIds }
+            val activeItems = items.filter {
+                it.id !in archivedMessageIds && it.id !in deletedMessageIds
+            }
             val filtered = remember(activeItems, searchQuery) {
                 if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
             }
@@ -502,7 +522,10 @@ private fun InboxRow(item: InboxItem, isRead: Boolean, onClick: () -> Unit) {
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                     )
-                    Text(item.sentAt, style = MaterialTheme.typography.labelSmall)
+                    Text(
+                    TimestampFormat.relative(item.sentAt),
+                    style = MaterialTheme.typography.labelSmall,
+                )
                 }
                 if (preview != null) {
                     Text(
@@ -555,9 +578,33 @@ private fun DetailScreen(
     isArchived: Boolean,
     onArchive: () -> Unit,
     onUnarchive: () -> Unit,
+    onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onBack)
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this message?") },
+            text = {
+                Text(
+                    "It'll disappear from the inbox and archive on all your " +
+                        "devices. This can't be undone.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    confirmDelete = false
+                    onDelete()
+                    onBack()
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -597,6 +644,9 @@ private fun DetailScreen(
                         }) {
                             Icon(Icons.Filled.Archive, contentDescription = "Archive")
                         }
+                    }
+                    IconButton(onClick = { confirmDelete = true }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Delete")
                     }
                 },
             )

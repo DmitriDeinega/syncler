@@ -59,6 +59,12 @@ object StateMerger {
             pickWinner = { a, b -> if (compareTimestamps(a.archivedAt, b.archivedAt) >= 0) a else b },
         )
 
+        val deletedMessages = mergeByKey(
+            local.deletedMessages + remote.deletedMessages,
+            key = { it.messageId },
+            pickWinner = { a, b -> if (compareTimestamps(a.deletedAt, b.deletedAt) >= 0) a else b },
+        )
+
         // userScopedStorage NOT merged in V1 — local wins. See class kdoc.
         return EncryptedUserState(
             schemaVersion = schema,
@@ -68,6 +74,7 @@ object StateMerger {
             userScopedStorage = local.userScopedStorage,
             readMessages = readMessages,
             archivedMessages = archivedMessages,
+            deletedMessages = deletedMessages,
         )
     }
 

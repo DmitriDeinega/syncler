@@ -10,6 +10,7 @@ import app.syncler.core.crypto.Aead
 import app.syncler.core.network.StatePutRequestDto
 import app.syncler.core.network.SynclerApi
 import app.syncler.core.storage.ArchivedMessageEntry
+import app.syncler.core.storage.DeletedMessageEntry
 import app.syncler.core.storage.EncryptedUserState
 import app.syncler.core.storage.ReadMessageEntry
 import app.syncler.core.storage.StateMerger
@@ -136,6 +137,33 @@ class UserStateRepository @Inject constructor(
             current.copy(
                 archivedMessages = current.archivedMessages.filterNot { it.messageId == messageId },
             )
+        }
+        markDirtyAndPush()
+    }
+
+    /**
+     * M11.6: marks a message deleted. Distinct from archive — deleted
+     * messages are hidden from BOTH the inbox and the archive screen.
+     * Merge semantics are monotone (no undelete in V1) so this entry
+     * permanently wins across devices.
+     */
+    suspend fun markDeleted(messageId: String) {
+        val now = Instant.now(clock).toString()
+        mutateLocal { current ->
+            val others = current.deletedMessages.filterNot { it.messageId == messageId }
+            current.copy(deletedMessages = others + DeletedMessageEntry(messageId, now))
+        }
+        markDirtyAndPush()
+    }
+
+    suspend fun markManyDeleted(messageIds: Collection<String>) {
+        if (messageIds.isEmpty()) return
+        val now = Instant.now(clock).toString()
+        val ids = messageIds.toSet()
+        mutateLocal { current ->
+            val keep = current.deletedMessages.filterNot { it.messageId in ids }
+            val newEntries = ids.map { DeletedMessageEntry(it, now) }
+            current.copy(deletedMessages = keep + newEntries)
         }
         markDirtyAndPush()
     }
