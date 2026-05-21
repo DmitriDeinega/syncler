@@ -25,6 +25,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
+import okhttp3.ConnectionSpec
+import okhttp3.CookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -102,11 +104,27 @@ class PluginLoader(
             .add(KotlinJsonAdapterFactory())
             .build()
 
+        private fun buildPluginHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .connectionSpecs(
+                if (BuildConfig.DEBUG) {
+                    listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+                } else {
+                    listOf(ConnectionSpec.MODERN_TLS)
+                },
+            )
+            .build()
+
         fun android(context: Context, scope: CoroutineScope): PluginLoader {
             val auditLogger = AuditLogger(context)
-            val networkBridge = NetworkBridge(OkHttpClient.Builder().cookieJar(okhttp3.CookieJar.NO_COOKIES).build(), auditLogger)
+            // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
+            // — neither permits cleartext, so http:// URLs fail at the
+            // connection layer even when requireHttps() lets them through
+            // for debug builds. Mirror NetworkBridge / InboxRepository:
+            // release stays HTTPS-only; debug allows LAN HTTP for dev boxes.
+            val networkBridge = NetworkBridge(buildPluginHttpClient(), auditLogger)
             return PluginLoader(
-                httpClient = OkHttpClient.Builder().cookieJar(okhttp3.CookieJar.NO_COOKIES).build(),
+                httpClient = buildPluginHttpClient(),
                 verifier = PluginSignatureVerifier(auditLogger),
                 permissionReader = PluginPermissionStore(context)::grantedCapabilities,
                 bundleStore = AndroidEncryptedBundleStore(context),

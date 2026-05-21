@@ -33,10 +33,9 @@ class NetworkBridge(
         val args = JsonBridgeCodec.objectFrom(argsJson)
         val url = args["url"] as? String ?: return@withContext JsonBridgeCodec.error("invalid_args")
         // Bridge-level scheme check: defense in depth against an injected
-        // OkHttpClient (PluginLoader.android() builds one without setting
-        // connectionSpecs, so the constructor's release-HTTPS gate above is
-        // only reached when no client is injected). Enforcing scheme here
-        // means we fail closed regardless of how `client` was built.
+        // OkHttpClient whose connectionSpecs might not align with this
+        // bridge's release-HTTPS policy. Enforcing scheme here means we
+        // fail closed regardless of how `client` was built.
         val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
         if (!schemeOk) {
             auditLogger.denied(plugin.manifest.id, "cleartext_in_release", url)

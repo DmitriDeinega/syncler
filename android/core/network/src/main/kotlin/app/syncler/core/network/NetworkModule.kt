@@ -7,6 +7,7 @@ import dagger.multibindings.Multibinds
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import okhttp3.ConnectionSpec
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -48,9 +49,20 @@ object NetworkModule {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
+        // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
+        // and refuses cleartext at the connection layer. Debug builds point
+        // SERVER_BASE_URL at http://10.0.2.2:8000/ (or a LAN IP), so we need
+        // CLEARTEXT in the spec list for dev. Release stays HTTPS-only.
         return OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
+            .connectionSpecs(
+                if (BuildConfig.DEBUG) {
+                    listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+                } else {
+                    listOf(ConnectionSpec.MODERN_TLS)
+                },
+            )
             .build()
     }
 
