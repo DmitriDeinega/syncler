@@ -45,6 +45,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -57,6 +59,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -102,7 +105,13 @@ class InboxViewModel @Inject constructor(
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
     fun setSearch(q: String) { _searchQuery.value = q }
-    fun clearSearch() { _searchQuery.value = "" }
+
+    private val _searchActive = MutableStateFlow(false)
+    val searchActive: StateFlow<Boolean> = _searchActive.asStateFlow()
+    fun setSearchActive(active: Boolean) {
+        _searchActive.value = active
+        if (!active) _searchQuery.value = ""
+    }
 
     init {
         // Pull cross-device state, then retry any push that failed previously
@@ -172,7 +181,7 @@ fun InboxScreen(
     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
     val showArchive by viewModel.showArchive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
-    var searchActive by remember { mutableStateOf(false) }
+    val searchActive by viewModel.searchActive.collectAsState()
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -215,10 +224,7 @@ fun InboxScreen(
                 InboxSearchAppBar(
                     query = searchQuery,
                     onQueryChange = viewModel::setSearch,
-                    onClose = {
-                        viewModel.clearSearch()
-                        searchActive = false
-                    },
+                    onClose = { viewModel.setSearchActive(false) },
                 )
             } else {
                 TopAppBar(
@@ -229,7 +235,7 @@ fun InboxScreen(
                                 modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
                             )
                         }
-                        IconButton(onClick = { searchActive = true }) {
+                        IconButton(onClick = { viewModel.setSearchActive(true) }) {
                             Icon(Icons.Filled.Search, contentDescription = "Search")
                         }
                         IconButton(onClick = { viewModel.refresh() }) {
@@ -280,6 +286,15 @@ private fun InboxSearchAppBar(
     onQueryChange: (String) -> Unit,
     onClose: () -> Unit,
 ) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+    // Android system back closes search consistently with the top-bar back
+    // arrow — Codex review 41 flagged the asymmetry where back used to fall
+    // through to the previous tab while only the arrow exited search.
+    BackHandler(onBack = onClose)
+
     TopAppBar(
         title = {
             androidx.compose.material3.TextField(
@@ -287,7 +302,7 @@ private fun InboxSearchAppBar(
                 onValueChange = onQueryChange,
                 placeholder = { Text("Search inbox") },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                 colors = androidx.compose.material3.TextFieldDefaults.colors(
                     focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
                     unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
@@ -316,14 +331,14 @@ private fun InboxSearchAppBar(
  * folded into host search — this is where that promise gets paid.
  */
 internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
-    val q = rawQuery.trim().lowercase()
+    val q = rawQuery.trim().lowercase(Locale.ROOT)
     if (q.isEmpty()) return true
-    if (item.senderName.lowercase().contains(q)) return true
+    if (item.senderName.lowercase(Locale.ROOT).contains(q)) return true
     item.hostPreview?.let { preview ->
-        if (preview.title.lowercase().contains(q)) return true
-        if (preview.subtitle?.lowercase()?.contains(q) == true) return true
-        if (preview.summary?.lowercase()?.contains(q) == true) return true
-        if (preview.searchText.any { it.lowercase().contains(q) }) return true
+        if (preview.title.lowercase(Locale.ROOT).contains(q)) return true
+        if (preview.subtitle?.lowercase(Locale.ROOT)?.contains(q) == true) return true
+        if (preview.summary?.lowercase(Locale.ROOT)?.contains(q) == true) return true
+        if (preview.searchText.any { it.lowercase(Locale.ROOT).contains(q) }) return true
     }
     return false
 }

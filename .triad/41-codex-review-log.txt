@@ -1,0 +1,2009 @@
+Reading additional input from stdin...
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, C:\Users\Dima\.codex\memories]
+reasoning effort: high
+reasoning summaries: none
+session id: 019e48da-ee72-75b3-9de5-de086d9838a6
+--------
+user
+# Review 41 — Phase 5: host-side metadata search
+
+Shipped commit `M11.5` (head). The last UX piece from the consultation
+35 plan. Inbox top-app-bar has a Search icon → search mode → text field
+that filters items by substring match against host-side metadata
+(sender name, hostPreview.title/subtitle/summary, and the
+hostPreview.searchText tokens senders pre-indexed in M11.1).
+
+Plugin-scoped content search (a per-plugin search bar that calls the
+plugin's backend) is deliberately deferred to V1.5 — see the original
+search section in consultation 35.
+
+## What to pressure-test
+
+### Match semantics
+
+1. **Case-insensitive substring.** `matchesQuery` lowercases both
+   query and corpus before `contains`. Edge: locale-sensitive
+   lowercase (Turkish dotless-i, etc.) might do unexpected things on
+   non-Latin scripts. Acceptable V1, or worth `lowercase(Locale.ROOT)`?
+
+2. **Token participation.** `hostPreview.searchText` tokens are
+   individually `lowercase().contains(q)`. So `searchText = ["AAPL"]`
+   matches `q = "appl"` (which is probably intended, "apple" matches
+   AAPL by accident). Is that right, or should searchText match be
+   token-equality (substring inside any token, but the *query* must be
+   present as a whole word)?
+
+3. **Empty / whitespace query.** `q.trim().lowercase()` — blank
+   returns true (everyone matches), so the UI shows the unfiltered
+   set. Correct.
+
+### State semantics
+
+4. **`searchActive` is local UI state.** Lives in `remember
+   { mutableStateOf(false) }` inside `InboxScreen`. The actual
+   `searchQuery` lives in the ViewModel. So if the user switches to
+   Senders tab and back, `searchActive` resets to false but
+   `searchQuery` persists. That's an inconsistency — when the user
+   returns to Inbox, search results filter the list but there's no
+   visible search bar. Recommend either hoisting `searchActive` into
+   the ViewModel or auto-clearing the query when `searchActive` goes
+   false.
+
+5. **Search field auto-focus / IME.** Currently `TextField` will get
+   focus on first composition. Does it auto-summon the IME, or does
+   the user have to tap the field? Material 3 default is "no IME until
+   focused" — opening search but not autocallong the keyboard is
+   a minor UX papercut. Worth requesting focus in a LaunchedEffect?
+
+### Interaction with other filters
+
+6. **Search composes with archive filter** (active inbox excludes
+   archived). Per design — archived cards are out of the active feed
+   regardless of search. Should searching also surface archived items
+   ("search everywhere")? Or is Archive being a separate space the
+   right metaphor?
+
+7. **Search composes with date buckets.** Filtered items still bucket
+   into Today / Yesterday / Earlier sections. If all results are in
+   "Earlier", the user sees one section header — fine UX or noisy?
+
+### Tests
+
+8. The 6 new tests in `InboxSearchTest`:
+   - blank → match all
+   - title substring (incl. case-insensitive)
+   - subtitle+summary participation
+   - searchText tokens
+   - sender-name participation
+   - hostPreview-null fallback (still searchable by sender)
+
+   Coverage I might've missed:
+   - Special characters in query (quotes, slashes, regex chars) —
+     `contains` is plain string, no regex parsing, so should be safe.
+   - Unicode + emoji query.
+
+## What's NOT in scope
+
+- Plugin-scoped content search (V1.5)
+- Search history / suggestions
+- Highlight matching substrings in row text
+- Search across archived items (deliberately separate space)
+- Persisted query across process restart
+
+## Output
+
+This was meant to be the last UX phase before V1 polish + final
+summary. If you greenlight, the next step is writing the final summary
++ V1.5 sign-off list for the user. If you find something that needs
+fixing, name it specifically.
+codex
+I’ll review this as a code review against `HEAD`, focusing on the search semantics, state behavior, and tests you called out. I’m going to inspect the relevant implementation and test files first, then I’ll give findings ordered by risk.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"matchesQuery|searchActive|searchQuery|InboxSearchTest|hostPreview\\.searchText|searchText\" ." in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git log --oneline -5' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+ succeeded in 251ms:
+?? .triad/41-codex-review-log.txt
+?? .triad/41-codex-review.txt
+?? .triad/41-gemini-review-log.txt
+?? .triad/41-gemini-review.txt
+?? .triad/41-phase5-review-prompt.md
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+2026-05-21T04:46:16.495338Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+.\docs\integration-guide.md:28:    "searchText": ["account-a", "alert", "threshold"]
+.\docs\integration-guide.md:45:| `searchText` | no | string[] | 16 entries × 64 UTF-8 bytes each |
+.\docs\integration-guide.md:49:`searchText` is folded into the host's inbox search alongside title, subtitle, summary, and sender name. The host does a case-insensitive substring match — populate this with the terms a user would type into the search box but that aren't part of the visible row (ticker symbols, ticket numbers, account references). Plugin-scoped *content* search (a search bar that runs against your backend) is V1.5.
+.\docs\integration-guide.md:227:            "searchText": ["account-a", "alert"],
+.\sdk-python\tests\test_preview.py:26:    "searchText": ["mega millions", "ticket 8KQ-193"],
+.\sdk-python\tests\test_preview.py:79:        validate_host_preview({"title": "ok", "searchText": "a, comma, list"})
+.\sdk-python\tests\test_preview.py:84:    with pytest.raises(HostPreviewValidationError, match="searchText has"):
+.\sdk-python\tests\test_preview.py:85:        validate_host_preview({"title": "ok", "searchText": tokens})
+.\sdk-python\tests\test_preview.py:90:    with pytest.raises(HostPreviewValidationError, match=r"searchText\[0\]"):
+.\sdk-python\tests\test_preview.py:91:        validate_host_preview({"title": "ok", "searchText": [fat]})
+.\sdk-python\syncler\preview.py:10:  ``searchText`` (list of <= 16 entries, each <= 64 UTF-8 bytes).
+.\sdk-python\syncler\preview.py:27:    searchText: NotRequired[list[str]]
+.\sdk-python\syncler\preview.py:72:    if "searchText" in value:
+.\sdk-python\syncler\preview.py:73:        tokens = value["searchText"]
+.\sdk-python\syncler\preview.py:75:            raise HostPreviewValidationError("hostPreview.searchText must be a list of strings")
+.\sdk-python\syncler\preview.py:78:                f"hostPreview.searchText has {len(tokens)} entries; max is {SEARCH_TEXT_MAX_ENTRIES}"
+.\sdk-python\syncler\preview.py:83:                    f"hostPreview.searchText[{i}] must be a string"
+.\sdk-python\syncler\preview.py:85:            _check_bytes(f"searchText[{i}]", token, SEARCH_TEXT_ENTRY_MAX_BYTES)
+.\sdk-python\syncler\preview.py:88:    # trim summary or searchText rather than dropping fields. `ensure_ascii=False`
+.\sdk-plugin\test\preview.test.ts:13:  searchText: ['mega millions', 'ticket 8KQ-193'],
+.\sdk-plugin\test\preview.test.ts:64:  it('rejects searchText that is not an array', () => {
+.\sdk-plugin\test\preview.test.ts:66:      validateHostPreview({ title: 'ok', searchText: 'a comma, separated, list' }),
+.\sdk-plugin\test\preview.test.ts:67:    ).toThrow(/searchText must be an array/);
+.\sdk-plugin\test\preview.test.ts:70:  it('enforces searchText entry count', () => {
+.\sdk-plugin\test\preview.test.ts:71:    const tokens = Array.from({ length: HOST_PREVIEW_LIMITS.searchTextMaxEntries + 1 }, (_, i) => `t${i}`);
+.\sdk-plugin\test\preview.test.ts:72:    expect(() => validateHostPreview({ title: 'ok', searchText: tokens })).toThrow(
+.\sdk-plugin\test\preview.test.ts:73:      /searchText has/,
+.\sdk-plugin\test\preview.test.ts:77:  it('enforces searchText entry byte cap', () => {
+.\sdk-plugin\test\preview.test.ts:78:    const oneFatToken = 'a'.repeat(HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes + 1);
+.\sdk-plugin\test\preview.test.ts:79:    expect(() => validateHostPreview({ title: 'ok', searchText: [oneFatToken] })).toThrow(
+.\sdk-plugin\test\preview.test.ts:80:      /searchText\[0\]/,
+.\sdk-plugin\src\preview.ts:16: *       searchText: ['mega millions', 'ticket 8KQ-193'],
+.\sdk-plugin\src\preview.ts:39:  searchText?: string[];
+.\sdk-plugin\src\preview.ts:48:  searchTextMaxEntries: 16,
+.\sdk-plugin\src\preview.ts:49:  searchTextEntryMaxBytes: 64,
+.\sdk-plugin\src\preview.ts:98:  if ('searchText' in record) {
+.\sdk-plugin\src\preview.ts:99:    const tokens = record.searchText;
+.\sdk-plugin\src\preview.ts:102:        'hostPreview.searchText must be an array of strings',
+.\sdk-plugin\src\preview.ts:105:    if (tokens.length > HOST_PREVIEW_LIMITS.searchTextMaxEntries) {
+.\sdk-plugin\src\preview.ts:107:        `hostPreview.searchText has ${tokens.length} entries; max is ${HOST_PREVIEW_LIMITS.searchTextMaxEntries}`,
+.\sdk-plugin\src\preview.ts:113:          `hostPreview.searchText[${i}] must be a string`,
+.\sdk-plugin\src\preview.ts:116:      checkBytes(`searchText[${i}]`, token, HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes);
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:10: * searchText / senderName, case-insensitive, blank query is a no-op
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:13:class InboxSearchTest {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:20:        searchText: List<String> = emptyList(),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:34:        hostPreview = HostPreview(title, subtitle, summary, searchText),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:39:        assertTrue(matchesQuery(it, ""))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:40:        assertTrue(matchesQuery(it, "   "))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:45:        assertTrue(matchesQuery(it, "millions"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:46:        assertTrue(matchesQuery(it, "MEGA"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:47:        assertFalse(matchesQuery(it, "powerball"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:56:        assertTrue(matchesQuery(it, "8kq"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:57:        assertTrue(matchesQuery(it, "threshold"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:60:    @Test fun `searchText tokens participate`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:63:            searchText = listOf("ticker:AAPL", "trade", "buy"),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:65:        assertTrue(matchesQuery(it, "aapl"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:66:        assertTrue(matchesQuery(it, "buy"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:67:        assertFalse(matchesQuery(it, "sell"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:72:        assertTrue(matchesQuery(it, "pais"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:73:        assertTrue(matchesQuery(it, "LOTTO"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:85:        assertTrue(matchesQuery(it, "fallback"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:86:        assertFalse(matchesQuery(it, "anything-else"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:31:                """"searchText":["mega millions","ticket 8KQ-193"]""",
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:37:        assertEquals(listOf("mega millions", "ticket 8KQ-193"), parsed.searchText)
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:85:    fun `searchText as string - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:87:        // Android (optJSONArray) silently accepted with empty searchText.
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:88:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":"a, b, c"""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:92:    fun `searchText with non-string entry - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:93:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":["good",42,"x"]""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:97:    fun `searchText over 16 entries - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:99:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":[$tokens]""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:103:    fun `searchText entry over 64 bytes - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:105:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":["$tooBig"]""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:109:    fun `empty searchText tokens are silently dropped`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:111:            preview(""""title":"ok","searchText":["real","","also-real"]"""),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:114:        assertEquals(listOf("real", "also-real"), parsed!!.searchText)
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:129:        assertEquals(emptyList<String>(), parsed.searchText)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:98:     * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:102:    private val _searchQuery = MutableStateFlow("")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:103:    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:104:    fun setSearch(q: String) { _searchQuery.value = q }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:105:    fun clearSearch() { _searchQuery.value = "" }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:174:    val searchQuery by viewModel.searchQuery.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:175:    var searchActive by remember { mutableStateOf(false) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:214:            if (searchActive) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:216:                    query = searchQuery,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:220:                        searchActive = false
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:232:                        IconButton(onClick = { searchActive = true }) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:249:            // searchText/senderName (case-insensitive substring match — host
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:252:            val filtered = remember(activeItems, searchQuery) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:253:                if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:261:                searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:262:                    "No cards match \"$searchQuery\".",
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:314: * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:315: * promised in §2 of the integration guide that searchText would be
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:318:internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:326:        if (preview.searchText.any { it.lowercase().contains(q) }) return true
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:18: * 3. Drops empty `searchText` tokens silently when assembling the list (the
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:69:        val searchText = mutableListOf<String>()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:70:        if (obj.has("searchText")) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:71:            val raw = obj.get("searchText")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:73:                warn("hostPreview.searchText is not an array; falling back")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:77:                warn("hostPreview.searchText has %d entries; max %d", raw.length(), SEARCH_TEXT_MAX_ENTRIES)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:83:                    warn("hostPreview.searchText[%d] is not a string; falling back", i)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:87:                    warn("hostPreview.searchText[%d] exceeds %d bytes; falling back",
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:93:                if (token.isNotEmpty()) searchText += token
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:101:            searchText = searchText,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:305: * `searchText` is folded into the host's global search index in addition to
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:313:    val searchText: List<String>,
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ exited 1 in 255ms:
+.\docs\integration-guide.md:28:    "searchText": ["account-a", "alert", "threshold"]
+.\docs\integration-guide.md:45:| `searchText` | no | string[] | 16 entries × 64 UTF-8 bytes each |
+.\docs\integration-guide.md:49:`searchText` is folded into the host's inbox search alongside title, subtitle, summary, and sender name. The host does a case-insensitive substring match — populate this with the terms a user would type into the search box but that aren't part of the visible row (ticker symbols, ticket numbers, account references). Plugin-scoped *content* search (a search bar that runs against your backend) is V1.5.
+.\docs\integration-guide.md:227:            "searchText": ["account-a", "alert"],
+.\sdk-python\tests\test_preview.py:26:    "searchText": ["mega millions", "ticket 8KQ-193"],
+.\sdk-python\tests\test_preview.py:79:        validate_host_preview({"title": "ok", "searchText": "a, comma, list"})
+.\sdk-python\tests\test_preview.py:84:    with pytest.raises(HostPreviewValidationError, match="searchText has"):
+.\sdk-python\tests\test_preview.py:85:        validate_host_preview({"title": "ok", "searchText": tokens})
+.\sdk-python\tests\test_preview.py:90:    with pytest.raises(HostPreviewValidationError, match=r"searchText\[0\]"):
+.\sdk-python\tests\test_preview.py:91:        validate_host_preview({"title": "ok", "searchText": [fat]})
+.\sdk-python\syncler\preview.py:10:  ``searchText`` (list of <= 16 entries, each <= 64 UTF-8 bytes).
+.\sdk-python\syncler\preview.py:27:    searchText: NotRequired[list[str]]
+.\sdk-python\syncler\preview.py:72:    if "searchText" in value:
+.\sdk-python\syncler\preview.py:73:        tokens = value["searchText"]
+.\sdk-python\syncler\preview.py:75:            raise HostPreviewValidationError("hostPreview.searchText must be a list of strings")
+.\sdk-python\syncler\preview.py:78:                f"hostPreview.searchText has {len(tokens)} entries; max is {SEARCH_TEXT_MAX_ENTRIES}"
+.\sdk-python\syncler\preview.py:83:                    f"hostPreview.searchText[{i}] must be a string"
+.\sdk-python\syncler\preview.py:85:            _check_bytes(f"searchText[{i}]", token, SEARCH_TEXT_ENTRY_MAX_BYTES)
+.\sdk-python\syncler\preview.py:88:    # trim summary or searchText rather than dropping fields. `ensure_ascii=False`
+.\sdk-plugin\test\preview.test.ts:13:  searchText: ['mega millions', 'ticket 8KQ-193'],
+.\sdk-plugin\test\preview.test.ts:64:  it('rejects searchText that is not an array', () => {
+.\sdk-plugin\test\preview.test.ts:66:      validateHostPreview({ title: 'ok', searchText: 'a comma, separated, list' }),
+.\sdk-plugin\test\preview.test.ts:67:    ).toThrow(/searchText must be an array/);
+.\sdk-plugin\test\preview.test.ts:70:  it('enforces searchText entry count', () => {
+.\sdk-plugin\test\preview.test.ts:71:    const tokens = Array.from({ length: HOST_PREVIEW_LIMITS.searchTextMaxEntries + 1 }, (_, i) => `t${i}`);
+.\sdk-plugin\test\preview.test.ts:72:    expect(() => validateHostPreview({ title: 'ok', searchText: tokens })).toThrow(
+.\sdk-plugin\test\preview.test.ts:73:      /searchText has/,
+.\sdk-plugin\test\preview.test.ts:77:  it('enforces searchText entry byte cap', () => {
+.\sdk-plugin\test\preview.test.ts:78:    const oneFatToken = 'a'.repeat(HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes + 1);
+.\sdk-plugin\test\preview.test.ts:79:    expect(() => validateHostPreview({ title: 'ok', searchText: [oneFatToken] })).toThrow(
+.\sdk-plugin\test\preview.test.ts:80:      /searchText\[0\]/,
+.\sdk-plugin\src\preview.ts:16: *       searchText: ['mega millions', 'ticket 8KQ-193'],
+.\sdk-plugin\src\preview.ts:39:  searchText?: string[];
+.\sdk-plugin\src\preview.ts:48:  searchTextMaxEntries: 16,
+.\sdk-plugin\src\preview.ts:49:  searchTextEntryMaxBytes: 64,
+.\sdk-plugin\src\preview.ts:98:  if ('searchText' in record) {
+.\sdk-plugin\src\preview.ts:99:    const tokens = record.searchText;
+.\sdk-plugin\src\preview.ts:102:        'hostPreview.searchText must be an array of strings',
+.\sdk-plugin\src\preview.ts:105:    if (tokens.length > HOST_PREVIEW_LIMITS.searchTextMaxEntries) {
+.\sdk-plugin\src\preview.ts:107:        `hostPreview.searchText has ${tokens.length} entries; max is ${HOST_PREVIEW_LIMITS.searchTextMaxEntries}`,
+.\sdk-plugin\src\preview.ts:113:          `hostPreview.searchText[${i}] must be a string`,
+.\sdk-plugin\src\preview.ts:116:      checkBytes(`searchText[${i}]`, token, HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes);
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:10: * searchText / senderName, case-insensitive, blank query is a no-op
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:13:class InboxSearchTest {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:20:        searchText: List<String> = emptyList(),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:34:        hostPreview = HostPreview(title, subtitle, summary, searchText),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:39:        assertTrue(matchesQuery(it, ""))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:40:        assertTrue(matchesQuery(it, "   "))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:45:        assertTrue(matchesQuery(it, "millions"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:46:        assertTrue(matchesQuery(it, "MEGA"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:47:        assertFalse(matchesQuery(it, "powerball"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:56:        assertTrue(matchesQuery(it, "8kq"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:57:        assertTrue(matchesQuery(it, "threshold"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:60:    @Test fun `searchText tokens participate`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:63:            searchText = listOf("ticker:AAPL", "trade", "buy"),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:65:        assertTrue(matchesQuery(it, "aapl"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:66:        assertTrue(matchesQuery(it, "buy"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:67:        assertFalse(matchesQuery(it, "sell"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:72:        assertTrue(matchesQuery(it, "pais"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:73:        assertTrue(matchesQuery(it, "LOTTO"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:85:        assertTrue(matchesQuery(it, "fallback"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:86:        assertFalse(matchesQuery(it, "anything-else"))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:31:                """"searchText":["mega millions","ticket 8KQ-193"]""",
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:37:        assertEquals(listOf("mega millions", "ticket 8KQ-193"), parsed.searchText)
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:85:    fun `searchText as string - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:87:        // Android (optJSONArray) silently accepted with empty searchText.
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:88:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":"a, b, c"""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:92:    fun `searchText with non-string entry - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:93:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":["good",42,"x"]""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:97:    fun `searchText over 16 entries - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:99:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":[$tokens]""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:103:    fun `searchText entry over 64 bytes - returns null`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:105:        assertNull(HostPreviewParser.parse(preview(""""title":"ok","searchText":["$tooBig"]""")))
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:109:    fun `empty searchText tokens are silently dropped`() {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:111:            preview(""""title":"ok","searchText":["real","","also-real"]"""),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:114:        assertEquals(listOf("real", "also-real"), parsed!!.searchText)
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\HostPreviewParserTest.kt:129:        assertEquals(emptyList<String>(), parsed.searchText)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:98:     * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:102:    private val _searchQuery = MutableStateFlow("")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:103:    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:104:    fun setSearch(q: String) { _searchQuery.value = q }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:105:    fun clearSearch() { _searchQuery.value = "" }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:174:    val searchQuery by viewModel.searchQuery.collectAsState()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:175:    var searchActive by remember { mutableStateOf(false) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:214:            if (searchActive) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:216:                    query = searchQuery,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:220:                        searchActive = false
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:232:                        IconButton(onClick = { searchActive = true }) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:249:            // searchText/senderName (case-insensitive substring match — host
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:252:            val filtered = remember(activeItems, searchQuery) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:253:                if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:261:                searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:262:                    "No cards match \"$searchQuery\".",
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:314: * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:315: * promised in §2 of the integration guide that searchText would be
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:318:internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:326:        if (preview.searchText.any { it.lowercase().contains(q) }) return true
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:18: * 3. Drops empty `searchText` tokens silently when assembling the list (the
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:69:        val searchText = mutableListOf<String>()
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:70:        if (obj.has("searchText")) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:71:            val raw = obj.get("searchText")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:73:                warn("hostPreview.searchText is not an array; falling back")
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:77:                warn("hostPreview.searchText has %d entries; max %d", raw.length(), SEARCH_TEXT_MAX_ENTRIES)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:83:                    warn("hostPreview.searchText[%d] is not a string; falling back", i)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:87:                    warn("hostPreview.searchText[%d] exceeds %d bytes; falling back",
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:93:                if (token.isNotEmpty()) searchText += token
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\HostPreviewParser.kt:101:            searchText = searchText,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:305: * `searchText` is folded into the host's global search index in addition to
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:313:    val searchText: List<String>,
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ succeeded in 264ms:
+8c6abc9 M11.5: host-side metadata search
+099cab7 M11.4: address Phase 4 triad review (review 40)
+4f5e3a8 M11.4: bundle-by-hash retention + revocation classification
+daa10f8 M11.3: address Phase 3 triad review (review 39)
+8160e07 M11.3: bottom nav + date buckets + archive
+
+codex
+The search implementation and tests are concentrated in `InboxScreen.kt` and `InboxSearchTest.kt`. The worktree has only untracked `.triad` review artifacts, so I’ll leave those alone and continue with a read-only review.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxScreen.kt | Select-Object -First 380" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\feature\\inbox\\src\\test\\kotlin\\app\\syncler\\feature\\inbox\\InboxSearchTest.kt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\feature\\inbox\\build.gradle.kts" in D:\Projects\syncler
+ succeeded in 276ms:
+plugins {
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.ksp)
+}
+
+android {
+    namespace = "app.syncler.feature.inbox"
+    compileSdk = 35
+
+    defaultConfig {
+        minSdk = 26
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+kotlin {
+    jvmToolchain(17)
+}
+
+dependencies {
+    implementation(project(":core:auth"))
+    implementation(project(":core:crypto"))
+    implementation(project(":core:network"))
+    implementation(project(":core:storage"))
+
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui)
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.hilt.android)
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    implementation(libs.androidx.security.crypto)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
+    implementation(libs.timber)
+
+    ksp(libs.hilt.compiler)
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    // Android stubs org.json with NotMocked, breaking host-side parser tests.
+    // Pull the real implementation onto the test classpath so the unit tests
+    // exercise the same JSON behavior the production runtime sees.
+    testImplementation("org.json:json:20240303")
+}
+
+ succeeded in 299ms:
+package app.syncler.feature.inbox
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Locks host-side metadata search to the contract documented in ֲ§2 of the
+ * integration guide: substring match across title / subtitle / summary /
+ * searchText / senderName, case-insensitive, blank query is a no-op
+ * (returns true for all items so the UI shows the unfiltered set).
+ */
+class InboxSearchTest {
+
+    private fun item(
+        sender: String = "Sender",
+        title: String = "Title",
+        subtitle: String? = null,
+        summary: String? = null,
+        searchText: List<String> = emptyList(),
+    ) = InboxItem(
+        id = "id-1",
+        senderId = "s",
+        senderName = sender,
+        pluginId = "p",
+        pluginIdentifier = "com.x",
+        payloadJson = "{}",
+        sentAt = "2026-05-21T00:00:00Z",
+        expiresAt = "2026-06-20T00:00:00Z",
+        bundleJs = null,
+        declaredEndpoints = emptyList(),
+        bundleHash = null,
+        revocationReason = null,
+        hostPreview = HostPreview(title, subtitle, summary, searchText),
+    )
+
+    @Test fun `blank query matches everything`() {
+        val it = item(title = "Anything")
+        assertTrue(matchesQuery(it, ""))
+        assertTrue(matchesQuery(it, "   "))
+    }
+
+    @Test fun `title substring match`() {
+        val it = item(title = "Mega Millions draw results")
+        assertTrue(matchesQuery(it, "millions"))
+        assertTrue(matchesQuery(it, "MEGA"))
+        assertFalse(matchesQuery(it, "powerball"))
+    }
+
+    @Test fun `subtitle and summary participate`() {
+        val it = item(
+            title = "Alert",
+            subtitle = "Account 8KQ-193",
+            summary = "Threshold exceeded by 12 percent",
+        )
+        assertTrue(matchesQuery(it, "8kq"))
+        assertTrue(matchesQuery(it, "threshold"))
+    }
+
+    @Test fun `searchText tokens participate`() {
+        val it = item(
+            title = "Alert",
+            searchText = listOf("ticker:AAPL", "trade", "buy"),
+        )
+        assertTrue(matchesQuery(it, "aapl"))
+        assertTrue(matchesQuery(it, "buy"))
+        assertFalse(matchesQuery(it, "sell"))
+    }
+
+    @Test fun `sender name participates`() {
+        val it = item(sender = "Pais Lotto")
+        assertTrue(matchesQuery(it, "pais"))
+        assertTrue(matchesQuery(it, "LOTTO"))
+    }
+
+    @Test fun `fallback items without hostPreview still searchable by sender`() {
+        val it = InboxItem(
+            id = "x", senderId = "s", senderName = "FallbackBot",
+            pluginId = "p", pluginIdentifier = "com.x", payloadJson = "{}",
+            sentAt = "2026-05-21T00:00:00Z", expiresAt = "2026-06-20T00:00:00Z",
+            bundleJs = null, declaredEndpoints = emptyList(),
+            bundleHash = null, revocationReason = null,
+            hostPreview = null,
+        )
+        assertTrue(matchesQuery(it, "fallback"))
+        assertFalse(matchesQuery(it, "anything-else"))
+    }
+}
+
+ succeeded in 369ms:
+package app.syncler.feature.inbox
+
+import android.annotation.SuppressLint
+import android.webkit.WebSettings
+import android.webkit.WebView
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import javax.inject.Inject
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+
+@HiltViewModel
+class InboxViewModel @Inject constructor(
+    private val repository: InboxRepository,
+    private val userState: UserStateRepository,
+) : ViewModel() {
+
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+    val items: StateFlow<List<InboxItem>> = repository.items
+
+    // Derived: set of message IDs already read on any of the user's devices.
+    // Collected from UserStateRepository.state and exposed as a snapshot the
+    // UI can pick from directly.
+    val readMessageIds: StateFlow<Set<String>> = userState.state
+        .map { st -> st.readMessages.map { it.messageId }.toSet() }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = userState.state.value.readMessages.map { it.messageId }.toSet(),
+        )
+
+    private val _selectedId = MutableStateFlow<String?>(null)
+    val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+
+    /**
+     * Host-side metadata search (M11.5). Substring match against
+     * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
+     * entirely client-side ג€” the server is content-blind. Plugin-scoped
+     * content search is V1.5 (per the consultation 35 federated-search plan).
+     */
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    fun setSearch(q: String) { _searchQuery.value = q }
+    fun clearSearch() { _searchQuery.value = "" }
+
+    init {
+        // Pull cross-device state, then retry any push that failed previously
+        // (network blip, 409 conflict that couldn't resolve in one retry,
+        // session was locked when the mark was issued, etc.). No-ops if
+        // currently locked or if no dirty changes are pending.
+        viewModelScope.launch {
+            userState.pull()
+            userState.flushPendingPush()
+        }
+    }
+
+    fun refresh() {
+        viewModelScope.launch {
+            _refreshing.value = true
+            repository.refresh()
+            // Opportunistically pull state ג€” cheap, catches read marks
+            // pushed from another device between polls ג€” and flush any
+            // dirty local change that hasn't been pushed yet.
+            userState.pull()
+            userState.flushPendingPush()
+            _refreshing.value = false
+        }
+    }
+
+    fun open(itemId: String) {
+        _selectedId.value = itemId
+        // Mark-read trigger: opening the detail view (the conservative trigger
+        // both Codex and Gemini argued for in review 35 ג€” scanning the list
+        // alone should not punish unread state).
+        viewModelScope.launch { userState.markRead(itemId) }
+    }
+    fun closeDetail() { _selectedId.value = null }
+
+    val archivedMessageIds: StateFlow<Set<String>> = userState.state
+        .map { st -> st.archivedMessages.map { it.messageId }.toSet() }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = userState.state.value.archivedMessages.map { it.messageId }.toSet(),
+        )
+
+    fun archive(itemId: String) {
+        viewModelScope.launch { userState.markArchived(itemId) }
+    }
+
+    fun unarchive(itemId: String) {
+        viewModelScope.launch { userState.markUnarchived(itemId) }
+    }
+
+    private val _showArchive = MutableStateFlow(false)
+    val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
+    fun openArchive() { _showArchive.value = true }
+    fun closeArchive() { _showArchive.value = false }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun InboxScreen(
+    modifier: Modifier = Modifier,
+    viewModel: InboxViewModel = hiltViewModel(),
+) {
+    val items by viewModel.items.collectAsState()
+    val refreshing by viewModel.refreshing.collectAsState()
+    val selectedId by viewModel.selectedId.collectAsState()
+    val readMessageIds by viewModel.readMessageIds.collectAsState()
+    val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
+    val showArchive by viewModel.showArchive.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    var searchActive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            viewModel.refresh()
+            delay(POLL_INTERVAL_MS)
+        }
+    }
+
+    // Sub-screens stack on top of the inbox: detail view (per item) and
+    // archive list. They handle their own back navigation and return here.
+    // We forward `modifier` (which carries the outer Scaffold's bottom-bar
+    // inset) so sub-screen content doesn't draw under the bottom nav.
+    val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
+    if (selectedItem != null) {
+        DetailScreen(
+            item = selectedItem,
+            onBack = viewModel::closeDetail,
+            isArchived = selectedItem.id in archivedMessageIds,
+            onArchive = { viewModel.archive(selectedItem.id) },
+            onUnarchive = { viewModel.unarchive(selectedItem.id) },
+            modifier = modifier,
+        )
+        return
+    }
+    if (showArchive) {
+        ArchiveScreen(
+            items = items.filter { it.id in archivedMessageIds },
+            readMessageIds = readMessageIds,
+            onBack = viewModel::closeArchive,
+            onItemClick = { id -> viewModel.open(id) },
+            modifier = modifier,
+        )
+        return
+    }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            if (searchActive) {
+                InboxSearchAppBar(
+                    query = searchQuery,
+                    onQueryChange = viewModel::setSearch,
+                    onClose = {
+                        viewModel.clearSearch()
+                        searchActive = false
+                    },
+                )
+            } else {
+                TopAppBar(
+                    title = { Text("Inbox") },
+                    actions = {
+                        if (refreshing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
+                            )
+                        }
+                        IconButton(onClick = { searchActive = true }) {
+                            Icon(Icons.Filled.Search, contentDescription = "Search")
+                        }
+                        IconButton(onClick = { viewModel.refresh() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        }
+                        IconButton(onClick = viewModel::openArchive) {
+                            Icon(Icons.Filled.Archive, contentDescription = "Archive")
+                        }
+                    },
+                )
+            }
+        },
+    ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+            // Active inbox = items minus archived. Search filters this set
+            // by matching the trimmed query against title/subtitle/summary/
+            // searchText/senderName (case-insensitive substring match ג€” host
+            // metadata only; plugin-scoped content search is V1.5).
+            val activeItems = items.filter { it.id !in archivedMessageIds }
+            val filtered = remember(activeItems, searchQuery) {
+                if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+            }
+            when {
+                activeItems.isEmpty() -> Text(
+                    "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+                    modifier = Modifier.padding(top = 24.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+                    "No cards match \"$searchQuery\".",
+                    modifier = Modifier.padding(top = 24.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                else -> BucketedInboxList(
+                    items = filtered,
+                    readMessageIds = readMessageIds,
+                    onItemClick = viewModel::open,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InboxSearchAppBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    TopAppBar(
+        title = {
+            androidx.compose.material3.TextField(
+                value = query,
+                onValueChange = onQueryChange,
+                placeholder = { Text("Search inbox") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = androidx.compose.material3.TextFieldDefaults.colors(
+                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                ),
+            )
+        },
+        navigationIcon = {
+            IconButton(onClick = onClose) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close search")
+            }
+        },
+        actions = {
+            if (query.isNotEmpty()) {
+                IconButton(onClick = { onQueryChange("") }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                }
+            }
+        },
+    )
+}
+
+/**
+ * Case-insensitive substring match across visible row fields plus the
+ * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
+ * promised in ֲ§2 of the integration guide that searchText would be
+ * folded into host search ג€” this is where that promise gets paid.
+ */
+internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
+    val q = rawQuery.trim().lowercase()
+    if (q.isEmpty()) return true
+    if (item.senderName.lowercase().contains(q)) return true
+    item.hostPreview?.let { preview ->
+        if (preview.title.lowercase().contains(q)) return true
+        if (preview.subtitle?.lowercase()?.contains(q) == true) return true
+        if (preview.summary?.lowercase()?.contains(q) == true) return true
+        if (preview.searchText.any { it.lowercase().contains(q) }) return true
+    }
+    return false
+}
+
+/**
+ * Groups inbox items into Today / Yesterday / Earlier buckets and renders
+ * them with sticky-ish section headers. Bucket boundaries are computed
+ * against the device's current local date (the row timestamp is the server's
+ * `sent_at`, which is UTC; we convert per-row to local for bucketing).
+ */
+@Composable
+private fun BucketedInboxList(
+    items: List<InboxItem>,
+    readMessageIds: Set<String>,
+    onItemClick: (String) -> Unit,
+) {
+    val today = LocalDate.now()
+    val buckets = remember(items, today) {
+        items.groupBy { item ->
+            bucketFor(item.sentAt, today)
+        }.toSortedMap(compareBy { it.order })
+    }
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        buckets.forEach { (bucket, bucketItems) ->
+            item(key = "header-${bucket.name}") {
+                Text(
+                    text = bucket.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                )
+            }
+            items(bucketItems, key = { it.id }) { item ->
+                InboxRow(
+                    item = item,
+                    isRead = item.id in readMessageIds,
+                    onClick = { onItemClick(item.id) },
+                )
+            }
+        }
+    }
+}
+
+private enum class DateBucket(val order: Int, val label: String) {
+    Today(0, "Today"),
+    Yesterday(1, "Yesterday"),
+    Earlier(2, "Earlier"),
+}
+
+private fun bucketFor(isoSentAt: String, today: LocalDate): DateBucket {
+    // sent_at is server-canonical UTC; project to the device's local date
+    // for bucketing so "Today" matches what the user sees on their clock.
+    val date = runCatching {
+        Instant.parse(isoSentAt).atZone(ZoneId.systemDefault()).toLocalDate()
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"InboxScreen\\(|Bottom|NavigationBar|Senders|showArchive|NavHost|composable\" android -g \"*.kt\"" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"lowercase\\(\\)|uppercase\\(\\)\" android\\feature\\inbox android\\core android\\app -g \"*.kt\"" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "M11.5|host-side metadata search|search inbox|Search inbox|No cards match" . -g "*.md" -g "*.kt"' in D:\Projects\syncler
+ succeeded in 248ms:
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:88:        val method = init?.optString("method")?.uppercase()?.takeIf { it.isNotBlank() } ?: "GET"
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:319:    val q = rawQuery.trim().lowercase()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:321:    if (item.senderName.lowercase().contains(q)) return true
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:323:        if (preview.title.lowercase().contains(q)) return true
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:324:        if (preview.subtitle?.lowercase()?.contains(q) == true) return true
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:325:        if (preview.summary?.lowercase()?.contains(q) == true) return true
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:326:        if (preview.searchText.any { it.lowercase().contains(q) }) return true
+
+ succeeded in 250ms:
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:64:    val pairedSenders: StateFlow<List<PairedSender>> = pairedSenderStore.pairedSenders
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:137:    val pairedSenders by viewModel.pairedSenders.collectAsState()
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:151:        topBar = { TopAppBar(title = { Text("Senders") }) },
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:203:            if (pairedSenders.isNotEmpty()) {
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:207:                pairedSenders.forEach { sender ->
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:14: * Three top-level destinations exposed via the [androidx.compose.material3.NavigationBar].
+android\app\src\main\kotlin\app\syncler\android\ui\MainViewModel.kt:18:enum class TopLevelScreen { Inbox, Senders, Settings }
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:14:import androidx.compose.material3.NavigationBar
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:15:import androidx.compose.material3.NavigationBarItem
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:67:            NavigationBar {
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:68:                NavigationBarItem(
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:74:                NavigationBarItem(
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:75:                    selected = tab == TopLevelScreen.Senders,
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:76:                    onClick = { mainViewModel.select(TopLevelScreen.Senders) },
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:78:                    label = { Text("Senders") },
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:80:                NavigationBarItem(
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:90:            TopLevelScreen.Inbox -> InboxScreen(modifier = Modifier.padding(padding))
+android\app\src\main\kotlin\app\syncler\android\MainActivity.kt:91:            TopLevelScreen.Senders -> PairingScreen(
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:50:    val pairedSenders: StateFlow<List<PairedSender>>
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:71:    override val pairedSenders: StateFlow<List<PairedSender>> = cache.asStateFlow()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:79:            val pairings = pairedSenderStore.pairedSenders.value.associateBy { it.senderId }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:301: * Mirror of sdk-plugin/HostPreview. Senders embed this under the reserved
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:156:    private val _showArchive = MutableStateFlow(false)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:157:    val showArchive: StateFlow<Boolean> = _showArchive.asStateFlow()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:158:    fun openArchive() { _showArchive.value = true }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:159:    fun closeArchive() { _showArchive.value = false }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:164:fun InboxScreen(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:173:    val showArchive by viewModel.showArchive.collectAsState()
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:200:    if (showArchive) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:257:                    "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:436: * [DetailScreen] when the user taps a row. Senders fill in `hostPreview` via
+
+2026-05-21T04:46:29.685009Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:8: * Locks host-side metadata search to the contract documented in §2 of the
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:97:     * Host-side metadata search (M11.5). Substring match against
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:262:                    "No cards match \"$searchQuery\".",
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:288:                placeholder = { Text("Search inbox") },
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ exited 1 in 270ms:
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:8: * Locks host-side metadata search to the contract documented in §2 of the
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:97:     * Host-side metadata search (M11.5). Substring match against
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:262:                    "No cards match \"$searchQuery\".",
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:288:                placeholder = { Text("Search inbox") },
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\app\\src\\main\\kotlin\\app\\syncler\\android\\MainActivity.kt | Select-Object -First 140" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\app\\src\\main\\kotlin\\app\\syncler\\android\\ui\\MainViewModel.kt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path docs\\integration-guide.md | Select-Object -First 70" in D:\Projects\syncler
+ succeeded in 250ms:
+package app.syncler.android.ui
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import app.syncler.core.auth.AuthRepository
+import app.syncler.core.auth.Session
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+
+/**
+ * Three top-level destinations exposed via the [androidx.compose.material3.NavigationBar].
+ * Sub-screens (Pairing, Archive, Devices detail, etc.) are surfaced as overlays on the
+ * relevant tab by the tab's own ViewModel ג€” they don't appear in the bottom nav.
+ */
+enum class TopLevelScreen { Inbox, Senders, Settings }
+
+@HiltViewModel
+class MainViewModel @Inject constructor(
+    session: Session,
+    private val authRepository: AuthRepository,
+) : ViewModel() {
+    val isUnlocked = session.isUnlocked
+
+    private val _screen = MutableStateFlow(TopLevelScreen.Inbox)
+    val screen: StateFlow<TopLevelScreen> = _screen
+
+    fun select(tab: TopLevelScreen) { _screen.value = tab }
+
+    fun logout() {
+        viewModelScope.launch {
+            authRepository.logout()
+            _screen.value = TopLevelScreen.Inbox
+        }
+    }
+}
+
+ succeeded in 294ms:
+# Syncler integration guide
+
+You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes encrypted blobs to a user's phone, and a JavaScript plugin you wrote renders them and handles taps. **Read this end-to-end before writing code; it's ~6 pages.**
+
+Syncler does not know what your data looks like, what your UI says, or what your buttons do. Your payload, your plugin code, your callback endpoint ג€” Syncler just routes bytes.
+
+## 1. What you're building
+
+Two artifacts:
+
+1. A **JavaScript plugin** that runs in the Syncler Android app's WebView and renders the **detail view** of a card when the user taps it. The plugin defines buttons that POST back to your backend.
+2. **Backend code** that pushes a card to the user via the Syncler server, and an HTTP endpoint that receives the action callback.
+
+The Syncler inbox shows a *native* row for every message ג€” sender name, title, subtitle, summary, time. The host draws that row from structured metadata you embed in the payload (`hostPreview`, ֲ§2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
+
+## 2. Protocol
+
+### Payload (your backend ג†’ user device)
+
+Two parts: a reserved **`hostPreview`** block the platform renders natively as the inbox row, and the rest of the payload that your plugin's `render()` consumes for the detail view.
+
+```json
+{
+  "hostPreview": {
+    "title": "Something happened",
+    "subtitle": "Account A ג€¢ 12 minutes ago",
+    "summary": "Brief one-sentence context for the row.",
+    "searchText": ["account-a", "alert", "threshold"]
+  },
+  "item_id": "<your-internal-id>",
+  "body": "Details for the detail view, used by render()",
+  "action_label": "Acknowledge"
+}
+```
+
+That JSON is your `payload` argument to `client.send_to(...)`. The plugin's `render(payload)` receives the entire dict ג€” including the `hostPreview` block ג€” but it doesn't need to use it (the host already drew the row).
+
+**`hostPreview` contract** (validated by `client.send_to` ג€” invalid blocks raise at send time):
+
+| Field | Required | Type | Cap |
+|---|---|---|---|
+| `title` | yes | string | 80 UTF-8 bytes |
+| `subtitle` | no | string | 120 UTF-8 bytes |
+| `summary` | no | string | 240 UTF-8 bytes |
+| `searchText` | no | string[] | 16 entries ֳ— 64 UTF-8 bytes each |
+
+Total serialized `hostPreview` ג‰₪ 2048 UTF-8 bytes. Missing block ג†’ the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
+
+`searchText` is folded into the host's inbox search alongside title, subtitle, summary, and sender name. The host does a case-insensitive substring match ג€” populate this with the terms a user would type into the search box but that aren't part of the visible row (ticker symbols, ticket numbers, account references). Plugin-scoped *content* search (a search bar that runs against your backend) is V1.5.
+
+### Action callback (user ג†’ your backend)
+
+When the user taps an action button in your plugin, the plugin POSTs to your declared endpoint with whatever body your `onclick` handler builds:
+
+```
+POST https://your-app.example.com/api/action
+Content-Type: application/json
+
+{
+  "item_id": "...",
+  "acted_at": "2026-05-20T14:30:00Z"
+}
+```
+
+The platform does **not** inject `device_id` into the body in V1 ג€” see ֲ§7 for the full contract. Idempotency is your responsibility: dedupe by `item_id` (or a sender-generated identifier you echo back) because the platform may double-deliver under retry.
+
+## 3. Plugin code
+
+`src/plugin.ts`:
+
+
+ succeeded in 317ms:
+package app.syncler.android
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.syncler.android.ui.AuthScreen
+import app.syncler.android.ui.AuthViewModel
+import app.syncler.android.ui.DevicesViewModel
+import app.syncler.android.ui.MainViewModel
+import app.syncler.android.ui.SettingsScreen
+import app.syncler.android.ui.TopLevelScreen
+import app.syncler.feature.inbox.InboxScreen
+import app.syncler.feature.pairing.PairingScreen
+import dagger.hilt.android.AndroidEntryPoint
+
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
+    private val mainViewModel by viewModels<MainViewModel>()
+    private val authViewModel by viewModels<AuthViewModel>()
+    private val devicesViewModel by viewModels<DevicesViewModel>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme {
+                Surface {
+                    val isUnlocked by mainViewModel.isUnlocked.collectAsStateWithLifecycle(initialValue = false)
+                    if (!isUnlocked) {
+                        AuthScreen(viewModel = authViewModel)
+                    } else {
+                        UnlockedApp(
+                            mainViewModel = mainViewModel,
+                            devicesViewModel = devicesViewModel,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnlockedApp(
+    mainViewModel: MainViewModel,
+    devicesViewModel: DevicesViewModel,
+) {
+    val tab by mainViewModel.screen.collectAsStateWithLifecycle()
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = tab == TopLevelScreen.Inbox,
+                    onClick = { mainViewModel.select(TopLevelScreen.Inbox) },
+                    icon = { Icon(Icons.Filled.Email, contentDescription = null) },
+                    label = { Text("Inbox") },
+                )
+                NavigationBarItem(
+                    selected = tab == TopLevelScreen.Senders,
+                    onClick = { mainViewModel.select(TopLevelScreen.Senders) },
+                    icon = { Icon(Icons.Filled.Person, contentDescription = null) },
+                    label = { Text("Senders") },
+                )
+                NavigationBarItem(
+                    selected = tab == TopLevelScreen.Settings,
+                    onClick = { mainViewModel.select(TopLevelScreen.Settings) },
+                    icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                    label = { Text("Settings") },
+                )
+            }
+        },
+    ) { padding ->
+        when (tab) {
+            TopLevelScreen.Inbox -> InboxScreen(modifier = Modifier.padding(padding))
+            TopLevelScreen.Senders -> PairingScreen(
+                onDone = {},
+                modifier = Modifier.padding(padding),
+            )
+            TopLevelScreen.Settings -> SettingsScreen(
+                devicesViewModel = devicesViewModel,
+                onLogout = mainViewModel::logout,
+                modifier = Modifier.padding(padding),
+            )
+        }
+    }
+}
+
+codex
+The tab host confirms the state concern is real: `InboxScreen` is conditionally composed from `when (tab)`, so switching tabs disposes its local `remember` state while the Hilt `InboxViewModel` can retain `searchQuery`. I’m going to run the targeted unit test next and check whether there are any Compose/UI tests around this path.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "createComposeRule|InboxScreen|Search inbox|No cards match|matchesQuery|InboxSearch" android -g "*Test.kt" -g "*androidTest*.kt"' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Name' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command ".\\gradlew.bat :android:feature:inbox:testDebugUnitTest --tests app.syncler.feature.inbox.InboxSearchTest" in D:\Projects\syncler
+ succeeded in 243ms:
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:13:class InboxSearchTest {
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:39:        assertTrue(matchesQuery(it, ""))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:40:        assertTrue(matchesQuery(it, "   "))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:45:        assertTrue(matchesQuery(it, "millions"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:46:        assertTrue(matchesQuery(it, "MEGA"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:47:        assertFalse(matchesQuery(it, "powerball"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:56:        assertTrue(matchesQuery(it, "8kq"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:57:        assertTrue(matchesQuery(it, "threshold"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:65:        assertTrue(matchesQuery(it, "aapl"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:66:        assertTrue(matchesQuery(it, "buy"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:67:        assertFalse(matchesQuery(it, "sell"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:72:        assertTrue(matchesQuery(it, "pais"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:73:        assertTrue(matchesQuery(it, "LOTTO"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:85:        assertTrue(matchesQuery(it, "fallback"))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:86:        assertFalse(matchesQuery(it, "anything-else"))
+
+ succeeded in 244ms:
+.claude
+.triad
+android
+docs
+examples
+sdk-plugin
+sdk-python
+server
+.gitignore
+README.md
+
+2026-05-21T04:46:44.283545Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+.\gradlew.bat : The term '.\gradlew.bat' is not recognized as the name of a cmdlet, function, script file, or operable 
+program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+At line:2 char:1
++ .\gradlew.bat :android:feature:inbox:testDebugUnitTest --tests app.sy ...
++ ~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (.\gradlew.bat:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+
+ exited 1 in 286ms:
+.\gradlew.bat : The term '.\gradlew.bat' is not recognized as the name of a cmdlet, function, script file, or operable 
+program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+At line:2 char:1
++ .\gradlew.bat :android:feature:inbox:testDebugUnitTest --tests app.sy ...
++ ~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (.\gradlew.bat:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+
+codex
+There are no UI tests covering the search-mode state path, only the pure `matchesQuery` unit tests. The repo root doesn’t have a Gradle wrapper; I’ll retry from `android`, where this project likely keeps it.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Name' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content android'"\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxScreen.kt | ForEach-Object { if ("'$i -ge 164 -and $i -le 330) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content android'"\\app\\src\\main\\kotlin\\app\\syncler\\android\\MainActivity.kt | ForEach-Object { if ("'$i -ge 56 -and $i -le 96) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+ succeeded in 256ms:
+.gradle
+.kotlin
+app
+build
+core
+feature
+gradle
+.gitignore
+build.gradle.kts
+gradle.properties
+gradlew
+gradlew.bat
+local.properties
+settings.gradle.kts
+
+ succeeded in 292ms:
+  56:     }
+  57: }
+  58: 
+  59: @Composable
+  60: private fun UnlockedApp(
+  61:     mainViewModel: MainViewModel,
+  62:     devicesViewModel: DevicesViewModel,
+  63: ) {
+  64:     val tab by mainViewModel.screen.collectAsStateWithLifecycle()
+  65:     Scaffold(
+  66:         bottomBar = {
+  67:             NavigationBar {
+  68:                 NavigationBarItem(
+  69:                     selected = tab == TopLevelScreen.Inbox,
+  70:                     onClick = { mainViewModel.select(TopLevelScreen.Inbox) },
+  71:                     icon = { Icon(Icons.Filled.Email, contentDescription = null) },
+  72:                     label = { Text("Inbox") },
+  73:                 )
+  74:                 NavigationBarItem(
+  75:                     selected = tab == TopLevelScreen.Senders,
+  76:                     onClick = { mainViewModel.select(TopLevelScreen.Senders) },
+  77:                     icon = { Icon(Icons.Filled.Person, contentDescription = null) },
+  78:                     label = { Text("Senders") },
+  79:                 )
+  80:                 NavigationBarItem(
+  81:                     selected = tab == TopLevelScreen.Settings,
+  82:                     onClick = { mainViewModel.select(TopLevelScreen.Settings) },
+  83:                     icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+  84:                     label = { Text("Settings") },
+  85:                 )
+  86:             }
+  87:         },
+  88:     ) { padding ->
+  89:         when (tab) {
+  90:             TopLevelScreen.Inbox -> InboxScreen(modifier = Modifier.padding(padding))
+  91:             TopLevelScreen.Senders -> PairingScreen(
+  92:                 onDone = {},
+  93:                 modifier = Modifier.padding(padding),
+  94:             )
+  95:             TopLevelScreen.Settings -> SettingsScreen(
+  96:                 devicesViewModel = devicesViewModel,
+
+ succeeded in 337ms:
+ 164: fun InboxScreen(
+ 165:     modifier: Modifier = Modifier,
+ 166:     viewModel: InboxViewModel = hiltViewModel(),
+ 167: ) {
+ 168:     val items by viewModel.items.collectAsState()
+ 169:     val refreshing by viewModel.refreshing.collectAsState()
+ 170:     val selectedId by viewModel.selectedId.collectAsState()
+ 171:     val readMessageIds by viewModel.readMessageIds.collectAsState()
+ 172:     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
+ 173:     val showArchive by viewModel.showArchive.collectAsState()
+ 174:     val searchQuery by viewModel.searchQuery.collectAsState()
+ 175:     var searchActive by remember { mutableStateOf(false) }
+ 176: 
+ 177:     LaunchedEffect(Unit) {
+ 178:         while (true) {
+ 179:             viewModel.refresh()
+ 180:             delay(POLL_INTERVAL_MS)
+ 181:         }
+ 182:     }
+ 183: 
+ 184:     // Sub-screens stack on top of the inbox: detail view (per item) and
+ 185:     // archive list. They handle their own back navigation and return here.
+ 186:     // We forward `modifier` (which carries the outer Scaffold's bottom-bar
+ 187:     // inset) so sub-screen content doesn't draw under the bottom nav.
+ 188:     val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
+ 189:     if (selectedItem != null) {
+ 190:         DetailScreen(
+ 191:             item = selectedItem,
+ 192:             onBack = viewModel::closeDetail,
+ 193:             isArchived = selectedItem.id in archivedMessageIds,
+ 194:             onArchive = { viewModel.archive(selectedItem.id) },
+ 195:             onUnarchive = { viewModel.unarchive(selectedItem.id) },
+ 196:             modifier = modifier,
+ 197:         )
+ 198:         return
+ 199:     }
+ 200:     if (showArchive) {
+ 201:         ArchiveScreen(
+ 202:             items = items.filter { it.id in archivedMessageIds },
+ 203:             readMessageIds = readMessageIds,
+ 204:             onBack = viewModel::closeArchive,
+ 205:             onItemClick = { id -> viewModel.open(id) },
+ 206:             modifier = modifier,
+ 207:         )
+ 208:         return
+ 209:     }
+ 210: 
+ 211:     Scaffold(
+ 212:         modifier = modifier,
+ 213:         topBar = {
+ 214:             if (searchActive) {
+ 215:                 InboxSearchAppBar(
+ 216:                     query = searchQuery,
+ 217:                     onQueryChange = viewModel::setSearch,
+ 218:                     onClose = {
+ 219:                         viewModel.clearSearch()
+ 220:                         searchActive = false
+ 221:                     },
+ 222:                 )
+ 223:             } else {
+ 224:                 TopAppBar(
+ 225:                     title = { Text("Inbox") },
+ 226:                     actions = {
+ 227:                         if (refreshing) {
+ 228:                             CircularProgressIndicator(
+ 229:                                 modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
+ 230:                             )
+ 231:                         }
+ 232:                         IconButton(onClick = { searchActive = true }) {
+ 233:                             Icon(Icons.Filled.Search, contentDescription = "Search")
+ 234:                         }
+ 235:                         IconButton(onClick = { viewModel.refresh() }) {
+ 236:                             Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+ 237:                         }
+ 238:                         IconButton(onClick = viewModel::openArchive) {
+ 239:                             Icon(Icons.Filled.Archive, contentDescription = "Archive")
+ 240:                         }
+ 241:                     },
+ 242:                 )
+ 243:             }
+ 244:         },
+ 245:     ) { padding ->
+ 246:         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+ 247:             // Active inbox = items minus archived. Search filters this set
+ 248:             // by matching the trimmed query against title/subtitle/summary/
+ 249:             // searchText/senderName (case-insensitive substring match ג€” host
+ 250:             // metadata only; plugin-scoped content search is V1.5).
+ 251:             val activeItems = items.filter { it.id !in archivedMessageIds }
+ 252:             val filtered = remember(activeItems, searchQuery) {
+ 253:                 if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
+ 254:             }
+ 255:             when {
+ 256:                 activeItems.isEmpty() -> Text(
+ 257:                     "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+ 258:                     modifier = Modifier.padding(top = 24.dp),
+ 259:                     style = MaterialTheme.typography.bodyMedium,
+ 260:                 )
+ 261:                 searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+ 262:                     "No cards match \"$searchQuery\".",
+ 263:                     modifier = Modifier.padding(top = 24.dp),
+ 264:                     style = MaterialTheme.typography.bodyMedium,
+ 265:                 )
+ 266:                 else -> BucketedInboxList(
+ 267:                     items = filtered,
+ 268:                     readMessageIds = readMessageIds,
+ 269:                     onItemClick = viewModel::open,
+ 270:                 )
+ 271:             }
+ 272:         }
+ 273:     }
+ 274: }
+ 275: 
+ 276: @OptIn(ExperimentalMaterial3Api::class)
+ 277: @Composable
+ 278: private fun InboxSearchAppBar(
+ 279:     query: String,
+ 280:     onQueryChange: (String) -> Unit,
+ 281:     onClose: () -> Unit,
+ 282: ) {
+ 283:     TopAppBar(
+ 284:         title = {
+ 285:             androidx.compose.material3.TextField(
+ 286:                 value = query,
+ 287:                 onValueChange = onQueryChange,
+ 288:                 placeholder = { Text("Search inbox") },
+ 289:                 singleLine = true,
+ 290:                 modifier = Modifier.fillMaxWidth(),
+ 291:                 colors = androidx.compose.material3.TextFieldDefaults.colors(
+ 292:                     focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+ 293:                     unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+ 294:                 ),
+ 295:             )
+ 296:         },
+ 297:         navigationIcon = {
+ 298:             IconButton(onClick = onClose) {
+ 299:                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close search")
+ 300:             }
+ 301:         },
+ 302:         actions = {
+ 303:             if (query.isNotEmpty()) {
+ 304:                 IconButton(onClick = { onQueryChange("") }) {
+ 305:                     Icon(Icons.Filled.Close, contentDescription = "Clear search")
+ 306:                 }
+ 307:             }
+ 308:         },
+ 309:     )
+ 310: }
+ 311: 
+ 312: /**
+ 313:  * Case-insensitive substring match across visible row fields plus the
+ 314:  * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
+ 315:  * promised in ֲ§2 of the integration guide that searchText would be
+ 316:  * folded into host search ג€” this is where that promise gets paid.
+ 317:  */
+ 318: internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
+ 319:     val q = rawQuery.trim().lowercase()
+ 320:     if (q.isEmpty()) return true
+ 321:     if (item.senderName.lowercase().contains(q)) return true
+ 322:     item.hostPreview?.let { preview ->
+ 323:         if (preview.title.lowercase().contains(q)) return true
+ 324:         if (preview.subtitle?.lowercase()?.contains(q) == true) return true
+ 325:         if (preview.summary?.lowercase()?.contains(q) == true) return true
+ 326:         if (preview.searchText.any { it.lowercase().contains(q) }) return true
+ 327:     }
+ 328:     return false
+ 329: }
+ 330: 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command ".\\gradlew.bat :feature:inbox:testDebugUnitTest --tests app.syncler.feature.inbox.InboxSearchTest" in D:\Projects\syncler\android
+2026-05-21T04:46:56.285443Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck (Access is denied)
+	at java.base/java.io.IoOverNioFileSystem.convertNioToIoExceptionInStreams(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamsUsingNio0(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamUsingNio(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.newFileChannel(Unknown Source)
+	... 5 more
+
+ exited 1 in 390ms:
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck (Access is denied)
+	at java.base/java.io.IoOverNioFileSystem.convertNioToIoExceptionInStreams(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamsUsingNio0(Unknown Source)
+	at java.base/java.io.IoOverNioFileSystem.initializeStreamUsingNio(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at java.base/java.io.RandomAccessFile.<init>(Unknown Source)
+	at org.gradle.wrapper.GradleWrapperMain.main(SourceFile:67)
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Dima\.gradle\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1-bin.zip.lck
+	at java.base/sun.nio.fs.WindowsException.translateToIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsException.rethrowAsIOException(Unknown Source)
+	at java.base/sun.nio.fs.WindowsFileSystemProvider.newFileChannel(Unknown Source)
+	... 5 more
+
+codex
+The targeted Gradle run is blocked by an access-denied lock file under `C:\Users\Dima\.gradle\wrapper\dists`, so I can’t verify tests in this sandbox. I’ve got enough for the main review finding; I’m checking the commit diff now to make sure I’m not missing a related state hook or doc contract change.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline HEAD' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --name-only --format=fuller HEAD' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show -- android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxSearchTest.kt docs/integration-guide.md' in D:\Projects\syncler
+ succeeded in 263ms:
+8c6abc9 M11.5: host-side metadata search
+ .../app/syncler/feature/inbox/InboxScreen.kt       | 142 +++++++++++++++++----
+ .../app/syncler/feature/inbox/InboxSearchTest.kt   |  88 +++++++++++++
+ docs/integration-guide.md                          |   2 +-
+ 3 files changed, 207 insertions(+), 25 deletions(-)
+
+ succeeded in 244ms:
+commit 8c6abc9d304618502010c155cf026bcf853d690a
+Author: Dima <ddeynega@gmail.com>
+Date:   Thu May 21 07:45:31 2026 +0300
+
+    M11.5: host-side metadata search
+    
+    The last UX piece the triad locked in consultation 35: a search bar in
+    the inbox that filters by host metadata. Host owns this because the
+    server is content-blind; plugin-scoped content search (where the
+    plugin's own backend handles the query) is V1.5.
+    
+    InboxScreen
+    - Top-app-bar gets a Search icon. Tapping it enters search mode: the
+      app bar swaps title for a TextField, navigation icon becomes a Back
+      arrow, actions include a Clear (X) button when the query is non-empty.
+    - Inbox list filters to items where the trimmed lowercase query is a
+      substring of any of: senderName, hostPreview.title, .subtitle,
+      .summary, or any entry in hostPreview.searchText.
+    - Empty-results state: "No cards match \"$query\"." Filtered set still
+      respects date bucketing, read state, and archive filter.
+    
+    InboxViewModel
+    - Adds searchQuery: StateFlow<String> and setSearch / clearSearch
+      methods. Search state lives in the ViewModel (survives tab switches
+      and config changes; cleared explicitly via Back from the search bar).
+    
+    matchesQuery() helper
+    - Pure function (no Compose / no Android deps). Internal so the inbox
+      test module can pressure-test it directly without UI fixtures.
+    - Case-insensitive substring match on each field; blank query returns
+      true (no-op). hostPreview.searchText tokens participate per the
+      contract documented in integration-guide.md §2.
+    
+    Docs
+    - §2 wording updated: searchText "is folded into the host's inbox
+      search" (active behavior) instead of "reserved metadata the host
+      will index (planned)" (M11.4 placeholder copy).
+    - Notes plugin-scoped content search is V1.5.
+    
+    Tests
+    - 6 new InboxSearchTest cases: blank query no-op, title substring,
+      subtitle/summary participation, searchText tokens, sender-name
+      fallback, hostPreview-less item still findable by sender.
+    - App APK builds. 22 inbox unit tests pass (16 HostPreviewParser + 6
+      search). Server unchanged in this commit.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt b/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
+index f5825ee..367b667 100644
+--- a/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
++++ b/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
+@@ -21,7 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.ArrowBack
+ import androidx.compose.material.icons.filled.Archive
++import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.Refresh
++import androidx.compose.material.icons.filled.Search
+ import androidx.compose.material.icons.filled.Unarchive
+ import androidx.compose.material3.Button
+ import androidx.compose.material3.Card
+@@ -38,7 +40,9 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.text.font.FontFamily
+@@ -89,6 +93,17 @@ class InboxViewModel @Inject constructor(
+     private val _selectedId = MutableStateFlow<String?>(null)
+     val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+ 
++    /**
++     * Host-side metadata search (M11.5). Substring match against
++     * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
++     * entirely client-side — the server is content-blind. Plugin-scoped
++     * content search is V1.5 (per the consultation 35 federated-search plan).
++     */
++    private val _searchQuery = MutableStateFlow("")
++    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
++    fun setSearch(q: String) { _searchQuery.value = q }
++    fun clearSearch() { _searchQuery.value = "" }
++
+     init {
+         // Pull cross-device state, then retry any push that failed previously
+         // (network blip, 409 conflict that couldn't resolve in one retry,
+@@ -156,6 +171,8 @@ fun InboxScreen(
+     val readMessageIds by viewModel.readMessageIds.collectAsState()
+     val archivedMessageIds by viewModel.archivedMessageIds.collectAsState()
+     val showArchive by viewModel.showArchive.collectAsState()
++    val searchQuery by viewModel.searchQuery.collectAsState()
++    var searchActive by remember { mutableStateOf(false) }
+ 
+     LaunchedEffect(Unit) {
+         while (true) {
+@@ -194,38 +211,60 @@ fun InboxScreen(
+     Scaffold(
+         modifier = modifier,
+         topBar = {
+-            TopAppBar(
+-                title = { Text("Inbox") },
+-                actions = {
+-                    if (refreshing) {
+-                        CircularProgressIndicator(
+-                            modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
+-                        )
+-                    }
+-                    IconButton(onClick = { viewModel.refresh() }) {
+-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+-                    }
+-                    IconButton(onClick = viewModel::openArchive) {
+-                        Icon(Icons.Filled.Archive, contentDescription = "Archive")
+-                    }
+-                },
+-            )
++            if (searchActive) {
++                InboxSearchAppBar(
++                    query = searchQuery,
++                    onQueryChange = viewModel::setSearch,
++                    onClose = {
++                        viewModel.clearSearch()
++                        searchActive = false
++                    },
++                )
++            } else {
++                TopAppBar(
++                    title = { Text("Inbox") },
++                    actions = {
++                        if (refreshing) {
++                            CircularProgressIndicator(
++                                modifier = Modifier.height(20.dp).padding(horizontal = 12.dp),
++                            )
++                        }
++                        IconButton(onClick = { searchActive = true }) {
++                            Icon(Icons.Filled.Search, contentDescription = "Search")
++                        }
++                        IconButton(onClick = { viewModel.refresh() }) {
++                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
++                        }
++                        IconButton(onClick = viewModel::openArchive) {
++                            Icon(Icons.Filled.Archive, contentDescription = "Archive")
++                        }
++                    },
++                )
++            }
+         },
+     ) { padding ->
+         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+-            // The active inbox excludes archived messages — they live in the
+-            // archive sub-screen and don't add to the unread badge / clutter
+-            // the active feed.
++            // Active inbox = items minus archived. Search filters this set
++            // by matching the trimmed query against title/subtitle/summary/
++            // searchText/senderName (case-insensitive substring match — host
++            // metadata only; plugin-scoped content search is V1.5).
+             val activeItems = items.filter { it.id !in archivedMessageIds }
+-            if (activeItems.isEmpty()) {
+-                Text(
++            val filtered = remember(activeItems, searchQuery) {
++                if (searchQuery.isBlank()) activeItems else activeItems.filter { matchesQuery(it, searchQuery) }
++            }
++            when {
++                activeItems.isEmpty() -> Text(
+                     "No cards yet. Pair a sender from the Senders tab and they can push to you.",
+                     modifier = Modifier.padding(top = 24.dp),
+                     style = MaterialTheme.typography.bodyMedium,
+                 )
+-            } else {
+-                BucketedInboxList(
+-                    items = activeItems,
++                searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
++                    "No cards match \"$searchQuery\".",
++                    modifier = Modifier.padding(top = 24.dp),
++                    style = MaterialTheme.typography.bodyMedium,
++                )
++                else -> BucketedInboxList(
++                    items = filtered,
+                     readMessageIds = readMessageIds,
+                     onItemClick = viewModel::open,
+                 )
+@@ -234,6 +273,61 @@ fun InboxScreen(
+     }
+ }
+ 
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++private fun InboxSearchAppBar(
++    query: String,
++    onQueryChange: (String) -> Unit,
++    onClose: () -> Unit,
++) {
++    TopAppBar(
++        title = {
++            androidx.compose.material3.TextField(
++                value = query,
++                onValueChange = onQueryChange,
++                placeholder = { Text("Search inbox") },
++                singleLine = true,
++                modifier = Modifier.fillMaxWidth(),
++                colors = androidx.compose.material3.TextFieldDefaults.colors(
++                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
++                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
++                ),
++            )
++        },
++        navigationIcon = {
++            IconButton(onClick = onClose) {
++                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close search")
++            }
++        },
++        actions = {
++            if (query.isNotEmpty()) {
++                IconButton(onClick = { onQueryChange("") }) {
++                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
++                }
++            }
++        },
++    )
++}
++
++/**
++ * Case-insensitive substring match across visible row fields plus the
++ * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
++ * promised in §2 of the integration guide that searchText would be
++ * folded into host search — this is where that promise gets paid.
++ */
++internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
++    val q = rawQuery.trim().lowercase()
++    if (q.isEmpty()) return true
++    if (item.senderName.lowercase().contains(q)) return true
++    item.hostPreview?.let { preview ->
++        if (preview.title.lowercase().contains(q)) return true
++        if (preview.subtitle?.lowercase()?.contains(q) == true) return true
++        if (preview.summary?.lowercase()?.contains(q) == true) return true
++        if (preview.searchText.any { it.lowercase().contains(q) }) return true
++    }
++    return false
++}
++
+ /**
+  * Groups inbox items into Today / Yesterday / Earlier buckets and renders
+  * them with sticky-ish section headers. Bucket boundaries are computed
+diff --git a/android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxSearchTest.kt b/android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxSearchTest.kt
+new file mode 100644
+index 0000000..3653449
+--- /dev/null
++++ b/android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxSearchTest.kt
+@@ -0,0 +1,88 @@
++package app.syncler.feature.inbox
++
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * Locks host-side metadata search to the contract documented in §2 of the
++ * integration guide: substring match across title / subtitle / summary /
++ * searchText / senderName, case-insensitive, blank query is a no-op
++ * (returns true for all items so the UI shows the unfiltered set).
++ */
++class InboxSearchTest {
++
++    private fun item(
++        sender: String = "Sender",
++        title: String = "Title",
++        subtitle: String? = null,
++        summary: String? = null,
++        searchText: List<String> = emptyList(),
++    ) = InboxItem(
++        id = "id-1",
++        senderId = "s",
++        senderName = sender,
++        pluginId = "p",
++        pluginIdentifier = "com.x",
++        payloadJson = "{}",
++        sentAt = "2026-05-21T00:00:00Z",
++        expiresAt = "2026-06-20T00:00:00Z",
++        bundleJs = null,
++        declaredEndpoints = emptyList(),
++        bundleHash = null,
++        revocationReason = null,
++        hostPreview = HostPreview(title, subtitle, summary, searchText),
++    )
++
++    @Test fun `blank query matches everything`() {
++        val it = item(title = "Anything")
++        assertTrue(matchesQuery(it, ""))
++        assertTrue(matchesQuery(it, "   "))
++    }
++
++    @Test fun `title substring match`() {
++        val it = item(title = "Mega Millions draw results")
++        assertTrue(matchesQuery(it, "millions"))
++        assertTrue(matchesQuery(it, "MEGA"))
++        assertFalse(matchesQuery(it, "powerball"))
++    }
++
++    @Test fun `subtitle and summary participate`() {
++        val it = item(
++            title = "Alert",
++            subtitle = "Account 8KQ-193",
++            summary = "Threshold exceeded by 12 percent",
++        )
++        assertTrue(matchesQuery(it, "8kq"))
++        assertTrue(matchesQuery(it, "threshold"))
++    }
++
++    @Test fun `searchText tokens participate`() {
++        val it = item(
++            title = "Alert",
++            searchText = listOf("ticker:AAPL", "trade", "buy"),
++        )
++        assertTrue(matchesQuery(it, "aapl"))
++        assertTrue(matchesQuery(it, "buy"))
++        assertFalse(matchesQuery(it, "sell"))
++    }
++
++    @Test fun `sender name participates`() {
++        val it = item(sender = "Pais Lotto")
++        assertTrue(matchesQuery(it, "pais"))
++        assertTrue(matchesQuery(it, "LOTTO"))
++    }
++
++    @Test fun `fallback items without hostPreview still searchable by sender`() {
++        val it = InboxItem(
++            id = "x", senderId = "s", senderName = "FallbackBot",
++            pluginId = "p", pluginIdentifier = "com.x", payloadJson = "{}",
++            sentAt = "2026-05-21T00:00:00Z", expiresAt = "2026-06-20T00:00:00Z",
++            bundleJs = null, declaredEndpoints = emptyList(),
++            bundleHash = null, revocationReason = null,
++            hostPreview = null,
++        )
++        assertTrue(matchesQuery(it, "fallback"))
++        assertFalse(matchesQuery(it, "anything-else"))
++    }
++}
+diff --git a/docs/integration-guide.md b/docs/integration-guide.md
+index a370b76..95b733c 100644
+--- a/docs/integration-guide.md
++++ b/docs/integration-guide.md
+@@ -46,7 +46,7 @@ That JSON is your `payload` argument to `client.send_to(...)`. The plugin's `ren
+ 
+ Total serialized `hostPreview` ≤ 2048 UTF-8 bytes. Missing block → the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
+ 
+-`searchText` is reserved metadata the host will index for global inbox search (planned). Even though search isn't wired yet in V1, populate this now — your messages become searchable as soon as the feature ships, without re-publishing. Use it for domain-specific terms users would search by but that aren't visible in the row (e.g., ticker symbols, ticket numbers, account references).
++`searchText` is folded into the host's inbox search alongside title, subtitle, summary, and sender name. The host does a case-insensitive substring match — populate this with the terms a user would type into the search box but that aren't part of the visible row (ticker symbols, ticket numbers, account references). Plugin-scoped *content* search (a search bar that runs against your backend) is V1.5.
+ 
+ ### Action callback (user → your backend)
+ 
+
+ succeeded in 245ms:
+commit 8c6abc9d304618502010c155cf026bcf853d690a
+Author:     Dima <ddeynega@gmail.com>
+AuthorDate: Thu May 21 07:45:31 2026 +0300
+Commit:     Dima <ddeynega@gmail.com>
+CommitDate: Thu May 21 07:45:31 2026 +0300
+
+    M11.5: host-side metadata search
+    
+    The last UX piece the triad locked in consultation 35: a search bar in
+    the inbox that filters by host metadata. Host owns this because the
+    server is content-blind; plugin-scoped content search (where the
+    plugin's own backend handles the query) is V1.5.
+    
+    InboxScreen
+    - Top-app-bar gets a Search icon. Tapping it enters search mode: the
+      app bar swaps title for a TextField, navigation icon becomes a Back
+      arrow, actions include a Clear (X) button when the query is non-empty.
+    - Inbox list filters to items where the trimmed lowercase query is a
+      substring of any of: senderName, hostPreview.title, .subtitle,
+      .summary, or any entry in hostPreview.searchText.
+    - Empty-results state: "No cards match \"$query\"." Filtered set still
+      respects date bucketing, read state, and archive filter.
+    
+    InboxViewModel
+    - Adds searchQuery: StateFlow<String> and setSearch / clearSearch
+      methods. Search state lives in the ViewModel (survives tab switches
+      and config changes; cleared explicitly via Back from the search bar).
+    
+    matchesQuery() helper
+    - Pure function (no Compose / no Android deps). Internal so the inbox
+      test module can pressure-test it directly without UI fixtures.
+    - Case-insensitive substring match on each field; blank query returns
+      true (no-op). hostPreview.searchText tokens participate per the
+      contract documented in integration-guide.md §2.
+    
+    Docs
+    - §2 wording updated: searchText "is folded into the host's inbox
+      search" (active behavior) instead of "reserved metadata the host
+      will index (planned)" (M11.4 placeholder copy).
+    - Notes plugin-scoped content search is V1.5.
+    
+    Tests
+    - 6 new InboxSearchTest cases: blank query no-op, title substring,
+      subtitle/summary participation, searchText tokens, sender-name
+      fallback, hostPreview-less item still findable by sender.
+    - App APK builds. 22 inbox unit tests pass (16 HostPreviewParser + 6
+      search). Server unchanged in this commit.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt
+android/feature/inbox/src/test/kotlin/app/syncler/feature/inbox/InboxSearchTest.kt
+docs/integration-guide.md
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"BackHandler\" android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxScreen.kt" in D:\Projects\syncler
+ succeeded in 244ms:
+6:import androidx.activity.compose.BackHandler
+405:    BackHandler(onBack = onBack)
+552:    BackHandler(onBack = onBack)
+
+codex
+**Findings**
+
+- **Needs fix before greenlight:** `searchQuery` persists in `InboxViewModel`, but `searchActive` is local `remember` state in [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:175). Since `MainActivity` conditionally composes the tab content in [MainActivity.kt](D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:89), switching to Senders/Settings or rotating the device can recreate `InboxScreen` with `searchActive = false` while the list remains filtered by the old query. That leaves a hidden active filter. Hoist `searchActive` into the VM, derive it from `searchQuery.isNotBlank()`, or clear the query when leaving search mode/screen.
+
+- **UX polish worth batching with that fix:** opening search does not request focus for the `TextField` in [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:285), so the keyboard likely does not appear until the user taps the field. Add a `FocusRequester` plus `LaunchedEffect`, and consider a `BackHandler` while search is active so Android back closes search consistently with the top-bar back arrow.
+
+**Notes**
+
+`lowercase()` is fine here; Kotlin’s no-arg `String.lowercase()` is already locale-invariant, so this is not the Java/Turkish-locale footgun. `searchText` substring matching also matches the integration guide contract; I would not switch it to equality for V1.
+
+I could not run the targeted Gradle test because the Gradle wrapper hit `Access is denied` on a `.gradle` wrapper lock file under `C:\Users\Dima\.gradle`.
+tokens used
+42,582

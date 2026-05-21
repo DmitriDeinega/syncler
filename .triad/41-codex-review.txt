@@ -1,0 +1,11 @@
+**Findings**
+
+- **Needs fix before greenlight:** `searchQuery` persists in `InboxViewModel`, but `searchActive` is local `remember` state in [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:175). Since `MainActivity` conditionally composes the tab content in [MainActivity.kt](D:/Projects/syncler/android/app/src/main/kotlin/app/syncler/android/MainActivity.kt:89), switching to Senders/Settings or rotating the device can recreate `InboxScreen` with `searchActive = false` while the list remains filtered by the old query. That leaves a hidden active filter. Hoist `searchActive` into the VM, derive it from `searchQuery.isNotBlank()`, or clear the query when leaving search mode/screen.
+
+- **UX polish worth batching with that fix:** opening search does not request focus for the `TextField` in [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:285), so the keyboard likely does not appear until the user taps the field. Add a `FocusRequester` plus `LaunchedEffect`, and consider a `BackHandler` while search is active so Android back closes search consistently with the top-bar back arrow.
+
+**Notes**
+
+`lowercase()` is fine here; Kotlin’s no-arg `String.lowercase()` is already locale-invariant, so this is not the Java/Turkish-locale footgun. `searchText` substring matching also matches the integration guide contract; I would not switch it to equality for V1.
+
+I could not run the targeted Gradle test because the Gradle wrapper hit `Access is denied` on a `.gradle` wrapper lock file under `C:\Users\Dima\.gradle`.
