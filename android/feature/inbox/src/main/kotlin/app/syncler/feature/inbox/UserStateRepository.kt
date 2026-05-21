@@ -123,6 +123,19 @@ class UserStateRepository @Inject constructor(
         markDirtyAndPush()
     }
 
+    /** Bulk archive for multi-select. Single mutation + single push. */
+    suspend fun markManyArchived(messageIds: Collection<String>) {
+        if (messageIds.isEmpty()) return
+        val now = Instant.now(clock).toString()
+        val ids = messageIds.toSet()
+        mutateLocal { current ->
+            val keep = current.archivedMessages.filterNot { it.messageId in ids }
+            val newEntries = ids.map { ArchivedMessageEntry(it, now) }
+            current.copy(archivedMessages = keep + newEntries)
+        }
+        markDirtyAndPush()
+    }
+
     /**
      * Removes the message from the archive set, returning it to the active
      * inbox. Note: this is a local "forget the archive mark" operation, not
