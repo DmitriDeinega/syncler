@@ -288,6 +288,21 @@ class UserStateRepository @Inject constructor(
         _state.value = StateMerger.merge(local = _state.value, remote = remoteState)
         persist(_state.value, remoteVersion = pull.stateVersion)
 
+        // Re-check the future-schema refusal AFTER the merge. The merger
+        // takes maxOf(local.schema, remote.schema), so a remote blob from
+        // a newer client could pull this older client's local state up to
+        // a schema this client doesn't fully understand. Pushing it back
+        // would clobber fields this client can't see. Surface as a
+        // permanent failure for this push attempt; the dirty flag survives
+        // (Codex consultation 52 YELLOW).
+        if (_state.value.schemaVersion > EncryptedUserState.SCHEMA_CURRENT) {
+            Timber.tag(TAG).w(
+                "post-merge schema_version %d > client SCHEMA_CURRENT %d; refusing retry",
+                _state.value.schemaVersion, EncryptedUserState.SCHEMA_CURRENT,
+            )
+            throw IllegalStateException("future schema after conflict merge; refusing to push")
+        }
+
         val retry = doPut(expectedVersion = pull.stateVersion, masterKey = masterKey)
         if (retry.isSuccessful) {
             retry.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
