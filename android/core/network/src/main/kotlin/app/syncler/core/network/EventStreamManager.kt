@@ -190,6 +190,15 @@ class EventStreamManager @Inject constructor(
         reconnectJob = scope.launch {
             delay(delayMs)
             synchronized(lifecycleLock) {
+                // Retire ourselves before opening the new stream. Otherwise
+                // the retry coroutine's Job remains isActive while we call
+                // openStreamLocked, and if the just-opened stream fails
+                // synchronously its onFailure callback would hit the
+                // `reconnectJob?.isActive == true` guard above and silently
+                // skip scheduling the next retry — leaving the user with
+                // `wantRunning=true, current=null, no reconnect` until a
+                // lifecycle event. (Codex consultation 59 RED.)
+                reconnectJob = null
                 if (wantRunning) openStreamLocked()
             }
         }
