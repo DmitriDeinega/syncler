@@ -108,12 +108,15 @@ interface PairedSenderStore {
  * already has an active pairing tombstones the old one in the same
  * atomic write. `bySenderId()` returns the newest active pairing.
  *
- * **First-launch migration.** On first construction after the SCHEMA_V4
- * bump, [migrateLegacyEntries] reads the legacy local prefs (where
- * pre-Phase-1 pairings lived) and pushes them up into the synced state
- * with `source = "migration"`. A one-shot flag in the local prefs
- * prevents re-running. Existing installs keep their pairings; new
- * installs get an empty state.
+ * **Phase 1 legacy migration.** Triggered explicitly by
+ * `AuthRepository.login` (NOT from this class's init, despite earlier
+ * iterations — see Codex consultation 54 RED #2 for why). The caller
+ * passes a set of `pairingId`s the server confirms belong to the
+ * currently-authenticated user; this store imports legacy local
+ * entries (from the pre-Phase-1 [EncryptedSharedPreferences] file)
+ * only when their `pairingId` is in that ownership set. The
+ * synced [EncryptedUserState.phase1MigrationDoneAt] field is the
+ * per-user idempotency gate — once set, [migratePhase1Owned] no-ops.
  */
 @Singleton
 class SyncedPairedSenderStore @Inject constructor(

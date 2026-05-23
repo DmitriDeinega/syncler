@@ -141,6 +141,88 @@ class SyncedPairedSenderStoreLogicTest {
         assertEquals(1, entries.size)
         assertEquals("p1", entries.single().pairingId)
     }
+
+    // ---------- Phase 1 fix-up round 2: ownership-proof migration ----------
+
+    @Test
+    fun `migratePhase1Owned sets the flag when no legacy entries exist`() = runTest {
+        // Empty-legacy edge case: no entries to import, but we MUST still
+        // set phase1MigrationDoneAt so subsequent logins short-circuit.
+        val mutator = FakeUserStateMutator()
+        val store = TestPairedSenderStore(mutator)
+
+        store.migratePhase1Owned(ownedPairingIds = emptySet(), legacy = emptyList())
+
+        assertNotNull(mutator.current().phase1MigrationDoneAt)
+        assertEquals(emptyList<PairedSenderEntry>(), mutator.current().pairedSenders)
+    }
+
+    @Test
+    fun `migratePhase1Owned imports only legacy entries whose pairingId is server-owned`() = runTest {
+        // Multi-user-safety: legacy prefs on the device contain entries
+        // for two pairingIds, but only one of them is in the
+        // currently-authenticated user's server-side pairing list. The
+        // other belongs to a different user and must NOT be imported.
+        val mutator = FakeUserStateMutator()
+        val store = TestPairedSenderStore(mutator)
+        val mine = samplePairedSender("p-mine", "s-mine")
+        val notMine = samplePairedSender("p-not-mine", "s-other")
+
+        store.migratePhase1Owned(
+            ownedPairingIds = setOf("p-mine"),
+            legacy = listOf(mine, notMine),
+        )
+
+        val imported = mutator.current().pairedSenders
+        assertEquals(1, imported.size)
+        assertEquals("p-mine", imported.single().pairingId)
+        assertEquals("migration", imported.single().source)
+        assertNotNull(mutator.current().phase1MigrationDoneAt)
+    }
+
+    @Test
+    fun `migratePhase1Owned is idempotent — second call no-ops`() = runTest {
+        // The per-user gate (phase1MigrationDoneAt) prevents repeated
+        // imports across re-login or warm starts.
+        val mutator = FakeUserStateMutator()
+        val store = TestPairedSenderStore(mutator)
+        val sender = samplePairedSender("p1", "s1")
+
+        store.migratePhase1Owned(ownedPairingIds = setOf("p1"), legacy = listOf(sender))
+        val firstFlag = mutator.current().phase1MigrationDoneAt
+        val firstSize = mutator.current().pairedSenders.size
+
+        // Second call with the same inputs must NOT re-import or move the flag.
+        store.migratePhase1Owned(ownedPairingIds = setOf("p1"), legacy = listOf(sender))
+
+        assertEquals(firstFlag, mutator.current().phase1MigrationDoneAt)
+        assertEquals(firstSize, mutator.current().pairedSenders.size)
+    }
+
+    @Test
+    fun `migratePhase1Owned skips legacy entries whose senderId already has an active synced pairing`() = runTest {
+        // Cross-sender safety (consultation 53 YELLOW #4): if a sender
+        // already has a non-tombstoned synced pairing, the legacy entry
+        // for the same senderId must NOT be re-imported (the user may
+        // have re-paired or revoked elsewhere; legacy data is stale).
+        val mutator = FakeUserStateMutator(
+            initial = EncryptedUserState(
+                pairedSenders = listOf(samplePairedSenderEntry("p-current", "s-shared")),
+            ),
+        )
+        val store = TestPairedSenderStore(mutator)
+        val legacy = samplePairedSender("p-legacy", "s-shared")
+
+        store.migratePhase1Owned(
+            ownedPairingIds = setOf("p-legacy"),
+            legacy = listOf(legacy),
+        )
+
+        // Only the original "p-current" entry survives.
+        val entries = mutator.current().pairedSenders
+        assertEquals(1, entries.size)
+        assertEquals("p-current", entries.single().pairingId)
+    }
 }
 
 /**
@@ -182,6 +264,40 @@ private class TestPairedSenderStore(
                 pairedSenders = state.pairedSenders.map { e ->
                     if (e.pairingId == pairingId && e.removedAt == null) e.copy(removedAt = now) else e
                 },
+            )
+        }
+    }
+
+    /**
+     * Mirrors `SyncedPairedSenderStore.migratePhase1Owned` semantics in the
+     * test environment. The production class reads `legacy` from a device-
+     * scoped EncryptedSharedPreferences file; tests inject it directly so
+     * we can exercise the ownership-proof path without Robolectric.
+     */
+    suspend fun migratePhase1Owned(
+        ownedPairingIds: Set<String>,
+        legacy: List<PairedSender>,
+    ) {
+        // Outer short-circuit (matches production).
+        if (mutator.current().phase1MigrationDoneAt != null) return
+
+        val ownedLegacy = legacy.filter { it.pairingId in ownedPairingIds }
+        mutator.mutateAndPush { current ->
+            // Inner re-check inside the transform (matches production).
+            if (current.phase1MigrationDoneAt != null) return@mutateAndPush current
+            val now = java.time.Instant.now(clock).toString()
+            val existingIds = current.pairedSenders.map { it.pairingId }.toSet()
+            val activeSenders = current.pairedSenders
+                .filter { it.removedAt == null }
+                .map { it.senderId }
+                .toSet()
+            val toAdd = ownedLegacy
+                .filter { it.pairingId !in existingIds }
+                .filter { it.senderId !in activeSenders }
+                .map { it.toEntry("migration") }
+            current.copy(
+                pairedSenders = if (toAdd.isEmpty()) current.pairedSenders else current.pairedSenders + toAdd,
+                phase1MigrationDoneAt = now,
             )
         }
     }
