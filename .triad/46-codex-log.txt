@@ -1,0 +1,449 @@
+Reading additional input from stdin...
+OpenAI Codex v0.124.0 (research preview)
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, C:\Users\Dima\.codex\memories]
+reasoning effort: high
+reasoning summaries: none
+session id: 019e53d4-d393-7d21-8cb1-1dbb40f4084c
+--------
+user
+# Consultation 46 — four expansion ideas, pre-design discussion
+
+Syncler is in a stable post-M11 V1 state: encrypted senders push cards,
+the Android host renders inbox rows from `hostPreview` natively and
+runs the plugin's `render()` in a WebView for detail. Background:
+
+- Plugins ship as Ed25519-signed JS bundles, loaded by the host
+  WebView per detail-tap. Bundle resolution is by `plugin_row_id`
+  (historical row) via `/v1/plugins/by-id/{row_uuid}`.
+- Capability bridge: `platform.network.fetch` is the only wired
+  primitive in V1 inbox mode; storage / camera / notifications /
+  message.respond all reject pending the multi-process plugin host.
+- Device enrollment is global: one device row per phone, shared
+  across senders. Each sender pairs separately (encrypted via the
+  user's pairing key) but all paired senders deliver to all the
+  user's active devices.
+- Revocation classified into superseded / compromised / sender_disabled
+  / unspecified, with monotone severity promotion and per-reason UX.
+- Send is HTTPS POST today, polling pull on the device every ~15s,
+  optional FCM wake-up. There is no live/streaming channel for
+  per-card state (e.g. live odds, in-progress draws).
+
+We have four expansion ideas on the table. I want to pressure-test
+each one before investing in any of them. Please walk through each,
+independently — what's right about it, what's broken or naive, what
+the hidden costs are, what the smallest version that ships value
+looks like, and whether you'd prioritize it ahead of others.
+
+## Idea 1 — MQTT-over-WebSocket for live state
+
+Currently the only delivery path is HTTPS POST + pull polling /
+FCM wake. For "live" cards (a lottery card showing live odds,
+or "draw results just arrived for batch #5" as a host-side
+notification adjacent to the card), the 15s poll feels wrong.
+
+Proposal: stand up an MQTT broker behind WebSocket. The plugin's
+WebView can subscribe natively (MQTT.js client) to topics scoped
+to its `(user_id, plugin_row_id, item_id)` triple. The same channel
+could carry host-side "ambient" notifications keyed off the same
+plugin, surfaced as a small banner or as a row update.
+
+Open questions:
+- Topic ACL: the broker has to be content-blind like the rest of
+  Syncler. How do we authenticate the subscriber when the WebView
+  is sandboxed and the device's keypair isn't directly exposed to
+  the bundle?
+- Battery: persistent WebSocket vs. existing pull/FCM. Worth it?
+- Is per-card live state actually within V1.5 scope, or is this
+  V2?
+
+## Idea 2 — Kotlin native runtime
+
+Today every plugin is a WebView-rendered JS bundle. Some plugin
+authors might want a faster / more native experience and don't
+need DOM at all. Proposal: manifest declares
+`runtime: "webview" | "native"`. A native bundle ships as an AAR
+or compiled DEX (same signing + hash flow), is loaded into a
+sandboxed `ClassLoader`, and uses the same `platform.*` capability
+primitives exposed as a Kotlin API instead of a JS bridge.
+
+Open questions:
+- Class-loader sandboxing on Android — what's the actual isolation
+  model? `PathClassLoader` + a restricted classloader parent isn't
+  the same security boundary as a WebView's process isolation.
+  Can a native bundle reach into the host process's heap?
+- iOS story is dead — Android-only runtime. Acceptable?
+- What's the smallest API surface that's actually useful? Just
+  `platform.network.fetch` parity in Kotlin, or the full
+  storage/camera bridge?
+- Native bundles are arch-specific. AAB / multi-arch distribution
+  on a content-blind transport is awkward.
+
+## Idea 3 — Per-plugin connected devices
+
+User feedback: "why do I have so many devices?" + "is lottery
+authorized on which of my phones?" Today device enrollment is
+global — one row per phone, every paired sender delivers to all
+active devices.
+
+Proposal: keep the global device list but add a per-plugin
+authorization matrix on top: "Lottery is authorized on: Pixel 7,
+iPad". The plugin's settings panel (inside the plugin's detail
+chrome) shows the matrix and lets the user revoke per-plugin per
+device. Revoking a device from one plugin doesn't touch others.
+
+Open questions:
+- This conflicts with our current "the user is one identity, paired
+  senders deliver to all their devices" model. Is the value worth
+  the complexity?
+- Where does the matrix live? Server-side (new table
+  `plugin_device_authorization(plugin_row_id, device_id, authorized_at)`)
+  or client-side (device-local filter on inbound messages)?
+- If it's server-side, the server needs to know which plugin a
+  message is for, which it already does, but routing decisions get
+  more complex.
+- If it's client-side, every device receives every message and
+  filters locally — wastes encrypted-blob bandwidth.
+- "Plugin chrome with its own settings" was explicitly deferred
+  from V1 (consultation 35's "plugin-owned chrome" V1.5 item). Is
+  this the right re-entry for that, or do we need a different
+  surface?
+
+## Idea 4 — Constrained template DSL for non-interactive plugins
+
+Today every plugin is a signed executable JS bundle. For
+non-interactive cards ("a notification arrived: here's the title,
+subtitle, body, a couple buttons"), shipping executable JS is
+overkill — the publish flow has key management, hash pinning, etc.
+
+Proposal: manifest declares `renderer: "template" | "script"`.
+Template renderer is a sandboxed Mustache-like DSL evaluated by
+the host. No signing of executable code — the template lives in
+the manifest itself (which is still signed) and references payload
+fields via `{{field}}` syntax. Buttons map to declared endpoints
+the same way. `renderer: "script"` stays for interactive cards
+that need real logic.
+
+Open questions:
+- What's the actual DSL surface? Mustache is famously
+  underpowered — no conditionals beyond truthiness, no
+  computation. Is that strict enough to be safe, or too strict to
+  be useful?
+- The host evaluates the template, so it has to keep its
+  evaluator small and well-tested. Risk of expanding the DSL one
+  feature at a time until it's a buggy interpreter (Greenspun's
+  10th).
+- Does this displace `script` for most senders, or stay a
+  side-channel for the simplest cases? If most senders move to
+  template, the JS bridge becomes long-tail code.
+
+## Output
+
+For each idea, independently:
+1. **Is the framing right?** What about the user's pitch is correct,
+   what's naive?
+2. **What would the MVP actually look like?** Concrete: what code
+   gets written, what contracts change, what existing tests break.
+3. **Hidden costs / risks** — security, complexity, deferred work
+   that becomes urgent.
+4. **Priority recommendation** — V1.5, V2, or "don't do this".
+   Why.
+5. **What dependencies between the four exist** — e.g., does idea 4
+   shrink the surface area idea 2 needs to support?
+
+Then rank all four overall. Short justifications, not essays.
+codex
+Below is the pressure test as I would frame it before design work.
+
+**Idea 1: MQTT-over-WebSocket for Live State**
+
+**Framing**
+
+The problem is real: 15s polling is a poor fit for “state just changed” moments. But the proposal jumps too quickly to “plugins subscribe directly to MQTT topics.”
+
+The naive part is putting the live transport inside the plugin WebView. In V1, the plugin is not the trusted device principal. The host owns enrollment, device keys, notification policy, lifecycle, battery management, and revocation. If MQTT exists, the host should own the connection or mint extremely narrow live-session tokens.
+
+Also, topic names like `(user_id, plugin_row_id, item_id)` are metadata. Even if payloads stay encrypted or content-blind, the broker now sees presence, topic shape, activity timing, and per-card liveness.
+
+**MVP**
+
+Do not start with general MQTT.
+
+Smallest useful version:
+
+1. Add a host-owned “live hint” channel for foreground detail views only.
+2. Plugin requests a live subscription through a capability, e.g. `platform.live.subscribe(itemId)`.
+3. Host authenticates as the device and receives updates.
+4. Host forwards events into the WebView through the existing bridge.
+5. Events are scoped to one active detail view, short-lived, read-only, and automatically closed when the view is backgrounded.
+6. Ambient host banners should be a separate host contract, not arbitrary MQTT messages rendered by plugin code.
+
+Transport could be MQTT-over-WebSocket, plain WebSocket, or SSE. The contract matters more than MQTT.
+
+Likely code/contracts:
+
+- New server endpoint to issue scoped live session tokens or register live subscriptions.
+- Host lifecycle manager for foreground subscriptions.
+- Bridge event API: `platform.live.subscribe`, `unsubscribe`, `onEvent`.
+- Server-side ACL mapping device/session to allowed plugin/item.
+- Tests for token scope, expiry, revoked plugin/device behavior, background teardown, and unauthorized topic access.
+
+Existing tests that may break: plugin capability rejection tests, inbox-mode bridge tests, revocation behavior if live sessions need immediate invalidation.
+
+**Hidden Costs**
+
+- Battery and reconnection behavior.
+- Broker ACL correctness.
+- Metadata leakage.
+- Revocation propagation.
+- Foreground/background lifecycle bugs.
+- Ordering between pull inbox state and live updates.
+- Host-side notification UX becomes a product surface, not just transport plumbing.
+
+**Priority**
+
+V2, or a very narrow V1.5 experiment only if there is a real launch partner with live-card needs.
+
+Do not make this a general plugin transport in V1.5. A foreground-only host-owned live bridge is the smallest safe path.
+
+---
+
+**Idea 2: Kotlin Native Runtime**
+
+**Framing**
+
+The desire for faster/native plugins is understandable, but the proposed isolation model is the weak point.
+
+A `ClassLoader` is not a sandbox. If native plugin code runs in the host process, it can interact with the host runtime, reflection, threads, memory, app permissions, filesystem affordances, and Android APIs unless you build a serious containment layer. WebView process isolation is a much stronger baseline than “loaded DEX with a restricted parent.”
+
+Also, “native bundles are arch-specific” is only partly true. Plain DEX bytecode is not arch-specific; JNI/native libraries are. But AARs bring resources, manifests, dependencies, class conflicts, initialization behavior, and build/distribution complexity.
+
+The bigger issue is not performance. It is trust.
+
+**MVP**
+
+I would not ship arbitrary native code as V1.5.
+
+If forced to explore:
+
+1. Run native plugins only in a separate isolated process.
+2. Communicate through a tiny Binder/API boundary.
+3. Give the isolated process no direct network/storage/camera access.
+4. Expose only `platform.network.fetch` parity initially.
+5. No arbitrary Android UI access; return a host-defined render model or use a host-owned native component schema.
+6. No JNI in MVP.
+
+Contracts/code:
+
+- Manifest field: `runtime: "webview" | "native-process-experimental"`.
+- Native plugin ABI with one entrypoint.
+- Host service process.
+- Binder bridge for capabilities.
+- Timeout/memory/crash isolation.
+- Signature/hash validation before loading.
+- Compatibility matrix by Android SDK/API level.
+
+Tests:
+
+- Plugin cannot call unauthorized APIs.
+- Plugin crash does not crash host.
+- Capability denial parity with JS.
+- Revocation prevents load.
+- Timeout and lifecycle tests.
+
+**Hidden Costs**
+
+- Android-only runtime fractures the plugin ecosystem.
+- Security review becomes much harder.
+- Play policy and dynamic code loading concerns may matter.
+- Debuggability and author tooling become a product of their own.
+- Dependency conflicts.
+- Resource loading.
+- ABI/versioning.
+- Crash isolation.
+- No iOS story.
+- Once native exists, authors will expect storage, camera, background work, notifications, and native UI.
+
+**Priority**
+
+Do not do this for V1.5. Probably V2 only after the multi-process plugin host exists.
+
+If the real goal is “non-DOM simple cards,” Idea 4 is a better answer. If the real goal is “fast native UI,” consider host-owned native templates/components before arbitrary native code.
+
+---
+
+**Idea 3: Per-Plugin Connected Devices**
+
+**Framing**
+
+This is the strongest product idea of the four.
+
+The user complaint is real: global devices are technically clean but confusing operationally. Users think in terms of “which phone receives lottery?” not “which global identity endpoints exist?”
+
+This does not have to conflict with the identity model. Keep global device enrollment as the identity/device layer. Add per-plugin delivery authorization as routing policy above it.
+
+The naive part is keying this to `plugin_row_id`. A row ID sounds like a historical bundle/version identifier. Device authorization should probably attach to a stable sender-plugin installation, sender pairing, or logical plugin identity, not a specific signed bundle row. Otherwise upgrades, supersession, and revocation can accidentally reset or strand permissions.
+
+**MVP**
+
+Ship this as host-owned settings, not plugin-owned chrome.
+
+Smallest useful version:
+
+1. Add server-side per-plugin/device authorization.
+2. Default existing behavior to “authorized on all current active devices.”
+3. Add a host settings surface: Sender/plugin → Authorized devices.
+4. Allow revoke/restore per device.
+5. Apply routing server-side before enqueueing device inbox rows.
+6. Show clear UX when the current device is not authorized.
+
+Data model shape:
+
+- `plugin_device_authorization`
+- keyed by stable logical plugin/sender pairing ID plus `device_id`
+- fields like `authorized_at`, `revoked_at`, `revoked_reason`, maybe `updated_by_device_id`
+
+Avoid client-side filtering except as a defense-in-depth fallback. Client filtering wastes bandwidth and does not answer the user’s actual concern: “is this phone authorized?”
+
+Tests:
+
+- Existing send-to-all-devices tests will need updated expectations.
+- Migration/default authorization tests.
+- New-device enrollment behavior: auto-authorize or require explicit opt-in.
+- Revoked device receives no new messages for that plugin.
+- Other plugins unaffected.
+- Sender disabled / compromised / superseded interactions.
+
+**Hidden Costs**
+
+- Migration semantics.
+- UX for new devices.
+- Recovery when the only authorized device is lost.
+- Sender/plugin identity naming.
+- More routing complexity.
+- Support burden: “why did this not arrive on my phone?”
+- Need audit/history for trust-sensitive senders.
+
+**Priority**
+
+V1.5.
+
+This has direct user value, fits the current architecture, and does not require opening a large new execution surface. I would do it before live state or native runtime.
+
+---
+
+**Idea 4: Constrained Template DSL**
+
+**Framing**
+
+The instinct is right: executable JS is overkill for many cards. But “no signing of executable code” should be phrased carefully. The manifest still needs signing, and the template is still behaviorally meaningful. It can influence UI, links/actions, field exposure, and possibly phishing-like presentation.
+
+The safe version is not “Mustache plus buttons until it grows.” The safe version is a declarative card schema with a tiny expression layer, or even no free-form template language at first.
+
+Mustache is attractive because it is limited, but it is also underpowered for real product cards. The danger is accumulating conditionals, formatting, loops, computed values, localization, date/currency handling, markdown, rich text, and action rules until the host owns a bad interpreter.
+
+**MVP**
+
+Make it a host-rendered card schema, not a general text templating engine.
+
+Example manifest concept:
+
+```json
+{
+  "renderer": "template",
+  "templateVersion": 1,
+  "layout": "standard_card",
+  "fields": {
+    "title": { "path": "title", "maxLength": 80 },
+    "subtitle": { "path": "subtitle", "maxLength": 120 },
+    "body": { "path": "body", "maxLength": 1000 }
+  },
+  "actions": [
+    {
+      "id": "open",
+      "label": "Open",
+      "endpoint": "details"
+    }
+  ]
+}
+```
+
+Initial surface:
+
+- Field paths only.
+- Escaped text only.
+- No arbitrary HTML.
+- No loops.
+- No computation.
+- Small fixed set of host layouts.
+- Optional simple visibility by field presence.
+- Declared actions only.
+- Strict size limits.
+
+Contracts/code:
+
+- Manifest schema addition: `renderer: "template" | "script"`.
+- Host native renderer for template cards.
+- Validation at plugin publish/install time.
+- Payload field resolver.
+- Action dispatch contract.
+- Snapshot/golden tests for rendering.
+- Fuzz/property tests for template evaluation and escaping.
+
+Existing tests likely affected:
+
+- Plugin manifest validation.
+- Detail rendering path assumptions.
+- Bundle resolution assumptions if some cards no longer need JS load.
+- Signature/hash expectations if executable bundle becomes optional.
+
+**Hidden Costs**
+
+- Versioning the schema forever.
+- Localization/date/number formatting pressure.
+- Authors wanting “just one more conditional.”
+- Host rendering bugs become platform bugs.
+- Long-term split between template and script plugin paths.
+- If templates dominate, JS runtime becomes less exercised and easier to regress.
+
+**Priority**
+
+V1.5.
+
+This is likely the best way to reduce execution risk and simplify common senders. Keep it intentionally boring. The moment it starts becoming a programming language, stop and push those senders to `script`.
+
+---
+
+**Dependencies Between Ideas**
+
+Idea 4 reduces pressure for Idea 2. Many authors who “do not need DOM” probably need simple native host-rendered cards, not arbitrary Kotlin.
+
+Idea 3 pairs well with Idea 4. A host-owned settings/device surface is easier when simple plugins are already rendered by the host instead of living entirely inside plugin WebView chrome.
+
+Idea 1 should be host-owned regardless of Idea 4. Template cards could support live row updates more safely than script cards because the host can re-render known fields.
+
+Idea 2 depends on the deferred multi-process plugin host. Without that, it is not a serious security design.
+
+Idea 1 also benefits from a clearer capability/session model from the multi-process work, but a narrow foreground host-owned version can precede it.
+
+---
+
+**Overall Ranking**
+
+1. **Idea 4: Template renderer**  
+   Best V1.5 candidate. Reduces executable surface, improves simple sender ergonomics, and keeps the host in control.
+
+2. **Idea 3: Per-plugin connected devices**  
+   Also V1.5-worthy. Real user value, fits current architecture, but needs careful identity/keying and migration design.
+
+3. **Idea 1: Live state channel**  
+   Valuable only for specific live use cases. Do a narrow host-owned foreground subscription, not plugin-managed MQTT. General live transport belongs in V2.
+
+4. **Idea 2: Kotlin native runtime**  
+   Do not prioritize. ClassLoader loading is not sufficient isolation, Android-only fractures the platform, and the security/tooling cost is high. Revisit after multi-process plugin hosting, and only if templates plus WebView still fail real use cases.
+tokens used
+5,962

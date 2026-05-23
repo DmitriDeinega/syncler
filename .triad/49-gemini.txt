@@ -1,0 +1,59 @@
+### Consultation 49: Final Consensus & Roadmap Ratification
+
+I have reviewed the arguments from both sides and the proposed roadmap. Below is the final synthesis and resolution.
+
+---
+
+### Disagreement 1 — Migrating local pairings
+**Decision: Hybrid "Push with Migration Flag"**
+I concede to the UX argument: "nothing works on new devices" is a worse failure than "resurrected pairings." 
+
+*   **Minimum-correct implementation:** On the first unlocked launch after M7 sync lands, the client scans the local `PairedSenderStore`. Any pairing missing from the synced state is pushed to the M7 blob. 
+*   **Safeguard:** These entries are marked with `source: "migration"` in their metadata. The Inbox UI will display a one-time banner: *"We've synced pairings from your other devices. [Review] [Dismiss]"*. Clicking "Review" opens a filtered view of the "migrated" pairings for easy bulk-cleanup.
+
+### Disagreement 2 — "Mute" Sync
+**Decision: Synced Primary with Local Override**
+The "bedside tablet" case is valid, but the "mute once, fix everywhere" case for spam is the 90% use case.
+
+*   **Minimum-correct implementation:**
+    *   **Synced State:** Stores `muted_senders: Set<SenderId>`.
+    *   **Local State:** Stores `mute_overrides: Map<SenderId, Boolean>`.
+    *   **Logic:** `isMuted = local_override ?? synced_default`.
+*   **UI:** The toggle in the settings sheet primarily targets the synced state. A "Mute only on this device" option is tucked under an "Advanced" or "More" chevron in the same sheet.
+
+---
+
+### Ratification of Decisions
+1.  **`script-fast` (Javy/QuickJS) to roadmap:** **ACK**.
+2.  **Field-level live subscriptions to roadmap:** **ACK**.
+3.  **Template DSL starts with `standard_card` only:** **ACK**.
+4.  **`mutateLocal` in `:core:storage`:** **ACK**.
+5.  **Multi-key decryption in `InboxRepository.refresh()`:** **ACK**.
+6.  **In-process SSE event bus:** **ACK**.
+7.  **AAD for live-card upserts (sequence numbers):** **ACK**.
+8.  **CAS dirty-flag bug fix as Phase 0:** **ACK**.
+9.  **Long-press stays multi-select:** **ACK**.
+10. **Phase 3 split (3a, 3b, 3c):** **ACK**.
+
+---
+
+### Roadmap Order
+**Decision: Ratified as-is.**
+Leading with AIDL/Binder and the Native Kotlin runtime is the correct architectural choice to unblock platform capabilities.
+
+1.  Multi-process plugin host (AIDL/Binder)
+2.  Native Kotlin runtime
+3.  Expanded capability bridge
+4.  WebSocket / Two-way live channel
+5.  `platform.live.subscribe(...)` API
+6.  Field-level live subscriptions (Deferred)
+7.  Script-fast / Javy (Deferred)
+8.  Lost-device rotation flow
+9.  Master-key rotation
+10. Per-device envelope encryption
+11. Per-plugin user preferences
+12. Redis pub/sub
+13. Durable nonce-replay protection
+
+**Next Steps:**
+I am ready for the implementation plan based on this consensus.

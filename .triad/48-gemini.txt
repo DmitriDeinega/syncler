@@ -1,0 +1,67 @@
+Here is my independent review and position on the 9 topics.
+
+### Topic 1 — Pairing model
+1. **Agree.** Synced pairing via the M7 blob resolves the severe UX friction of per-device pairing.
+2. **Concerns:**
+   - **Merge conflicts:** Tombstones must always win. If Device A pairs and Device B concurrently revokes, the resulting CAS merge must drop the key.
+   - **Migration:** Do not push existing local pairings up on launch. It risks resurrecting a pairing the user intentionally deleted on another device before the schema bump. Wait for a new explicit pairing event.
+3. **Implementation:** Add `pairedSenders: Map<SenderId, PairedSender>` to `UserState`. `PairedSender` is `{ pairingId, key, firstPairedAt, removedAt }`. Merge strategy: union of keys; if `removedAt` is present in either version, it persists. `InboxRepository.refresh()` iterates active keys newest-first.
+
+### Topic 2 — Lost-device threat model
+1. **Agree.** The tradeoff is practical. The current per-device model provides false security if the server doesn't enforce network revocation anyway.
+2. **Concerns:** The "JWT zombie" issue is a hard blocker. Without it, revocation is purely client-side cooperative, which defeats the threat model entirely.
+3. **Implementation:** Server issues JWTs with `device_id`. Server maintains a Redis set of `revoked_devices:{user_id}`. A middleware checks the JWT `device_id` against this set on every authenticated request. If present, return HTTP 401. The client intercepts 401s, clears local state, and forces re-login.
+
+### Topic 3 — Transport: SSE + FCM hybrid
+1. **Agree.** SSE foreground + FCM background is the industry standard for realtime sync.
+2. **Concerns:**
+   - **Auth-recheck:** The long-lived SSE connection must not outlive revocation. The server must proactively close the socket when a revocation event occurs.
+   - **FCM Fallback:** Acceptable to skip for V1. Android users without Google Play Services will fall back to cold-start/resume polling, which degrades gracefully.
+3. **Implementation:** One-way SSE. Server keeps an in-memory `dict[device_id, connection]` for routing. When the revoke endpoint is hit, explicitly terminate the associated SSE connection before returning 200 OK.
+
+### Topic 4 — Plugin runtimes
+1. **Agree with structure, disagree with Script-fast DOM output.**
+2. **Concerns:** If Javy/QuickJS (Script-fast) returns HTML to be rendered in a thin WebView, it defeats the performance benefits of bypassing the DOM. It should return a structured render model (AST) that the host renders natively via Compose.
+   - **Template validation:** Must be strict at publish time. The host should refuse to load a template with malformed JSONPath or missing required fields.
+3. **Implementation:**
+   - **Template:** Strict schema, validated on publish.
+   - **Script:** Current WebView JS execution.
+   - **Script-fast:** Returns a JSON view tree mapped to Compose primitives, completely avoiding WebView overhead.
+
+### Topic 5 — Card model: event vs live
+1. **Agree.** Event streams and live state are fundamentally different domains.
+2. **Concerns:**
+   - **Overloading `send`:** A separate `/v1/cards/upsert` endpoint is cleaner.
+   - **Encryption/Replay:** Standard nonces are insufficient for live upserts due to out-of-order network delivery. You need a monotonic `sequence_number` inside the encrypted payload so the client can discard older, delayed updates.
+3. **Implementation:** New `POST /v1/cards/upsert`. Payload includes `{ sequence_number: Int }`. AAD includes `card_key`. Client stores a single row per `card_key` and drops updates where `sequence_number <= current_sequence_number`. Server enforces a 1 Hz rate limit per `card_key` (returning HTTP 429). Fixed 48h TTL for V1.
+
+### Topic 6 — Live updates as a property of templates
+1. **Agree.** This is a massive leverage point for the template system.
+2. **Concerns:**
+   - **Scope:** Per-card subscription is better than per-field. The client requests a single multiplexed topic for the card, reducing SSE management overhead.
+   - **Stale views:** If a live update arrives while the card is backgrounded, it must be cached locally (e.g., in a `LiveUpdateStore`) so the next open immediately reflects the latest state without waiting for a new event.
+3. **Implementation:** Simple brace interpolation `topic: "matches/{$.match_id}/score"`. Formats limited to `raw` and `number` for V1. Client caches the last received event per topic locally.
+
+### Topic 7 — Host-owned settings surface
+1. **Agree with the UI, disagree on mute sync.**
+2. **Concerns:**
+   - **Mute Sync:** Mute should be synced. If a sender is spamming, the user expects muting it on their phone to also mute it on their tablet. Local-only mute violates the "one unified state" principle of the app.
+   - **Host Bar:** The 48dp loss is an acceptable tradeoff for security and consistent UX.
+3. **Implementation:** Add `mutedSenders: List<SenderId>` to the synced M7 state blob instead of local SharedPreferences. Use a standard Compose `TopAppBar` across all detail views.
+
+### Topic 8 — Phasing and the "fix latent bugs" question
+1. **Agree generally, with sequencing adjustments.**
+2. **Concerns:**
+   - Phase 0 is an absolute prerequisite for Phase 1. You cannot ship synced pairing until the network can actually revoke a compromised device.
+   - The CAS bug must be fixed *before* Phase 1. Expanding the M7 state blob's usage makes CAS corruption much more dangerous.
+3. **Implementation:**
+   - **Pre-flight:** Fix CAS dirty-flag bug. Expose `UserStateRepository` interface to `:core:storage` or introduce a `:core:domain` mediator.
+   - **Phase 0:** Device-bound JWT + Revocation enforcement.
+   - **Phase 1:** Synced pairing.
+   - **Phase 2:** SSE.
+   - **Phase 3:** Split into **3A** (Templates, Host Settings) and **3B** (Live Cards, SSE fields).
+
+### Topic 9 — Future roadmap published with this milestone
+1. **Agree.**
+2. **Concerns:** The order is sound. Publishing this prevents "why doesn't X work yet?" noise and sets clear expectations for the native plugin security model.
+3. **Implementation:** Publish exactly as outlined in a `ROADMAP.md` or at the bottom of the integration guide. No changes to the proposed list.

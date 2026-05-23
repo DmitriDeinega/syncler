@@ -1,0 +1,41 @@
+The V1.5 design for synced pairing is solid in its core "state-blob-as-source-of-truth" approach, but it contains a critical security hole in the revocation logic and some migration friction that needs to be addressed before implementation.
+
+### Pressure-Test Results
+
+**1. Schema migration: The "Mandatory Initial Push"**
+*   **Problem:** Existing devices have local pairings that aren't in the cloud. If we don't push them up, a "Login on new device" will result in an empty inbox until the user re-pairs everything.
+*   **Recommendation:** Perform a one-shot push on first run after the schema bump. `UserStateRepository` should iterate over `PairedSenderStore.loadAll()` and `mutateLocal` to add any missing pairings to the blob. 
+*   **Conflict Story:** If two upgraded devices push simultaneously, `StateMerger` handles it via `mergeByKey(pairingId)`. The user will simply see the union of all pairings from all their devices.
+
+**2. Tombstone GC: Defer indefinitely**
+*   **Answer:** Do not implement GC for `pairedSenders` tombstones yet. 
+*   **Rationale:** Unlike messages, a user will likely have <50 pairings and <100 total lifetime pairing events. Even with tombstones, the JSON overhead is negligible (~20KB). Keeping tombstones forever is the safest way to prevent "pairing resurrection" on long-offline devices.
+
+**3. PairingRepository semantics: Local-first is correct**
+*   **Logic:** Follow the `markDirtyAndPush` pattern used for read marks. 
+*   **Failure Mode:** If a QR scan succeeds but the network blip kills the push, the pairing stays local (usable immediately) and the `dirty` flag ensures the push retries on the next app foreground or refresh. The user sees "Pairing successful" immediately.
+
+**4. Sender behavior: Enforce "Last Pairing Wins"**
+*   **Answer:** The sender-side logic (V1 manual or V1.5 auto) must overwrite the `pairingKey` for a given `user_id` when a new pairing completes. 
+*   **Rationale:** This naturally handles rotation. Once the user re-pairs on a trusted device, the sender starts using the new key, and the lost device can no longer decrypt new messages even if it can still fetch them.
+
+**5. Threat model holes: The "JWT Zombie" (CRITICAL)**
+*   **Finding:** The current server implementation of `/v1/state` and `/v1/inbox` only checks the user's JWT. It does **not** verify if the device that issued the request has been revoked. Since JWTs last 24 hours, a "revoked" lost device can still pull the entire state blob (and new pairing keys!) for up to a day.
+*   **V1.5 Requirement:** The server's `current_user` dependency or the specific state/inbox routers must be updated to check `Device.revoked_at`. Ideally, the JWT should embed the `device_id` to make this enforcement mandatory. 
+
+**6. Migration Duplicates: The "Two Keys, One Sender" problem**
+*   **Finding:** If a user has Device A and Device B both paired to Sender S, they currently have two different keys. After sync, both devices will have both keys. If the sender sends to both, the user sees duplicates.
+*   **Recommendation:** The client `InboxRepository` must be updated to try **all** active pairing keys for a given `senderId` until one works. Deduplication by message content hash (or just the server-side `message.id`) is required to keep the UI clean during the transition period before the user performs a "clean" rotation.
+
+**7. Residual Idea 3 (Mute-per-device)**
+*   **Recommendation:** Land separately. Synced pairing is already a heavy lift for the storage layer. Keep the "Mute" toggle as a local preference for now; it doesn't need to be in the synced blob to be useful.
+
+### Overall Recommendation
+
+**Ship the V1.5 plan with three specific adjustments:**
+
+1.  **Add a one-time migration trigger** in the Android app to push existing local pairings into the state blob on the first run of `SCHEMA_V4`.
+2.  **Update `InboxRepository.refresh()`** to iterate through all pairings for a `senderId` during decryption to handle pre-sync multi-device setups.
+3.  **Harden the Server:** You must update the server-side `/v1/state` and `/v1/messages/inbox` endpoints to reject requests from revoked devices immediately, or the "Immediate Revocation" story is a false promise.
+
+This plan achieves the "Login on new device and see everything" goal while providing a clear path for rotation and security containment.

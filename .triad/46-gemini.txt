@@ -1,0 +1,65 @@
+Syncler’s V1 architecture is a strong foundation of "content-blind routing + isolated execution." These four ideas push against different boundaries of that foundation. Here is the pressure test for each.
+
+---
+
+### Idea 1 — MQTT-over-WebSocket for live state
+
+1.  **Framing:** The user pitch is correct: 15s polling is "dead" UX for live data. However, the proposal to let plugins subscribe "natively" via MQTT.js is **broken**. In Syncler, the plugin is a guest; the Host is the citizen. Only the Host owns the device's cryptographic identity and can maintain a trusted, authenticated connection to the server.
+2.  **MVP:** Provide a **Host-managed Live Bridge**. 
+    - **Contract:** `platform.live.subscribe(topic, callback)`. 
+    - **Host:** Maintains a single persistent WebSocket to the Syncler server. It handles reconnection, backoff, and auth. 
+    - **Plugin:** Just receives event pushes via the existing `dispatchHook` mechanism. 
+    - **Server:** Simple pub/sub keyed by `(user_id, plugin_id)`.
+3.  **Hidden Costs:** **Android Doze Mode.** A persistent WebSocket will be killed in the background. If "live" state needs to trigger a notification while the app is closed, you still need FCM. MQTT/WS is strictly a "foreground/active-use" optimization.
+4.  **Priority:** **V2.** V1.5 should focus on making FCM-triggered "pulls" faster (e.g., immediate poll on FCM data message receipt) before building a second, persistent transport layer.
+5.  **Dependencies:** Idea 4 (Templates) makes live updates easier because the host can update a native `TextView` without waking up a full WebView logic loop.
+
+---
+
+### Idea 2 — Kotlin native runtime
+
+1.  **Framing:** Correct that JS has overhead; **dangerously naive** about security. 
+2.  **MVP:** `runtime: "native"` in manifest. `PluginLoader` fetches a DEX/AAR, loads it via `PathClassLoader`, and executes an entrypoint.
+3.  **Hidden Costs:** 
+    - **Sandboxing:** `ClassLoader` isolation is not process isolation. A native plugin can use reflection to access `SynclerHostActivity` internals or read the app's `SharedPreferences`. To make this safe, you'd need a multi-process architecture (WorkManager-style) which is a massive lift.
+    - **Content-Blindness vs. Multi-Arch:** To support native, you need ARM/x86/x64 binaries. Shipping multi-arch "fat" bundles through an encrypted, content-blind server adds significant metadata or requires the sender to know the user's CPU architecture.
+    - **iOS:** Complete dead end.
+4.  **Priority:** **Don't do this.** If performance is the issue, move to **Javy** (JS on QuickJS) for logic-only plugins, but stay in the JS ecosystem for portability and security.
+
+---
+
+### Idea 3 — Per-plugin connected devices
+
+1.  **Framing:** **Spot on.** This is the most common "Day 2" user friction point. The "User is one identity" model is technically elegant but practically leaky.
+2.  **MVP:** **Client-side Filter Matrix.** 
+    - **Code:** Add `PluginDeviceAuthStore` to `:core:storage`. 
+    - **Contract:** Before the Inbox renders a row, it checks `pluginAuthStore.isAuthorized(pluginId)`. 
+    - **UI:** A "Device Authorization" toggle inside the Plugin Settings screen.
+3.  **Hidden Costs:** **Encrypted Bandwidth Waste.** If I revoke "Lottery" on my Tablet, the tablet still downloads and decrypts the 50KB blob just to discard it. Server-side routing (Idea 1.5) is better but requires the server to know which `plugin_id` is in each message—which it already does for bundle resolution, so the privacy cost is already paid.
+4.  **Priority:** **V1.5.** This is a high-signal "Pro" feature that increases user trust without architectural risk.
+
+---
+
+### Idea 4 — Constrained template DSL
+
+1.  **Framing:** **Excellent insight.** Executable JS is a massive security and complexity surface for a "Weather Alert" card. 
+2.  **MVP:** **Declarative Card Schema.** 
+    - **Manifest:** `renderer: "template"`, `template: { "layout": "hero", "mapping": { "title": "$.header" } }`. 
+    - **Host:** A `NativeTemplateRenderer` (using Jetpack Compose) that renders a fixed set of components (Text, Button, Image). 
+    - **Logic:** No script evaluation. Just JSONPath-style field mapping.
+3.  **Hidden Costs:** **Greenspun's 10th Rule.** Authors will immediately ask for `{{#if price > 10}}`. Resisting the urge to turn the DSL into a programming language is the hardest part.
+4.  **Priority:** **V1.5 (High Priority).** This "boring" path will likely account for 80% of plugins. It reduces the "signing/bundle/JS" barrier for new senders significantly.
+5.  **Dependencies:** Displaces Idea 2. If most plugins are templates, the "Native Runtime" becomes a niche requirement for games/complex tools.
+
+---
+
+### Final Ranking & Recommendation
+
+| Rank | Idea | Priority | Justification |
+| :--- | :--- | :--- | :--- |
+| **1** | **Idea 4 (Templates)** | **V1.5** | Largest impact on sender adoption and host performance. Reduces security surface. |
+| **2** | **Idea 3 (Per-Plugin Devices)** | **V1.5** | Essential UX for power users and trust. Low technical risk. |
+| **3** | **Idea 1 (MQTT/Live)** | **V2** | High value for specific niches (trading, betting), but adds transport complexity. |
+| **4** | **Idea 2 (Native Runtime)** | **Skip** | Security and fragmentation costs far outweigh performance gains in V1/V2. |
+
+**Strategic Advice:** Build **Idea 4** first. By the time you finish the Native Template Renderer, you will have a much clearer picture of whether you actually need the "Native Runtime" (Idea 2) or if the "Live Channel" (Idea 1) should just be a property of the Template Renderer (auto-refreshing fields).

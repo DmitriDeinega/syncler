@@ -1,0 +1,82 @@
+No code edits. Both reviewers independently landed on strong alignment with a few material changes to the tentative position: Phase 0 is mandatory first, `script-fast` should move to roadmap, and live-field subscriptions should be constrained or deferred until live cards/templates are stable.
+
+**Topic 1 — Pairing Model**
+Reviewer A: Agree. Add synced pairing to the encrypted user state, but first resolve the key-model language: current code stores explicit `pairingKey`; docs may imply HKDF-derived pairing keys. Do not blur those.  
+Concerns: migration must push existing local pairings on first unlocked launch; waiting for a future pairing leaves new devices unsynced. `InboxRepository.refresh()` currently collapses by `senderId`, so multiple active transition keys break decrypt.  
+Smallest: add `paired_senders` / `pairedSenders` with `pairingId`, sender identity, `pairingKey`, `firstPairedAt`, `removedAt`; merge by `pairingId`; tombstone wins; inbox tries all active keys for sender until decrypt succeeds.
+
+Reviewer B: Agree, with a sharper boundary: server `pairings` remains sender authorization; encrypted state is only key distribution to user devices.  
+Concerns: `PairedSenderStore.bySenderId()` assumes one active pairing.  
+Smallest: bootstrap local store into M7 state once, then make local paired sender store a projection of synced state plus tombstones.
+
+**Topic 2 — Lost-Device Threat Model**
+Reviewer A: Agree, but current threat model is false until JWTs are device-bound.  
+Concerns: `/v1/state`, `/v1/messages/inbox`, and message detail only check user JWT today; `assert_device_belongs_to_user()` does not reject revoked devices.  
+Smallest: JWT gets `sub` + `did`; auth dependency loads user + active device; reject missing/revoked device on state, inbox, detail, dismiss, pairing, plugin user fetches, and SSE. Force re-login after deploy.
+
+Reviewer B: Same. Phase 0 is non-negotiable.  
+Concerns: adding `device_id` to JWT is breaking, so do not silently grandfather old user-only tokens except maybe dev-only.  
+Smallest: enroll during login or have enroll return a refreshed device-bound token; apply one `current_auth_context` everywhere user data is accessed.
+
+**Topic 3 — SSE + FCM**
+Reviewer A: Agree with SSE V1, not WebSocket.  
+Concerns: in-process event queues are lossy across workers; long-lived streams need revocation closure or periodic active-device recheck.  
+Smallest: `GET /v1/events`, device-bound auth, heartbeat, bounded per-device queues, hint-only events, pull on reconnect/resume/cold start, close stream on revoke.
+
+Reviewer B: Same.  
+Concerns: FCM-less phones are fine only if docs say background delivery is not guaranteed without Play Services.  
+Smallest: remove the 15-second foreground poll, keep lifecycle/manual pulls, FCM unchanged for background.
+
+**Topic 4 — Plugin Runtimes**
+Reviewer A: Disagree with shipping all three. Template + existing script is enough; `script-fast` is runtime/security/contract risk.  
+Concerns: HTML output just reintroduces WebView; structured output becomes a second template system.  
+Smallest: `renderer: "script" | "template"`, default `"script"`; strict template V1 with declared paths, escaped text, fixed layouts/actions, publish-time validation. Move `script-fast` to roadmap.
+
+Reviewer B: Same, maybe allow `script-fast` only if a real plugin proves need now.  
+Concerns: Javy/QuickJS needs packaging, render contract, bridge contract, tests, security review.  
+Smallest: one or two template layouts, not three unless each has an immediate use.
+
+**Topic 5 — Card Model: Event vs Live**
+Reviewer A: Agree with separate live cards.  
+Concerns: extending `/send` muddies event semantics; AAD must bind `card_key`, `card_type`, sender/user/plugin, expiry, nonce.  
+Smallest: `POST /v1/cards/upsert`, `LiveCard` table keyed by `(user_id, sender_id, card_key)`, latest encrypted payload only, fixed 48h TTL V1, 1 Hz 429 rate limit per `(sender,user,card_key)`.
+
+Reviewer B: Same.  
+Concerns: live cards need schema, TTL cleanup, nonce replay policy, client ordering, SDK support.  
+Smallest: separate endpoint/table; Android adds “Live” drawer view; “All” pins live cards above event cards sorted by updated time.
+
+**Topic 6 — Live Updates As Template Property**
+Reviewer A: Alternative: defer field-level subscriptions. Whole live-card upserts already solve the first real use case.  
+Concerns: arbitrary topics create auth, interpolation, caching, and stale-view problems. SSE should not become general pub/sub yet.  
+Smallest: template detail renders latest live-card payload; later add field patching with per-card scope and small DSL.
+
+Reviewer B: Agree conceptually but constrain it.  
+Concerns: `currency` is premature without locale; dropping closed-view updates makes reopen stale unless latest live card is pulled.  
+Smallest: live fields bind only to fields in the card’s latest live payload; validate interpolation at publish/install; patch while open; pull latest on open/resume; support `raw`, `number`, `time`, `date`.
+
+**Topic 7 — Host-Owned Settings Surface**
+Reviewer A: Agree.  
+Concerns: mute should be local; revoke is synced/security-significant. Script detail losing 48dp is acceptable because consistency matters.  
+Smallest: host sheet with info, mute on this device, revoke pairing; local encrypted mute store; Senders tab stays overview.
+
+Reviewer B: Agree, but long-press conflicts with current multi-select.  
+Concerns: row long-press already enters selection mode.  
+Smallest: use row overflow plus detail overflow for the sheet; keep long-press for multi-select.
+
+**Topic 8 — Phasing / Latent Bugs**
+Reviewer A: Phase 0 is a hard precondition for Phase 1.  
+Concerns: CAS dirty-flag bug is real: conflict retry failure logs but does not throw, so `push()` can clear dirty after failed retry. `mutateLocal` is private in `:feature:inbox`, blocking pairing sync.  
+Smallest: Phase 0 device-bound JWT/revocation plus CAS fix; Phase 1 synced pairing with shared/core user-state mutation interface; Phase 2 SSE; split Phase 3; defer `script-fast`.
+
+Reviewer B: Same.  
+Concerns: Phase 3 is too large as written.  
+Smallest: Phase 3a templates, 3b live cards, 3c live fields, 3d host settings. `script-fast` roadmap unless justified.
+
+**Topic 9 — Future Roadmap**
+Reviewer A: Agree with publishing roadmap, but avoid implying near-term promises.  
+Concerns: native must remain explicitly multi-process only; `script-fast` belongs here unless demanded now.  
+Smallest roadmap order: lost-device rotation, per-device envelope encryption, Redis/event-bus scaling, durable nonce replay, WebSocket/two-way live, script `platform.live.subscribe`, expanded capability bridge, AIDL/Binder host, native Kotlin, richer plugin preferences.
+
+Reviewer B: Mostly agree but platform dependencies should lead.  
+Concerns: “full capability bridge” before isolation is risky.  
+Smallest roadmap order: device-bound auth/synced pairing/SSE/templates/live/settings first; then multi-process plugin host; then broader capability bridge; then native Kotlin; then WebSocket/script live APIs; then guided rotation/master-key rotation/envelope encryption.
