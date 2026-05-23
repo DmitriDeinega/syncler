@@ -1,7 +1,6 @@
 package app.syncler.core.network
 
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.min
@@ -74,16 +73,29 @@ class EventStreamManager @Inject constructor(
     val streamReady: SharedFlow<Unit> = _streamReady.asSharedFlow()
 
     /**
-     * Holds the EventSource we currently consider "ours". Used as the
-     * authoritative identity check for every callback that mutates
-     * manager state: a callback acts only if `currentRef.get() === eventSource`
-     * (for non-mutating callbacks) or if `currentRef.compareAndSet(eventSource, null)`
-     * succeeds (for terminal callbacks). Closes Codex consultation 57
-     * RED #13: stale callbacks from a canceled stream can no longer
-     * null out a newer EventSource, schedule retries, emit streamReady,
-     * or trigger a logout.
+     * Single monitor that serializes every lifecycle/state transition:
+     * `start`, `stop`, `openStream`, `scheduleReconnect`, and the
+     * mutating portions of the SSE listener callbacks (`onOpen`,
+     * `onClosed`, `onFailure`). Closes the Codex consultation 58
+     * compound-transition race where stop() interleaved with openStream()
+     * could leave `wantRunning == true` with `current == null` and no
+     * reconnect scheduled.
+     *
+     * The lock is uncontended in the common case (one open stream, one
+     * lifecycle thread, occasional okhttp dispatcher callbacks) and
+     * never held across a suspend point — all suspending work (`delay`
+     * in reconnect) happens outside the lock.
      */
-    private val currentRef = AtomicReference<EventSource?>(null)
+    private val lifecycleLock = Any()
+
+    /**
+     * The EventSource we currently consider "ours". Mutated only while
+     * holding [lifecycleLock]; reads are also locked except for the
+     * identity check in `onEvent` (the high-frequency hot path), where
+     * volatility is enough — a stale read just drops the event safely.
+     */
+    @Volatile
+    private var current: EventSource? = null
 
     /**
      * Tracks whether we've been asked to be running by lifecycle.
@@ -123,30 +135,33 @@ class EventStreamManager @Inject constructor(
      * signal observe [streamReady].
      */
     fun start() {
-        wantRunning = true
-        openStream()
+        synchronized(lifecycleLock) {
+            wantRunning = true
+            openStreamLocked()
+        }
     }
 
     /** Cancel the current stream + any pending reconnect. */
     fun stop() {
-        wantRunning = false
-        reconnectJob?.cancel()
-        reconnectJob = null
-        reconnectAttempt = 0
-        // Atomically detach the current stream so any in-flight callback
-        // (onClosed/onFailure/onOpen) on the canceled EventSource sees
-        // itself as non-current and no-ops.
-        val prev = currentRef.getAndSet(null)
+        val prev = synchronized(lifecycleLock) {
+            wantRunning = false
+            reconnectJob?.cancel()
+            reconnectJob = null
+            reconnectAttempt = 0
+            val p = current
+            current = null
+            p
+        }
         prev?.cancel()
         Timber.tag(TAG).i("event stream closed")
     }
 
-    private fun openStream() {
+    private fun openStreamLocked() {
         if (!wantRunning) return
-        if (currentRef.get() != null) return
+        if (current != null) return
         val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
         if (token.isNullOrBlank()) {
-            Timber.tag(TAG).w("openStream() called without a session token; ignoring")
+            Timber.tag(TAG).w("openStreamLocked() called without a session token; ignoring")
             return
         }
         val request = Request.Builder()
@@ -158,24 +173,14 @@ class EventStreamManager @Inject constructor(
         // handshake; the 401 path passes that token back through
         // AuthFailureHandler so the auth layer can ignore stale 401s
         // for tokens the session no longer holds (Codex 57 RED #12).
+        // newEventSource returns immediately; the actual handshake runs
+        // asynchronously on the okhttp dispatcher.
         val source = sseFactory.newEventSource(request, makeListener(token))
-        // Atomic install: if a concurrent caller (start race, reconnect
-        // job) already installed a stream, cancel ours and bail.
-        if (!currentRef.compareAndSet(null, source)) {
-            Timber.tag(TAG).d("openStream lost install race; cancelling orphan")
-            source.cancel()
-            return
-        }
-        // Post-CAS recheck: if stop() ran between our wantRunning check
-        // and the CAS install, our source is unwanted. Undo cleanly.
-        if (!wantRunning && currentRef.compareAndSet(source, null)) {
-            source.cancel()
-            return
-        }
+        current = source
         Timber.tag(TAG).i("event stream opening (attempt=%d)", reconnectAttempt)
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnectLocked() {
         if (!wantRunning) return
         if (reconnectJob?.isActive == true) return
         val attempt = ++reconnectAttempt
@@ -184,24 +189,33 @@ class EventStreamManager @Inject constructor(
         Timber.tag(TAG).i("scheduling SSE reconnect attempt=%d in %dms", attempt, delayMs)
         reconnectJob = scope.launch {
             delay(delayMs)
-            if (wantRunning) openStream()
+            synchronized(lifecycleLock) {
+                if (wantRunning) openStreamLocked()
+            }
         }
     }
 
     private fun makeListener(token: String) = object : EventSourceListener() {
         override fun onOpen(eventSource: EventSource, response: Response) {
-            // Identity-guard: only honor the callback if it belongs to
-            // the EventSource currently held. A stale callback from a
-            // stream that was cancelled by stop()/reconnect must not
-            // emit streamReady or reset the backoff counter.
-            if (currentRef.get() !== eventSource) return
+            val accepted = synchronized(lifecycleLock) {
+                if (current !== eventSource) false
+                else {
+                    reconnectAttempt = 0
+                    true
+                }
+            }
+            if (!accepted) return
             Timber.tag(TAG).d("SSE open (status=%d)", response.code)
-            reconnectAttempt = 0
+            // Emit outside the lock — collectors may do work in their
+            // tryEmit handler; no need to hold the lifecycle lock across.
             _streamReady.tryEmit(Unit)
         }
 
         override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
-            if (currentRef.get() !== eventSource) return
+            // Hot path: lock-free identity check. A stale read drops the
+            // event safely; correctness is preserved by the mutating
+            // callbacks which take the lock.
+            if (current !== eventSource) return
             val parsed = ServerEvent.parse(type, data)
             if (parsed == null) {
                 Timber.tag(TAG).w("ignoring SSE event with unknown/bad payload: type=%s", type)
@@ -214,32 +228,47 @@ class EventStreamManager @Inject constructor(
         }
 
         override fun onClosed(eventSource: EventSource) {
-            // CAS guarantees we only proceed (and only null out
-            // currentRef) if this callback's EventSource is still the
-            // one we own. Stale onClosed for an already-replaced stream
-            // is a silent no-op.
-            if (!currentRef.compareAndSet(eventSource, null)) return
-            Timber.tag(TAG).i("SSE closed by server")
-            if (wantRunning) scheduleReconnect()
+            synchronized(lifecycleLock) {
+                if (current !== eventSource) return@synchronized
+                current = null
+                Timber.tag(TAG).i("SSE closed by server")
+                if (wantRunning) scheduleReconnectLocked()
+            }
         }
 
         override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-            if (!currentRef.compareAndSet(eventSource, null)) return
-            val code = response?.code
-            if (code == 401) {
-                Timber.tag(TAG).w("SSE rejected with 401; signalling auth failure")
-                wantRunning = false
-                reconnectJob?.cancel()
-                reconnectJob = null
-                // Pass the token that triggered the 401 — AuthRepository
-                // verifies it still matches the session's current token
-                // before clearing, so a stale 401 from an old stream
-                // cannot wipe a newer successful login.
-                authFailureHandler.onAuthFailure(token)
-                return
+            var terminal401 = false
+            synchronized(lifecycleLock) {
+                if (current !== eventSource) return@synchronized
+                current = null
+                val code = response?.code
+                terminal401 = (code == 401)
+                if (terminal401) {
+                    Timber.tag(TAG).w("SSE rejected with 401; signalling auth failure")
+                } else {
+                    Timber.tag(TAG).w(t, "SSE failure (status=%s); will retry", code)
+                }
+                // Do NOT short-circuit reconnect on 401. Two cases:
+                //  - Stale 401 (session token rolled by a fast re-login):
+                //    the next reconnect picks up the new token and
+                //    succeeds. AuthRepository.onAuthFailure verifies the
+                //    token is still current before logging out.
+                //  - Real terminal 401: AuthRepository.onAuthFailure
+                //    triggers session.logout(), which clears the token.
+                //    The next reconnect attempt sees a null token and
+                //    no-ops; lifecycle teardown (InboxScreen ON_PAUSE
+                //    when AuthScreen takes over) sets wantRunning=false.
+                // Closes Codex consultation 58 concern: a stale 401 must
+                // not strand SSE in a stopped state for an unrelated
+                // session that's still alive.
+                if (wantRunning) scheduleReconnectLocked()
             }
-            Timber.tag(TAG).w(t, "SSE failure (status=%s); will retry", code)
-            if (wantRunning) scheduleReconnect()
+            // Auth handler call happens outside the lock — it does
+            // scope.launch internally and we don't want any handler
+            // ordering effects to hold the lifecycle lock.
+            if (terminal401) {
+                authFailureHandler.onAuthFailure(token)
+            }
         }
     }
 
