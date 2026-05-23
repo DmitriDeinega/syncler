@@ -32,13 +32,22 @@ object NetworkModule {
     @Singleton
     fun provideAuthInterceptor(tokenProviders: Set<@JvmSuppressWildcards AuthTokenProvider>): Interceptor =
         Interceptor { chain ->
-            val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
-            val request = if (token.isNullOrBlank()) {
-                chain.request()
+            // If the call site set Authorization explicitly (e.g. enroll
+            // passes the bootstrap token directly so the Session doesn't
+            // have to be temporarily unlocked with it), honor it. Only
+            // inject the Session-provided token when no header is present.
+            val incoming = chain.request()
+            val request = if (incoming.header("Authorization") != null) {
+                incoming
             } else {
-                chain.request().newBuilder()
-                    .header("Authorization", "Bearer $token")
-                    .build()
+                val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+                if (token.isNullOrBlank()) {
+                    incoming
+                } else {
+                    incoming.newBuilder()
+                        .header("Authorization", "Bearer $token")
+                        .build()
+                }
             }
             chain.proceed(request)
         }

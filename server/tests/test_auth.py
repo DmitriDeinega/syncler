@@ -182,14 +182,23 @@ async def test_account_delete_invalidates_existing_token(client: AsyncClient) ->
         "/v1/auth/login",
         json={"email": payload["email"], "auth_key_hash": payload["auth_key_hash"]},
     )
-    token = login.json()["session_token"]
+    bootstrap = login.json()["session_token"]
+    enroll = await client.post(
+        "/v1/auth/devices/enroll",
+        json={"public_key": b64_bytes(32, 4)},
+        headers={"Authorization": f"Bearer {bootstrap}"},
+    )
+    # Account delete now requires the device-bound token (Codex consultation
+    # 51 RED #2): a revoked device's still-valid JWT must not be able to
+    # delete the account.
+    device_token = enroll.json()["session_token"]
 
-    delete_response = await client.delete("/v1/account", headers={"Authorization": f"Bearer {token}"})
+    delete_response = await client.delete("/v1/account", headers={"Authorization": f"Bearer {device_token}"})
     login_after_delete = await client.post(
         "/v1/auth/login",
         json={"email": payload["email"], "auth_key_hash": payload["auth_key_hash"]},
     )
-    list_after_delete = await client.get("/v1/auth/devices", headers={"Authorization": f"Bearer {token}"})
+    list_after_delete = await client.get("/v1/auth/devices", headers={"Authorization": f"Bearer {device_token}"})
 
     assert delete_response.status_code == 204
     assert login_after_delete.status_code == 401
@@ -205,13 +214,16 @@ async def test_full_auth_flow(client: AsyncClient) -> None:
         "/v1/auth/login",
         json={"email": payload["email"], "auth_key_hash": payload["auth_key_hash"]},
     )
-    token = login.json()["session_token"]
+    bootstrap = login.json()["session_token"]
     enroll = await client.post(
         "/v1/auth/devices/enroll",
         json={"public_key": b64_bytes(32, 4)},
-        headers={"Authorization": f"Bearer {token}"},
+        headers={"Authorization": f"Bearer {bootstrap}"},
     )
-    devices = await client.get("/v1/auth/devices", headers={"Authorization": f"Bearer {token}"})
+    # Sensitive routes (list_devices) require the device-bound token from
+    # the enroll response, not the bootstrap token from login.
+    device_token = enroll.json()["session_token"]
+    devices = await client.get("/v1/auth/devices", headers={"Authorization": f"Bearer {device_token}"})
 
     assert signup.status_code == 201
     assert login.status_code == 200

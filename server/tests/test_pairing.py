@@ -20,6 +20,10 @@ def _b64(value: bytes) -> str:
 
 
 async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com") -> str:
+    """Return a device-bound session_token. Pairing routes were moved to
+    current_auth_context in Phase 0 fix-ups (Codex consultation 51 RED #2),
+    so callers need a token with a `did` claim — i.e. one issued by
+    /v1/auth/devices/enroll, not /v1/auth/login alone."""
     auth_key_hash = _b64(b"a" * 32)
     await client.post(
         "/v1/auth/signup",
@@ -35,7 +39,13 @@ async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com
         "/v1/auth/login",
         json={"email": email, "auth_key_hash": auth_key_hash},
     )
-    return login.json()["session_token"]
+    bootstrap = login.json()["session_token"]
+    enroll = await client.post(
+        "/v1/auth/devices/enroll",
+        headers={"Authorization": f"Bearer {bootstrap}"},
+        json={"public_key": _b64(b"d" * 32)},
+    )
+    return enroll.json()["session_token"]
 
 
 async def _register_sender(client: AsyncClient) -> tuple[uuid.UUID, Ed25519PrivateKey]:

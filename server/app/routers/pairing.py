@@ -11,12 +11,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import current_user
+from app.auth import AuthContext, current_auth_context
 from app.crypto.signatures import verify_message_envelope
 from app.db import get_db
 from app.middleware.rate_limit import check_rate_limit, rate_limit
 from app.middleware.rate_limit_config import RATE_LIMITS
-from app.models import Pairing, User
+from app.models import Pairing
 from app.schemas import (
     PairingCompleteRequest,
     PairingCompleteResponse,
@@ -152,7 +152,7 @@ async def preview(
 @router.post("/complete", response_model=PairingCompleteResponse, status_code=status.HTTP_201_CREATED)
 async def complete(
     payload: PairingCompleteRequest,
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> PairingCompleteResponse:
     # Accept URL-safe + standard base64.
@@ -173,7 +173,7 @@ async def complete(
     try:
         pairing, sender, _ = await complete_pairing(
             db,
-            user=user,
+            user=ctx.user,
             pairing_token=token,
             encrypted_initial_state=encrypted_initial_state,
         )
@@ -203,11 +203,11 @@ async def complete(
 @router.post("/{pairing_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke(
     pairing_id: uuid.UUID,
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     try:
-        await revoke_pairing(db, user=user, pairing_id=pairing_id)
+        await revoke_pairing(db, user=ctx.user, pairing_id=pairing_id)
     except PairingTokenNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="pairing not found") from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -215,10 +215,10 @@ async def revoke(
 
 @router.get("", response_model=list[PairingItem])
 async def list_pairings(
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> list[PairingItem]:
     result = await db.execute(
-        select(Pairing).where(Pairing.user_id == user.id).order_by(Pairing.created_at.desc()),
+        select(Pairing).where(Pairing.user_id == ctx.user.id).order_by(Pairing.created_at.desc()),
     )
     return [PairingItem.model_validate(p) for p in result.scalars().all()]

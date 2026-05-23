@@ -68,6 +68,29 @@ class AuthRepositoryTest {
     }
 
     @Test
+    fun enrollIsCalledWithBootstrapTokenBeforeSessionUnlocks() = runTest {
+        val api = FakeApi()
+        val tokenStore = InMemoryTokenStore()
+        val session = Session(tokenStore)
+        val repository = AuthRepository(
+            api,
+            session,
+            FixedDevicePublicKeyProvider(),
+            FakeDeviceIdentityStore(),
+        )
+
+        repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
+
+        // The enroll call must have carried the bootstrap token (from
+        // /v1/auth/login) — NOT the device-bound token from its own
+        // response, and not any token published via Session.authenticate
+        // (Codex consultation 51 YELLOW #4: enroll runs BEFORE
+        // session.authenticate so observers never see an unlocked session
+        // carrying a user-only bootstrap token).
+        assertEquals("Bearer token-1", api.lastEnrollAuthHeader)
+    }
+
+    @Test
     fun logoutClearsStoredDeviceId() = runTest {
         val api = FakeApi()
         val identityStore = FakeDeviceIdentityStore()
@@ -154,8 +177,11 @@ private class FakeApi(
         )
     }
 
-    override suspend fun enrollDevice(body: DeviceEnrollRequest): DeviceEnrollResponse {
+    var lastEnrollAuthHeader: String? = null
+
+    override suspend fun enrollDevice(authHeader: String, body: DeviceEnrollRequest): DeviceEnrollResponse {
         enrollCount += 1
+        lastEnrollAuthHeader = authHeader
         return DeviceEnrollResponse(
             deviceId = "device-1",
             createdAt = "2026-05-20T00:00:00Z",

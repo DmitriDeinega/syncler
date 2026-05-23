@@ -76,12 +76,26 @@ class AuthRepository @Inject constructor(
         }
         val masterKey = MasterKey.unwrap(response.encryptedMasterKey.base64ToBytes(), keys.masterKeyWrapKey)
         try {
-            session.authenticate(response.sessionToken, masterKey)
-            runCatching { enrollCurrentDevice() }
-                .onFailure {
-                    session.logout()
-                    throw it
-                }
+            // Enroll the device using the bootstrap token directly. We do
+            // NOT call session.authenticate first because that would
+            // briefly publish an unlocked Session carrying the user-only
+            // bootstrap token. Observers (UserStateRepository pull, inbox
+            // refresh on resume) could fire requests against sensitive
+            // routes in that window and get 401 device_required (Codex
+            // consultation 51 YELLOW #4).
+            //
+            // Pass the bootstrap token via @Header on enrollDevice; the
+            // auth interceptor honors a pre-set Authorization header
+            // instead of overwriting it.
+            val enrollResponse = api.enrollDevice(
+                authHeader = "Bearer ${response.sessionToken}",
+                body = DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()),
+            )
+            deviceIdentityStore.write(enrollResponse.deviceId)
+            // Single atomic transition: locked → unlocked WITH the
+            // device-bound token already installed. No observer ever
+            // sees the bootstrap token in an unlocked session.
+            session.authenticate(enrollResponse.sessionToken, masterKey)
         } finally {
             masterKey.fill(0)
             keys.authKey.fill(0)
@@ -102,20 +116,6 @@ class AuthRepository @Inject constructor(
     suspend fun revokeDevice(id: String): Result<Unit> = runCatching {
         val response = api.revokeDevice(id)
         if (!response.isSuccessful) error("Device revoke failed: HTTP ${response.code()}")
-    }
-
-    private suspend fun enrollCurrentDevice() {
-        val response = api.enrollDevice(
-            DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()),
-        )
-        // Persist the server-issued device_id so the Settings tab can label
-        // this device and (after Phase 1) the synced state can scope per-
-        // device preferences.
-        deviceIdentityStore.write(response.deviceId)
-        // Swap the bootstrap (user-only) JWT for the device-bound JWT the
-        // server issued at enrollment. From here on, every authenticated
-        // call carries the `did` claim that `current_auth_context` requires.
-        session.replaceToken(response.sessionToken)
     }
 
     private fun normalizedEmail(email: String): String = email.trim().lowercase(Locale.US)

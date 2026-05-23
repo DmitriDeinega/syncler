@@ -53,7 +53,7 @@ class UserStateRepository @Inject constructor(
     private val prefs: UserStatePrefs,
     private val api: SynclerApi,
     private val session: Session,
-    private val clock: Clock = Clock.systemUTC(),
+    private val clock: Clock,
 ) : UserStateMutator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -261,62 +261,56 @@ class UserStateRepository @Inject constructor(
         }.onFailure { Timber.tag(TAG).w(it, "push failed (after retry)") }
     }
 
+    /**
+     * One initial PUT, one conflict-driven retry, no more. Linear control
+     * flow — no try/catch that loops, no recursion (Codex consultation 51
+     * YELLOW #5: the previous try/catch could re-trigger
+     * handleConflictAndRetry when the retry itself threw HttpException
+     * with code 409, effectively "retry twice").
+     *
+     * On permanent failure the outer push()'s runCatching catches the
+     * thrown exception and skips clearDirty() — the dirty flag stays
+     * true so the next foreground tick retries (consultation 47).
+     */
     private suspend fun attemptPush(masterKey: ByteArray) {
-        val blob = encodeLocal(_state.value, masterKey)
-        val expected = lastKnownRemoteVersion()
-        try {
-            val response = api.putUserState(
-                StatePutRequestDto(
-                    expectedStateVersion = expected,
-                    newEncryptedBlob = blob,
-                ),
-            )
-            if (!response.isSuccessful) {
-                if (response.code() == 409) {
-                    handleConflictAndRetry(masterKey)
-                } else {
-                    throw HttpException(response)
-                }
-            } else {
-                response.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
-            }
-        } catch (e: HttpException) {
-            if (e.code() == 409) handleConflictAndRetry(masterKey) else throw e
+        val first = doPut(expectedVersion = lastKnownRemoteVersion(), masterKey = masterKey)
+        if (first.isSuccessful) {
+            first.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
+            return
         }
-    }
+        if (first.code() != 409) {
+            throw HttpException(first)
+        }
 
-    private suspend fun handleConflictAndRetry(masterKey: ByteArray) {
-        // Server has a newer blob. Pull, merge, re-push exactly once. If the
-        // retry also fails, THROW so push()'s runCatching catches it and
-        // skips clearDirty() — the dirty flag must stay true so the next
-        // foreground tick (flushPendingPush) retries again.
-        //
-        // Codex review 47 (consultation 47, Reviewer B): the previous
-        // implementation silently logged the retry-failure path, which let
-        // push()'s outer runCatching reach clearDirty() and lose the
-        // pending change. That bug is fixed here.
-        val response = api.getUserState()
-        val remoteState = decodeRemote(response.encryptedBlob, masterKey)
-        val merged = StateMerger.merge(local = _state.value, remote = remoteState)
-        _state.value = merged
-        persist(merged, remoteVersion = response.stateVersion)
+        // 409: pull the newer blob, merge, re-PUT exactly once.
+        val pull = api.getUserState()
+        val remoteState = decodeRemote(pull.encryptedBlob, masterKey)
+        _state.value = StateMerger.merge(local = _state.value, remote = remoteState)
+        persist(_state.value, remoteVersion = pull.stateVersion)
 
-        val newBlob = encodeLocal(_state.value, masterKey)
-        val retry = api.putUserState(
-            StatePutRequestDto(
-                expectedStateVersion = response.stateVersion,
-                newEncryptedBlob = newBlob,
-            ),
-        )
+        val retry = doPut(expectedVersion = pull.stateVersion, masterKey = masterKey)
         if (retry.isSuccessful) {
             retry.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
-        } else {
-            Timber.tag(TAG).w(
-                "CAS retry failed (HTTP %d); dirty flag preserved for next retry",
-                retry.code(),
-            )
-            throw HttpException(retry)
+            return
         }
+        Timber.tag(TAG).w(
+            "CAS retry failed (HTTP %d); dirty flag preserved for next retry",
+            retry.code(),
+        )
+        throw HttpException(retry)
+    }
+
+    private suspend fun doPut(
+        expectedVersion: Int,
+        masterKey: ByteArray,
+    ): retrofit2.Response<app.syncler.core.network.StatePutResponseDto> {
+        val blob = encodeLocal(_state.value, masterKey)
+        return api.putUserState(
+            StatePutRequestDto(
+                expectedStateVersion = expectedVersion,
+                newEncryptedBlob = blob,
+            ),
+        )
     }
 
     private fun persist(state: EncryptedUserState, remoteVersion: Int? = null) {

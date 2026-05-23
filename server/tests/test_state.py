@@ -13,7 +13,13 @@ def _b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
-async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com") -> str:
+async def _signup_login_enroll(client: AsyncClient, email: str = "alice@example.com") -> str:
+    """Return a device-bound session token usable on sensitive routes.
+
+    Phase 0: /v1/state requires a JWT with a `did` claim. The bootstrap
+    token from /v1/auth/login alone is rejected (401 device_required);
+    the device-bound token from /v1/auth/devices/enroll is required.
+    """
     auth_key_hash = _b64(b"a" * 32)
     await client.post(
         "/v1/auth/signup",
@@ -29,7 +35,17 @@ async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com
         "/v1/auth/login",
         json={"email": email, "auth_key_hash": auth_key_hash},
     )
-    return login.json()["session_token"]
+    bootstrap = login.json()["session_token"]
+    enroll = await client.post(
+        "/v1/auth/devices/enroll",
+        headers={"Authorization": f"Bearer {bootstrap}"},
+        json={"public_key": _b64(b"d" * 32)},
+    )
+    return enroll.json()["session_token"]
+
+
+# Legacy alias kept for diff readability; the tests below already use it.
+_signup_and_login = _signup_login_enroll
 
 
 @pytest.mark.asyncio

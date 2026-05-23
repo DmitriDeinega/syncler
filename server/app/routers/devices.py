@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import AuthContext, create_device_token, current_auth_context, current_user
+from app.auth import AuthContext, bootstrap_only_user, create_device_token, current_auth_context
 from app.db import get_db
 from app.models import User
 from app.schemas import DeviceEnrollRequest, DeviceEnrollResponse, DeviceListItem, decode_base64
@@ -15,15 +15,15 @@ router = APIRouter(tags=["devices"])
 @router.post("/enroll", response_model=DeviceEnrollResponse, status_code=status.HTTP_201_CREATED)
 async def enroll(
     payload: DeviceEnrollRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(bootstrap_only_user),
     db: AsyncSession = Depends(get_db),
 ) -> DeviceEnrollResponse:
     """Enroll a device and return a device-bound JWT.
 
-    Authenticated by the user-only bootstrap token from /v1/auth/login (the
-    device doesn't exist yet, so this endpoint can't require a device-bound
-    token itself). The response includes a fresh device-bound JWT that the
-    client is expected to use for all subsequent calls to sensitive routes.
+    Authenticated by a BOOTSTRAP token (no `did` claim) from /v1/auth/login.
+    A revoked device's still-valid device-bound JWT MUST NOT be able to
+    enroll a new device and regain access — `bootstrap_only_user` rejects
+    any token that carries a `did` claim with 401 `bootstrap_required`.
     """
     device = await enroll_device(
         db,

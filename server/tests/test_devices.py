@@ -58,14 +58,40 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
     await engine.dispose()
 
 
-async def auth_header(client: AsyncClient, email: str = "device-user@example.com", fill: int = 1) -> dict[str, str]:
-    """Return an auth header for a device-bound JWT.
+async def signup_and_login(client: AsyncClient, email: str = "device-user@example.com", fill: int = 1) -> str:
+    """Return the bootstrap (user-only) JWT for a freshly-signed-up user.
+    Use this when the test needs to call /v1/auth/devices/enroll itself
+    (Phase 0 fix-up: enroll requires a bootstrap token, not a device-bound
+    one, so a revoked device cannot regain access via re-enrollment)."""
+    payload = signup_payload(email=email, auth_key_hash=b64_bytes(32, fill))
+    await client.post("/v1/auth/signup", json=payload)
+    login = await client.post(
+        "/v1/auth/login",
+        json={"email": payload["email"], "auth_key_hash": payload["auth_key_hash"]},
+    )
+    return login.json()["session_token"]
 
-    Phase 0 (device-bound JWT): sensitive routes (list_devices, revoke,
-    state, inbox, message detail, dismiss) require a token with a `did`
-    claim. The bootstrap login token does NOT carry that claim; the
-    enroll response does. This helper does both so callers get a token
-    that works on every authenticated route the device tests touch.
+
+async def bootstrap_header(client: AsyncClient, email: str = "device-user@example.com", fill: int = 1) -> dict[str, str]:
+    """Header carrying the bootstrap JWT (no `did` claim).
+
+    Suitable for /v1/auth/devices/enroll only. Sensitive routes reject
+    this token with 401 device_required.
+    """
+    token = await signup_and_login(client, email=email, fill=fill)
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def auth_header(client: AsyncClient, email: str = "device-user@example.com", fill: int = 1) -> dict[str, str]:
+    """Header carrying a device-bound JWT (the `did`-claim variant).
+
+    Sets up a user, signs in, enrolls one device, returns the device-bound
+    session_token from the enroll response. Use this for tests that call
+    sensitive routes (state, inbox, list_devices, revoke, etc.).
+
+    Tests that need to enroll additional devices on the same user MUST
+    use `bootstrap_header` for those enroll calls, because enroll rejects
+    device-bound tokens (Codex consultation 51 RED #1).
     """
     payload = signup_payload(email=email, auth_key_hash=b64_bytes(32, fill))
     await client.post("/v1/auth/signup", json=payload)
@@ -79,25 +105,21 @@ async def auth_header(client: AsyncClient, email: str = "device-user@example.com
         json={"public_key": b64_bytes(32, fill + 10)},
         headers=bootstrap_headers,
     )
+    # Return BOTH the device-bound header and the bootstrap header so
+    # tests can choose, but the canonical return is device-bound.
     return {"Authorization": f"Bearer {enroll.json()['session_token']}"}
 
 
 async def bootstrap_only_header(client: AsyncClient, email: str = "bootstrap-only@example.com", fill: int = 99) -> dict[str, str]:
-    """Return a header for the user-only bootstrap token from login (no
-    device enrolled). Used by tests that need to verify sensitive routes
+    """Return a header for the bootstrap token from a user that has NOT
+    enrolled any device. Used by tests that need to verify sensitive routes
     reject pre-device tokens."""
-    payload = signup_payload(email=email, auth_key_hash=b64_bytes(32, fill))
-    await client.post("/v1/auth/signup", json=payload)
-    login = await client.post(
-        "/v1/auth/login",
-        json={"email": payload["email"], "auth_key_hash": payload["auth_key_hash"]},
-    )
-    return {"Authorization": f"Bearer {login.json()['session_token']}"}
+    return await bootstrap_header(client, email=email, fill=fill)
 
 
 @pytest.mark.asyncio
 async def test_enroll_device(client: AsyncClient) -> None:
-    headers = await auth_header(client)
+    headers = await bootstrap_header(client)
 
     response = await client.post(
         "/v1/auth/devices/enroll",
@@ -109,11 +131,13 @@ async def test_enroll_device(client: AsyncClient) -> None:
     body = response.json()
     assert body["device_id"]
     assert body["created_at"]
+    # Phase 0: enroll returns a device-bound JWT alongside the device_id.
+    assert body["session_token"]
 
 
 @pytest.mark.asyncio
 async def test_enroll_rejects_invalid_public_key(client: AsyncClient) -> None:
-    headers = await auth_header(client)
+    headers = await bootstrap_header(client)
 
     response = await client.post(
         "/v1/auth/devices/enroll",
@@ -125,17 +149,46 @@ async def test_enroll_rejects_invalid_public_key(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_enroll_rejects_device_bound_token(client: AsyncClient) -> None:
+    """Codex consultation 51 RED #1: a revoked device's still-valid
+    device-bound JWT must NOT be able to enroll a new device and
+    regain access. The enroll endpoint accepts bootstrap tokens only."""
+    device_bound_headers = await auth_header(client)
+
+    response = await client.post(
+        "/v1/auth/devices/enroll",
+        json={"public_key": b64_bytes(32, 9)},
+        headers=device_bound_headers,
+    )
+
+    assert response.status_code == 401
+    assert response.headers.get("WWW-Authenticate") == "bootstrap_required"
+
+
+@pytest.mark.asyncio
 async def test_list_devices_hides_sensitive_fields(client: AsyncClient) -> None:
-    # auth_header enrolls one device (without fcm_token); enroll a second
-    # explicitly to verify fcm_token gating + that public_key never leaks.
-    headers = await auth_header(client)
+    """Enroll two devices (one with fcm_token, one without) and verify
+    list_devices flags has_fcm_token correctly and never leaks public_key
+    or fcm_token. Bootstrap token is needed for both enroll calls because
+    enroll rejects device-bound tokens."""
+    bootstrap = await signup_and_login(client)
+    bootstrap_headers = {"Authorization": f"Bearer {bootstrap}"}
+
+    first = await client.post(
+        "/v1/auth/devices/enroll",
+        json={"public_key": b64_bytes(32, 11)},
+        headers=bootstrap_headers,
+    )
+    assert first.status_code == 201
+    device_headers = {"Authorization": f"Bearer {first.json()['session_token']}"}
+
     await client.post(
         "/v1/auth/devices/enroll",
         json={"public_key": b64_bytes(32, 4), "fcm_token": "fcm-token"},
-        headers=headers,
+        headers=bootstrap_headers,
     )
 
-    response = await client.get("/v1/auth/devices", headers=headers)
+    response = await client.get("/v1/auth/devices", headers=device_headers)
 
     assert response.status_code == 200
     body = response.json()
@@ -151,19 +204,27 @@ async def test_list_devices_hides_sensitive_fields(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_revoke_device(client: AsyncClient) -> None:
-    # auth_header enrolls a primary device. Enroll a second; revoke that
-    # one; verify the second is revoked while the primary (which is doing
-    # the revoke + reading the list) is still authorized.
-    headers = await auth_header(client)
-    enroll = await client.post(
+    """Enroll two devices; revoke the second using the first's token;
+    verify the second is marked revoked and the first is still authorized."""
+    bootstrap = await signup_and_login(client)
+    bootstrap_headers = {"Authorization": f"Bearer {bootstrap}"}
+
+    first = await client.post(
+        "/v1/auth/devices/enroll",
+        json={"public_key": b64_bytes(32, 11)},
+        headers=bootstrap_headers,
+    )
+    device_headers = {"Authorization": f"Bearer {first.json()['session_token']}"}
+
+    second = await client.post(
         "/v1/auth/devices/enroll",
         json={"public_key": b64_bytes(32, 4)},
-        headers=headers,
+        headers=bootstrap_headers,
     )
-    target_device_id = enroll.json()["device_id"]
+    target_device_id = second.json()["device_id"]
 
-    revoke = await client.post(f"/v1/auth/devices/{target_device_id}/revoke", headers=headers)
-    devices = await client.get("/v1/auth/devices", headers=headers)
+    revoke = await client.post(f"/v1/auth/devices/{target_device_id}/revoke", headers=device_headers)
+    devices = await client.get("/v1/auth/devices", headers=device_headers)
 
     assert revoke.status_code == 204
     target_row = next(row for row in devices.json() if row["id"] == target_device_id)
@@ -203,17 +264,21 @@ async def test_state_endpoint_rejects_revoked_device(client: AsyncClient) -> Non
 
 @pytest.mark.asyncio
 async def test_revoke_other_users_device_returns_404(client: AsyncClient) -> None:
-    first_headers = await auth_header(client, email="first@example.com", fill=1)
-    second_headers = await auth_header(client, email="second@example.com", fill=2)
-    enroll = await client.post(
-        "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4)},
-        headers=first_headers,
-    )
+    """Verify cross-user isolation: user B cannot revoke user A's device.
+    Uses each user's own device-bound JWT for the actual call (which is
+    what current_auth_context requires), and the API does NOT leak the
+    existence of foreign-user devices."""
+    # User A has at least one device (set up by auth_header).
+    user_a_headers = await auth_header(client, email="first@example.com", fill=1)
+    user_a_devices = await client.get("/v1/auth/devices", headers=user_a_headers)
+    user_a_device_id = user_a_devices.json()[0]["id"]
+
+    # User B has their own device-bound token.
+    user_b_headers = await auth_header(client, email="second@example.com", fill=2)
 
     response = await client.post(
-        f"/v1/auth/devices/{enroll.json()['device_id']}/revoke",
-        headers=second_headers,
+        f"/v1/auth/devices/{user_a_device_id}/revoke",
+        headers=user_b_headers,
     )
 
     assert response.status_code == 404

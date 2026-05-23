@@ -3,10 +3,9 @@ import base64
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import create_access_token, current_user
+from app.auth import AuthContext, create_access_token, current_auth_context
 from app.db import get_db
 from app.middleware.rate_limit import rate_limit
-from app.models import User
 from app.schemas import (
     LoginRequest,
     LoginResponse,
@@ -93,6 +92,12 @@ async def login(
 
 
 @account_router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_account(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> Response:
-    await delete_user(db, user)
+async def delete_account(
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Delete the user's account. Requires a device-bound JWT so a
+    revoked device cannot trigger account deletion (Codex consultation
+    51 RED #2)."""
+    await delete_user(db, ctx.user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

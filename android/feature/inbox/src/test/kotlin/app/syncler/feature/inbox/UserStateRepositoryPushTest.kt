@@ -1,7 +1,6 @@
 package app.syncler.feature.inbox
 
 import app.syncler.core.auth.Session
-import app.syncler.core.auth.SessionStore
 import app.syncler.core.auth.TokenStore
 import app.syncler.core.network.MessageInboxResponseDto
 import app.syncler.core.network.PluginLatestDto
@@ -51,7 +50,7 @@ class UserStateRepositoryPushTest {
         val prefs = InMemoryUserStatePrefs()
         val api = AlwaysConflictApi()
         val session = unlockedSession()
-        val repo = UserStateRepository(prefs, api, session)
+        val repo = UserStateRepository(prefs, api, session, java.time.Clock.systemUTC())
 
         // Local mutation triggers markDirty + push; push hits 409, retries via
         // handleConflictAndRetry, retry also 409, repo throws → outer
@@ -75,7 +74,7 @@ class UserStateRepositoryPushTest {
         val prefs = InMemoryUserStatePrefs()
         val api = AlwaysSucceedsApi()
         val session = unlockedSession()
-        val repo = UserStateRepository(prefs, api, session)
+        val repo = UserStateRepository(prefs, api, session, java.time.Clock.systemUTC())
 
         repo.markRead("msg-1")
 
@@ -148,7 +147,7 @@ private class StubApi : SynclerApi {
     override suspend fun signup(body: SignupRequest): SignupResponse = stub()
     override suspend fun preLogin(body: PreLoginRequest): PreLoginResponse = stub()
     override suspend fun login(body: LoginRequest): LoginResponse = stub()
-    override suspend fun enrollDevice(body: DeviceEnrollRequest): DeviceEnrollResponse = stub()
+    override suspend fun enrollDevice(authHeader: String, body: DeviceEnrollRequest): DeviceEnrollResponse = stub()
     override suspend fun listDevices(): List<DeviceItem> = stub()
     override suspend fun revokeDevice(id: String): Response<Unit> = stub()
     override suspend fun deleteAccount(): Response<Unit> = stub()

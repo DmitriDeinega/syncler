@@ -11,6 +11,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import java.time.Clock
 import javax.inject.Singleton
 
 /**
@@ -58,6 +59,16 @@ internal class EncryptedSharedPrefsBackend(
 @Module
 @InstallIn(SingletonComponent::class)
 object UserStatePrefsModule {
+    /**
+     * System UTC clock binding. UserStateRepository takes a Clock via the
+     * constructor (so unit tests can pass a fixed clock); Dagger needs an
+     * explicit @Provides because it doesn't honor Kotlin default values
+     * (Codex consultation 51).
+     */
+    @Provides
+    @Singleton
+    fun provideClock(): Clock = Clock.systemUTC()
+
     @Provides
     @Singleton
     fun provideUserStatePrefs(@ApplicationContext context: Context): UserStatePrefs {

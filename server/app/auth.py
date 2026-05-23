@@ -113,13 +113,51 @@ async def current_user(
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """User-only dependency for routes that operate before a device has been
-    enrolled (signup completion, login, the initial enrollment call).
+    enrolled (signup completion, login).
 
     For routes that handle user data (state, inbox, message detail, dismiss,
     device listing, device revoke), use [current_auth_context] instead. That
     dependency additionally rejects requests from revoked devices.
+
+    For the enrollment endpoint specifically (`/v1/auth/devices/enroll`),
+    use [bootstrap_only_user] — a revoked device-bound token must NOT be
+    able to re-enroll and regain access (Codex consultation 51 RED #1).
     """
     claims = _decode_claims(token)
+    user = await get_user_by_id(db, claims.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    request.state.user_id = str(user.id)
+    return user
+
+
+async def bootstrap_only_user(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Bootstrap-only dependency for `/v1/auth/devices/enroll`.
+
+    Accepts ONLY tokens without a `did` claim (bootstrap tokens from
+    `/v1/auth/login`). Tokens carrying `did` are rejected — a revoked
+    device's still-valid JWT must not be able to enroll a new device
+    and regain access.
+
+    This is the only "user-only" route in the post-Phase-0 surface that
+    needs this explicit guard; everywhere else `current_auth_context`
+    is the right dependency.
+    """
+    claims = _decode_claims(token)
+    if claims.device_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="bootstrap token required for enrollment; log in fresh",
+            headers={"WWW-Authenticate": "bootstrap_required"},
+        )
     user = await get_user_by_id(db, claims.user_id)
     if user is None:
         raise HTTPException(

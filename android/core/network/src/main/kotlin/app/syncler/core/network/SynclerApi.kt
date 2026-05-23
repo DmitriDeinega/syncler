@@ -19,8 +19,20 @@ interface SynclerApi {
     @POST("/v1/auth/login")
     suspend fun login(@Body body: LoginRequest): LoginResponse
 
+    /**
+     * Enroll a device. The Authorization header is set per-call from the
+     * caller's bootstrap token rather than from the [AuthTokenProvider]
+     * interceptor — the AuthRepository runs enroll BEFORE authenticating
+     * the Session so observers don't see a momentarily-unlocked session
+     * carrying a user-only bootstrap token (Codex consultation 51 YELLOW
+     * #4). The auth interceptor in [NetworkModule] preserves a pre-set
+     * Authorization header instead of overriding it.
+     */
     @POST("/v1/auth/devices/enroll")
-    suspend fun enrollDevice(@Body body: DeviceEnrollRequest): DeviceEnrollResponse
+    suspend fun enrollDevice(
+        @retrofit2.http.Header("Authorization") authHeader: String,
+        @Body body: DeviceEnrollRequest,
+    ): DeviceEnrollResponse
 
     @GET("/v1/auth/devices")
     suspend fun listDevices(): List<DeviceItem>
