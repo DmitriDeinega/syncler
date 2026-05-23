@@ -38,6 +38,8 @@ dependencies {
     implementation(libs.moshi.kotlin)
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+    implementation(libs.okhttp.sse)
+    implementation(libs.timber)
     api(libs.retrofit)
     implementation(libs.retrofit.moshi)
 

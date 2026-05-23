@@ -65,7 +65,6 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.util.Locale
 import javax.inject.Inject
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -85,6 +84,7 @@ class InboxViewModel @Inject constructor(
     private val repository: InboxRepository,
     private val userState: UserStateRepository,
     private val session: app.syncler.core.auth.Session,
+    private val eventStream: app.syncler.core.network.EventStreamManager,
 ) : ViewModel() {
 
     val items: StateFlow<List<InboxItem>> = repository.items
@@ -142,6 +142,45 @@ class InboxViewModel @Inject constructor(
             .drop(1)
             .onEach { unlocked -> if (!unlocked) clearUiState() }
             .launchIn(viewModelScope)
+
+        // Phase 2: react to server-pushed SSE events. inbox.changed → re-pull
+        // inbox. state.changed → re-pull user state. dismiss → reflect cross-
+        // device dismiss locally (V1: just trigger an inbox refresh since
+        // dismiss state is recomputed from the server's delivery rows on
+        // every refresh). The actual data still comes through the existing
+        // REST endpoints under the device-bound JWT — SSE is a hint channel.
+        eventStream.events
+            .onEach { event ->
+                when (event) {
+                    is app.syncler.core.network.ServerEvent.InboxChanged ->
+                        repository.refresh()
+                    is app.syncler.core.network.ServerEvent.StateChanged ->
+                        userState.pull()
+                    is app.syncler.core.network.ServerEvent.Dismiss ->
+                        repository.refresh()
+                }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Lifecycle hook from InboxScreen. Open the SSE event stream and do a
+     * one-shot catchup refresh+pull. Replaces the V1 every-15s polling
+     * loop with reactive freshness.
+     */
+    fun onForeground() {
+        eventStream.start()
+        refresh()
+    }
+
+    /**
+     * Lifecycle hook from InboxScreen. Close the SSE stream cleanly when
+     * the app backgrounds — Doze / app standby would tear it down anyway,
+     * but we close ahead of time so the server's `close_device_subscribers`
+     * doesn't accumulate dead queues.
+     */
+    fun onBackground() {
+        eventStream.stop()
     }
 
     private fun clearUiState() {
@@ -303,11 +342,21 @@ fun InboxScreen(
     val selectedSenderId by viewModel.selectedSenderId.collectAsState()
     val sendersInInbox by viewModel.sendersInInbox.collectAsState()
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            viewModel.refresh()
-            delay(POLL_INTERVAL_MS)
+    // Phase 2: replace the 15-second polling loop with lifecycle-driven SSE.
+    // ON_RESUME opens the event stream + does a one-shot catchup refresh;
+    // ON_PAUSE closes the stream cleanly. Server events nudge the
+    // ViewModel to re-fetch on demand (see InboxViewModel.init).
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> viewModel.onForeground()
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> viewModel.onBackground()
+                else -> Unit
+            }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val selectedItem = selectedId?.let { id -> items.firstOrNull { it.id == id } }
@@ -1009,6 +1058,5 @@ private fun formatValue(value: Any?): String = when (value) {
     else -> value.toString()
 }
 
-private const val POLL_INTERVAL_MS = 15_000L
 private val UNREAD_DOT_SIZE = 8.dp
 private val LEADING_AFFORDANCE_SIZE = 24.dp
