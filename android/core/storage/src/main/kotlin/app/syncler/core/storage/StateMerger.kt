@@ -65,6 +65,19 @@ object StateMerger {
             pickWinner = { a, b -> if (compareTimestamps(a.deletedAt, b.deletedAt) >= 0) a else b },
         )
 
+        // Phase 1 — pairedSenders: merge by pairingId. Tombstone wins
+        // (either side with non-null removedAt; later removedAt wins on
+        // conflict). When neither side is tombstoned, take the entry
+        // with the oldest firstPairedAt (deterministic; freshly-minted
+        // UUIDs almost never collide). Tombstones prevent an offline
+        // device with a stale active entry from resurrecting a pairing
+        // that's been revoked elsewhere.
+        val pairedSenders = mergeByKey(
+            local.pairedSenders + remote.pairedSenders,
+            key = { it.pairingId },
+            pickWinner = ::pickPairedSenderWinner,
+        )
+
         // userScopedStorage NOT merged in V1 — local wins. See class kdoc.
         return EncryptedUserState(
             schemaVersion = schema,
@@ -75,7 +88,26 @@ object StateMerger {
             readMessages = readMessages,
             archivedMessages = archivedMessages,
             deletedMessages = deletedMessages,
+            pairedSenders = pairedSenders,
         )
+    }
+
+    /**
+     * Pair-merge winner picker:
+     *  - If either side is tombstoned (removedAt != null), the tombstone
+     *    wins. If both sides are tombstoned, the later removedAt wins.
+     *  - If neither side is tombstoned, the oldest firstPairedAt wins
+     *    (stable; collisions on a 128-bit pairingId are astronomically
+     *    rare so the tie-breaker mostly never fires).
+     */
+    private fun pickPairedSenderWinner(a: PairedSenderEntry, b: PairedSenderEntry): PairedSenderEntry {
+        return when {
+            a.removedAt != null && b.removedAt != null ->
+                if (compareTimestamps(a.removedAt, b.removedAt) >= 0) a else b
+            a.removedAt != null -> a
+            b.removedAt != null -> b
+            else -> if (compareTimestamps(a.firstPairedAt, b.firstPairedAt) <= 0) a else b
+        }
     }
 
     private fun <T> mergeByKey(

@@ -23,6 +23,15 @@ data class EncryptedUserState(
     val archivedMessages: List<ArchivedMessageEntry> = emptyList(),
     /** M11.6: per-message delete state. Hidden from all surfaces; merges as union. */
     val deletedMessages: List<DeletedMessageEntry> = emptyList(),
+    /**
+     * Phase 1: synced paired senders. Each user device that scans a sender's
+     * QR adds a [PairedSenderEntry] to this list; the M7 state blob fans the
+     * pairing key (encrypted under the user's master key) out to every other
+     * device the user owns, so any device can decrypt incoming messages from
+     * that sender. Tombstone-on-revoke (`removedAt` set) prevents an offline
+     * device from resurrecting a revoked pairing on its next sync.
+     */
+    val pairedSenders: List<PairedSenderEntry> = emptyList(),
 ) {
     fun toJson(): String = JSONObject().apply {
         put("schema_version", schemaVersion)
@@ -49,13 +58,18 @@ data class EncryptedUserState(
         put("deleted_messages", JSONArray().apply {
             deletedMessages.forEach { put(it.toJson()) }
         })
+        put("paired_senders", JSONArray().apply {
+            pairedSenders.forEach { put(it.toJson()) }
+        })
     }.toString()
 
     companion object {
         const val SCHEMA_V1 = 1
         const val SCHEMA_V2 = 2
         const val SCHEMA_V3 = 3
-        const val SCHEMA_CURRENT = SCHEMA_V3
+        /** Phase 1: adds `paired_senders` field for synced pairing. */
+        const val SCHEMA_V4 = 4
+        const val SCHEMA_CURRENT = SCHEMA_V4
 
         /** Pre-V1 blobs (no schema_version field) — migrated forward at parse. */
         const val SCHEMA_V0 = 0
@@ -69,7 +83,7 @@ data class EncryptedUserState(
             val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
             return EncryptedUserState(
                 schemaVersion = when (schema) {
-                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2 -> SCHEMA_CURRENT  // forward-migrate
+                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3 -> SCHEMA_CURRENT  // forward-migrate
                     else -> schema
                 },
                 installedPlugins = obj.optJSONArray("installed_plugins")
@@ -126,6 +140,13 @@ data class EncryptedUserState(
                     ?.let { arr ->
                         (0 until arr.length()).mapNotNull {
                             runCatching { DeletedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+                pairedSenders = obj.optJSONArray("paired_senders")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { PairedSenderEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
                         }
                     }
                     .orEmpty(),
@@ -256,6 +277,67 @@ data class DeletedMessageEntry(
         fun fromJson(o: JSONObject) = DeletedMessageEntry(
             messageId = o.getString("message_id"),
             deletedAt = o.getString("deleted_at"),
+        )
+    }
+}
+
+/**
+ * Phase 1: a paired sender, synced via the M7 encrypted user-state blob.
+ *
+ * One QR scan on any of the user's devices propagates the pairing key (a
+ * 32-byte AES-256 secret shared with the sender) to every other device
+ * the user has enrolled. Each device decrypts the blob with its master
+ * key, sees the new entry, and projects it into its local
+ * `PairedSenderStore`.
+ *
+ * `removedAt` is a tombstone — when the user revokes the pairing on any
+ * device, the entry stays in the synced blob with `removedAt` set. An
+ * offline device that comes back online with stale local state cannot
+ * resurrect the pairing on its next push because the merger keeps the
+ * tombstone.
+ *
+ * `source = "manual"` for entries added by an explicit user pairing
+ * action; `source = "migration"` for entries bootstrapped from a
+ * device's local `PairedSenderStore` on the first launch after the
+ * SCHEMA_V4 bump (so devices that paired pre-sync get caught up).
+ */
+data class PairedSenderEntry(
+    val pairingId: String,
+    val senderId: String,
+    val senderName: String,
+    val senderPublicKey: String,       // base64
+    val fingerprint: String,
+    val nameHash: String,              // base64
+    val pairingKey: String,            // base64, 32 bytes (AES-256)
+    val firstPairedAt: String,         // ISO-8601 UTC
+    val removedAt: String? = null,
+    val source: String = "manual",
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("pairing_id", pairingId)
+        put("sender_id", senderId)
+        put("sender_name", senderName)
+        put("sender_public_key", senderPublicKey)
+        put("fingerprint", fingerprint)
+        put("name_hash", nameHash)
+        put("pairing_key", pairingKey)
+        put("first_paired_at", firstPairedAt)
+        put("removed_at", removedAt ?: JSONObject.NULL)
+        put("source", source)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = PairedSenderEntry(
+            pairingId = o.getString("pairing_id"),
+            senderId = o.getString("sender_id"),
+            senderName = o.getString("sender_name"),
+            senderPublicKey = o.getString("sender_public_key"),
+            fingerprint = o.getString("fingerprint"),
+            nameHash = o.getString("name_hash"),
+            pairingKey = o.getString("pairing_key"),
+            firstPairedAt = o.getString("first_paired_at"),
+            removedAt = if (o.isNull("removed_at")) null else o.optString("removed_at").takeIf { it.isNotEmpty() },
+            source = o.optString("source", "manual").ifEmpty { "manual" },
         )
     }
 }

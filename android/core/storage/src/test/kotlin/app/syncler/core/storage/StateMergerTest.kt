@@ -178,6 +178,111 @@ class StateMergerTest {
         assertEquals(emptyList<ReadMessageEntry>(), parsed.readMessages)
         assertEquals(emptyList<ArchivedMessageEntry>(), parsed.archivedMessages)
         assertEquals(emptyList<DeletedMessageEntry>(), parsed.deletedMessages)
+        assertEquals(emptyList<PairedSenderEntry>(), parsed.pairedSenders)
         assertEquals(1, parsed.dismissedMessages.size)
     }
+
+    // ---------- Phase 1: pairedSenders merge ----------
+
+    @Test
+    fun `paired senders merge by pairing id, oldest firstPairedAt wins on add conflict`() {
+        // Two devices accidentally created entries with the same pairingId
+        // (essentially impossible with fresh UUIDs, but the merger must
+        // still be deterministic). The earlier firstPairedAt wins.
+        val older = paired("p1", "s1", firstPairedAt = "2026-05-20T10:00:00Z")
+        val newer = paired("p1", "s1", firstPairedAt = "2026-05-20T11:00:00Z")
+        val merged = StateMerger.merge(
+            local = EncryptedUserState(pairedSenders = listOf(older)),
+            remote = EncryptedUserState(pairedSenders = listOf(newer)),
+        )
+        assertEquals(1, merged.pairedSenders.size)
+        assertEquals(older.firstPairedAt, merged.pairedSenders.single().firstPairedAt)
+    }
+
+    @Test
+    fun `paired senders take union when pairing ids differ`() {
+        val a = paired("p-a", "s1", firstPairedAt = "2026-05-20T10:00:00Z")
+        val b = paired("p-b", "s2", firstPairedAt = "2026-05-20T11:00:00Z")
+        val merged = StateMerger.merge(
+            local = EncryptedUserState(pairedSenders = listOf(a)),
+            remote = EncryptedUserState(pairedSenders = listOf(b)),
+        )
+        assertEquals(2, merged.pairedSenders.size)
+        assertTrue(merged.pairedSenders.any { it.pairingId == "p-a" })
+        assertTrue(merged.pairedSenders.any { it.pairingId == "p-b" })
+    }
+
+    @Test
+    fun `paired sender tombstone wins over active entry`() {
+        val active = paired("p1", "s1", firstPairedAt = "2026-05-20T10:00:00Z")
+        val tombstoned = active.copy(removedAt = "2026-05-21T10:00:00Z")
+        // Device A still has the active entry; device B revoked it. Merge
+        // must keep the tombstone so the offline-A pairing doesn't come back.
+        val merged = StateMerger.merge(
+            local = EncryptedUserState(pairedSenders = listOf(active)),
+            remote = EncryptedUserState(pairedSenders = listOf(tombstoned)),
+        )
+        assertEquals(1, merged.pairedSenders.size)
+        assertEquals("2026-05-21T10:00:00Z", merged.pairedSenders.single().removedAt)
+    }
+
+    @Test
+    fun `paired sender later tombstone wins when both sides tombstoned`() {
+        // Defensive: if both sides have a tombstone (e.g. concurrent
+        // revoke from two devices), the later removedAt wins. Stays
+        // monotone.
+        val first = paired("p1", "s1").copy(removedAt = "2026-05-21T10:00:00Z")
+        val later = paired("p1", "s1").copy(removedAt = "2026-05-21T11:00:00Z")
+        val merged = StateMerger.merge(
+            local = EncryptedUserState(pairedSenders = listOf(first)),
+            remote = EncryptedUserState(pairedSenders = listOf(later)),
+        )
+        assertEquals("2026-05-21T11:00:00Z", merged.pairedSenders.single().removedAt)
+    }
+
+    @Test
+    fun `paired senders survive schema V3 to V4 forward migration`() {
+        // A V3 blob (pre-pairedSenders) parsed by a V4 client must yield
+        // an empty pairedSenders list and the SCHEMA_CURRENT (V4) tag.
+        val v3Json = """{
+            "schema_version": 3,
+            "installed_plugins": [],
+            "dismissed_messages": [],
+            "plugin_settings": {},
+            "user_scoped_storage": {},
+            "read_messages": [],
+            "archived_messages": [],
+            "deleted_messages": []
+        }""".trimIndent()
+        val parsed = EncryptedUserState.fromJson(v3Json)
+        assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
+        assertEquals(EncryptedUserState.SCHEMA_V4, parsed.schemaVersion)
+        assertEquals(emptyList<PairedSenderEntry>(), parsed.pairedSenders)
+    }
+
+    @Test
+    fun `paired sender entry round trips through JSON`() {
+        val original = paired(
+            "p1", "s1",
+            firstPairedAt = "2026-05-22T10:00:00Z",
+        ).copy(removedAt = "2026-05-23T11:00:00Z", source = "migration")
+
+        val parsed = PairedSenderEntry.fromJson(original.toJson())
+        assertEquals(original, parsed)
+    }
+
+    private fun paired(
+        pairingId: String,
+        senderId: String,
+        firstPairedAt: String = "2026-05-22T10:00:00Z",
+    ) = PairedSenderEntry(
+        pairingId = pairingId,
+        senderId = senderId,
+        senderName = "Sender $senderId",
+        senderPublicKey = "cHVibGlja2V5",
+        fingerprint = "fp:$senderId",
+        nameHash = "bmFtZWhhc2g=",
+        pairingKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        firstPairedAt = firstPairedAt,
+    )
 }
