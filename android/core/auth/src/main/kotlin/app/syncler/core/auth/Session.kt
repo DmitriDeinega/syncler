@@ -55,6 +55,20 @@ class Session @Inject constructor(
     }
 
     /**
+     * Replaces the session token in place, keeping the existing master key.
+     *
+     * Used after device enrollment to swap the user-only bootstrap JWT from
+     * /v1/auth/login for the device-bound JWT issued by
+     * /v1/auth/devices/enroll. The bootstrap token is rejected by sensitive
+     * routes from this milestone forward; the device-bound token carries the
+     * `did` claim required by `current_auth_context` on the server.
+     */
+    fun replaceToken(token: String) {
+        tokenStore.writeToken(token)
+        state.value = state.value.copy(token = token)
+    }
+
+    /**
      * Wipes the in-memory session. User-scoped singletons (read marks,
      * paired-sender store, archives, ...) observe [sessionState] and
      * react to the transition to a locked state by clearing themselves —

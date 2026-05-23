@@ -108,10 +108,14 @@ class AuthRepository @Inject constructor(
         val response = api.enrollDevice(
             DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()),
         )
-        // Persist the server-issued device_id so we can pass it on the inbox
-        // poll. The server uses it to bump last_seen + identify the current
-        // device in the Settings list.
+        // Persist the server-issued device_id so the Settings tab can label
+        // this device and (after Phase 1) the synced state can scope per-
+        // device preferences.
         deviceIdentityStore.write(response.deviceId)
+        // Swap the bootstrap (user-only) JWT for the device-bound JWT the
+        // server issued at enrollment. From here on, every authenticated
+        // call carries the `did` claim that `current_auth_context` requires.
+        session.replaceToken(response.sessionToken)
     }
 
     private fun normalizedEmail(email: String): String = email.trim().lowercase(Locale.US)

@@ -7,9 +7,8 @@ import base64
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import current_user
+from app.auth import AuthContext, current_auth_context
 from app.db import get_db
-from app.models import User
 from app.schemas import (
     StateConflictBody,
     StateGetResponse,
@@ -32,10 +31,10 @@ def _b64(value: bytes) -> str:
 
 @router.get("", response_model=StateGetResponse)
 async def get_user_state(
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> StateGetResponse:
-    state = await get_state(db, user.id)
+    state = await get_state(db, ctx.user.id)
     if state is None:
         return StateGetResponse(state_version=0, encrypted_blob="", updated_at=None)
     return StateGetResponse(
@@ -48,14 +47,14 @@ async def get_user_state(
 @router.put("", response_model=StatePutResponse)
 async def put_user_state(
     payload: StatePutRequest,
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> StatePutResponse:
     new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
     try:
         updated = await upsert_state_cas(
             db,
-            user_id=user.id,
+            user_id=ctx.user.id,
             expected_state_version=payload.expected_state_version,
             new_encrypted_blob=new_blob,
         )

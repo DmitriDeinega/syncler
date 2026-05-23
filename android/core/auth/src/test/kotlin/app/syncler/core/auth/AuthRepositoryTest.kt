@@ -31,13 +31,40 @@ class AuthRepositoryTest {
         val result = repository.signup("User@Example.com", "correct horse battery staple".toCharArray())
 
         assertTrue(result.isSuccess)
-        assertEquals("token-1", session.currentToken())
-        assertEquals("token-1", tokenStore.token)
+        // Post-enroll the bootstrap "token-1" is swapped for the device-bound
+        // token returned by /v1/auth/devices/enroll. Both Session and the
+        // TokenStore should hold the new token.
+        assertEquals("device-bound-token-1", session.currentToken())
+        assertEquals("device-bound-token-1", tokenStore.token)
         assertEquals("user@example.com", api.signupRequest?.email)
         assertEquals("user@example.com", api.preLoginRequest?.email)
         assertNotNull(api.signupRequest?.encryptedMasterKey)
         assertEquals(1, api.enrollCount)
         assertEquals("device-1", identityStore.value)
+    }
+
+    @Test
+    fun loginReplacesBootstrapTokenWithDeviceBoundToken() = runTest {
+        val api = FakeApi()
+        val tokenStore = InMemoryTokenStore()
+        val session = Session(tokenStore)
+        val repository = AuthRepository(
+            api,
+            session,
+            FixedDevicePublicKeyProvider(),
+            FakeDeviceIdentityStore(),
+        )
+
+        // Run signup to set up a user and pairing-key material the login
+        // step can verify against.
+        repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
+
+        // Pure login path also goes through enroll and ends up with the
+        // device-bound token.
+        repository.login("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
+
+        assertEquals("device-bound-token-1", session.currentToken())
+        assertEquals("device-bound-token-1", tokenStore.token)
     }
 
     @Test
@@ -129,7 +156,11 @@ private class FakeApi(
 
     override suspend fun enrollDevice(body: DeviceEnrollRequest): DeviceEnrollResponse {
         enrollCount += 1
-        return DeviceEnrollResponse(deviceId = "device-1", createdAt = "2026-05-20T00:00:00Z")
+        return DeviceEnrollResponse(
+            deviceId = "device-1",
+            createdAt = "2026-05-20T00:00:00Z",
+            sessionToken = "device-bound-token-1",
+        )
     }
 
     override suspend fun listDevices(): List<DeviceItem> = emptyList()
@@ -143,8 +174,8 @@ private class FakeApi(
     // they were stubbed when added to keep this fixture compiling alongside
     // SynclerApi growth (state, pairing, plugin lookup, etc.).
     override suspend fun getMessage(id: String) = stub()
-    override suspend fun inbox(since: String?, deviceId: String?) = stub()
-    override suspend fun dismissMessage(id: String, deviceId: String): Response<Unit> = stub()
+    override suspend fun inbox(since: String?) = stub()
+    override suspend fun dismissMessage(id: String): Response<Unit> = stub()
     override suspend fun previewPairing(token: String) = stub()
     override suspend fun completePairing(body: app.syncler.core.network.PairingCompleteRequestDto) = stub()
     override suspend fun revokePairing(id: String): Response<Unit> = stub()

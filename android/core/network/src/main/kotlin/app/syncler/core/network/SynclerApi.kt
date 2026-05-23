@@ -37,15 +37,11 @@ interface SynclerApi {
     @GET("/v1/messages/inbox")
     suspend fun inbox(
         @retrofit2.http.Query("since") since: String? = null,
-        // Server bumps the device row's last_seen when this is supplied so the
-        // Settings tab can identify the current device by freshness.
-        @retrofit2.http.Query("device_id") deviceId: String? = null,
     ): MessageInboxResponseDto
 
     @POST("/v1/messages/{id}/dismiss")
     suspend fun dismissMessage(
         @Path("id") id: String,
-        @retrofit2.http.Query("device_id") deviceId: String,
     ): Response<Unit>
 
     @GET("/v1/pairing/preview")
@@ -248,6 +244,9 @@ data class DeviceEnrollRequest(
 data class DeviceEnrollResponse(
     @Json(name = "device_id") val deviceId: String,
     @Json(name = "created_at") val createdAt: String,
+    // Device-bound JWT. Replaces the bootstrap token from /v1/auth/login so
+    // subsequent requests to sensitive endpoints carry the `did` claim.
+    @Json(name = "session_token") val sessionToken: String,
 )
 
 @JsonClass(generateAdapter = true)

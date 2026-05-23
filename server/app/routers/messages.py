@@ -14,13 +14,13 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import current_user
+from app.auth import AuthContext, current_auth_context
 from app.crypto.aead import assemble_envelope
 from app.crypto.nonce import get_global_registry
 from app.crypto.signatures import verify_message_envelope
 from app.db import get_db
 from app.middleware.rate_limit import rate_limit
-from app.models import Sender, User
+from app.models import Sender
 from app.schemas import (
     MessageDetailResponse,
     MessageInboxItem,
@@ -30,14 +30,12 @@ from app.schemas import (
     decode_base64,
 )
 from app.services.messages import (
-    DeviceOwnershipError,
     ExpiredEnvelopeError,
     MessageNotFoundError,
     NoActiveDeviceWithPluginError,
     NonceReplayError,
     PairingMissingError,
     PluginInactiveError,
-    assert_device_belongs_to_user,
     get_message_for_user,
     inbox_for_device,
     mark_dismissed,
@@ -152,24 +150,18 @@ async def send_message(
 @router.get("/inbox", response_model=MessageInboxResponse)
 async def inbox(
     since: datetime | None = Query(None),
-    device_id: uuid.UUID | None = Query(None),
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> MessageInboxResponse:
-    if device_id is not None:
-        try:
-            await assert_device_belongs_to_user(db, user_id=user.id, device_id=device_id)
-        except DeviceOwnershipError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found") from exc
-        # Authenticated + ownership-checked: bump last_seen so the Settings
-        # tab shows fresh activity. Without this the column stays NULL and
-        # users can't tell which row in the device list is the current one.
-        await touch_device_last_seen(db, device_id=device_id)
+    # Device identity comes from the JWT — no separate query param, and
+    # the auth dependency already verified the device is not revoked.
+    # Bump last_seen so Settings → Devices shows fresh activity.
+    await touch_device_last_seen(db, device_id=ctx.device.id)
 
     messages, next_since = await inbox_for_device(
         db,
-        user_id=user.id,
-        device_id=device_id or uuid.uuid4(),  # informational; inbox is per-user in V1
+        user_id=ctx.user.id,
+        device_id=ctx.device.id,
         since=since,
     )
     # Project plugin_identifier for each message in one batch query.
@@ -189,11 +181,11 @@ async def inbox(
 @router.get("/{message_id}", response_model=MessageDetailResponse)
 async def get_message(
     message_id: uuid.UUID,
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> MessageDetailResponse:
     try:
-        message = await get_message_for_user(db, user_id=user.id, message_id=message_id)
+        message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
     # Fetch plugin_identifier for this one message.
@@ -209,30 +201,26 @@ async def get_message(
 @router.post("/{message_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
 async def dismiss_message(
     message_id: uuid.UUID,
-    device_id: uuid.UUID = Query(...),
-    user: User = Depends(current_user),
+    ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    # M5.1 fix: verify device_id belongs to the authenticated user.
+    # Device comes from the JWT — no query param, no ownership check (the
+    # auth dependency already verified the device exists, belongs to the
+    # user, and is not revoked).
     try:
-        await assert_device_belongs_to_user(db, user_id=user.id, device_id=device_id)
-    except DeviceOwnershipError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found for this user") from exc
-
-    try:
-        message = await get_message_for_user(db, user_id=user.id, message_id=message_id)
+        message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
 
     try:
-        await mark_dismissed(db, message_id=message_id, device_id=device_id)
+        await mark_dismissed(db, message_id=message_id, device_id=ctx.device.id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery row not found") from exc
 
     # Fan out the dismiss event to other devices. The plugin's dismissBehavior
     # is encoded on the device side (in the plugin manifest), but the platform
     # always sends the event — devices decide locally whether to act on it.
-    await push_dismiss_to_other_devices(db, message=message, dismissing_device_id=device_id)
+    await push_dismiss_to_other_devices(db, message=message, dismissing_device_id=ctx.device.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -101,6 +101,11 @@ class DeviceEnrollRequest(BaseModel):
 class DeviceEnrollResponse(BaseModel):
     device_id: UUID
     created_at: datetime
+    # Device-bound JWT — clients replace their bootstrap token (from
+    # /v1/auth/login) with this so every subsequent request to a
+    # sensitive endpoint carries a `did` claim. Re-enrolling on a
+    # logged-in device also rotates this token.
+    session_token: str
 
 
 class DeviceListItem(BaseModel):

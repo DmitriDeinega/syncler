@@ -1,12 +1,8 @@
 package app.syncler.feature.inbox
 
-import android.content.Context
-import android.content.SharedPreferences
-import android.util.Base64
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import app.syncler.core.auth.Session
 import app.syncler.core.crypto.Aead
+import java.util.Base64
 import app.syncler.core.network.StatePutRequestDto
 import app.syncler.core.network.SynclerApi
 import app.syncler.core.storage.ArchivedMessageEntry
@@ -14,7 +10,7 @@ import app.syncler.core.storage.DeletedMessageEntry
 import app.syncler.core.storage.EncryptedUserState
 import app.syncler.core.storage.ReadMessageEntry
 import app.syncler.core.storage.StateMerger
-import dagger.hilt.android.qualifiers.ApplicationContext
+import app.syncler.core.storage.UserStateMutator
 import java.time.Clock
 import java.time.Instant
 import javax.inject.Inject
@@ -54,13 +50,11 @@ import timber.log.Timber
  */
 @Singleton
 class UserStateRepository @Inject constructor(
-    @ApplicationContext context: Context,
+    private val prefs: UserStatePrefs,
     private val api: SynclerApi,
     private val session: Session,
-) {
-    // Not injected: the @Singleton has no Hilt provider for Clock. Tests use
-    // the secondary constructor below to inject a fake.
-    private val clock: Clock = Clock.systemUTC()
+    private val clock: Clock = Clock.systemUTC(),
+) : UserStateMutator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
@@ -80,16 +74,20 @@ class UserStateRepository @Inject constructor(
             .onEach { unlocked -> if (!unlocked) clearInternal() }
             .launchIn(scope)
     }
-    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        PREFS_NAME,
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
 
     private val _state = MutableStateFlow(loadFromDisk())
-    val state: StateFlow<EncryptedUserState> = _state.asStateFlow()
+    override val state: StateFlow<EncryptedUserState> = _state.asStateFlow()
+
+    /**
+     * [UserStateMutator] implementation. Cross-module callers (e.g. the
+     * upcoming `PairedSenderStore` integration for synced pairing) use this
+     * to add their own fields to the synced state blob without depending on
+     * `:feature:inbox`.
+     */
+    override suspend fun mutateAndPush(transform: (EncryptedUserState) -> EncryptedUserState) {
+        mutateLocal(transform)
+        markDirtyAndPush()
+    }
 
     private val syncMutex = Mutex()
 
@@ -194,13 +192,9 @@ class UserStateRepository @Inject constructor(
         }
     }
 
-    private fun markDirty() {
-        prefs.edit().putBoolean(KEY_DIRTY, true).apply()
-    }
+    private fun markDirty() = prefs.putBoolean(KEY_DIRTY, true)
 
-    private fun clearDirty() {
-        prefs.edit().putBoolean(KEY_DIRTY, false).apply()
-    }
+    private fun clearDirty() = prefs.putBoolean(KEY_DIRTY, false)
 
     private fun isDirty(): Boolean = prefs.getBoolean(KEY_DIRTY, false)
 
@@ -293,9 +287,14 @@ class UserStateRepository @Inject constructor(
 
     private suspend fun handleConflictAndRetry(masterKey: ByteArray) {
         // Server has a newer blob. Pull, merge, re-push exactly once. If the
-        // retry also conflicts, give up and rely on the next foreground tick
-        // (flushPendingPush will pick it up because the dirty flag is set
-        // until push() succeeds).
+        // retry also fails, THROW so push()'s runCatching catches it and
+        // skips clearDirty() — the dirty flag must stay true so the next
+        // foreground tick (flushPendingPush) retries again.
+        //
+        // Codex review 47 (consultation 47, Reviewer B): the previous
+        // implementation silently logged the retry-failure path, which let
+        // push()'s outer runCatching reach clearDirty() and lose the
+        // pending change. That bug is fixed here.
         val response = api.getUserState()
         val remoteState = decodeRemote(response.encryptedBlob, masterKey)
         val merged = StateMerger.merge(local = _state.value, remote = remoteState)
@@ -312,17 +311,17 @@ class UserStateRepository @Inject constructor(
         if (retry.isSuccessful) {
             retry.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
         } else {
-            Timber.tag(TAG).w("CAS retry still conflicted (HTTP %d); will retry later", retry.code())
+            Timber.tag(TAG).w(
+                "CAS retry failed (HTTP %d); dirty flag preserved for next retry",
+                retry.code(),
+            )
+            throw HttpException(retry)
         }
     }
 
     private fun persist(state: EncryptedUserState, remoteVersion: Int? = null) {
-        prefs.edit()
-            .putString(KEY_STATE_JSON, state.toJson())
-            .apply {
-                if (remoteVersion != null) putInt(KEY_REMOTE_VERSION, remoteVersion)
-            }
-            .apply()
+        prefs.putString(KEY_STATE_JSON, state.toJson())
+        if (remoteVersion != null) prefs.putInt(KEY_REMOTE_VERSION, remoteVersion)
     }
 
     /**
@@ -334,35 +333,34 @@ class UserStateRepository @Inject constructor(
 
     private suspend fun clearInternal() = syncMutex.withLock {
         _state.value = EncryptedUserState()
-        prefs.edit().clear().apply()
+        prefs.clear()
     }
 
     private fun loadFromDisk(): EncryptedUserState =
-        prefs.getString(KEY_STATE_JSON, null)?.let {
+        prefs.getString(KEY_STATE_JSON)?.let {
             runCatching { EncryptedUserState.fromJson(it) }.getOrNull()
         } ?: EncryptedUserState()
 
     private fun lastKnownRemoteVersion(): Int = prefs.getInt(KEY_REMOTE_VERSION, 0)
-    private fun setLastKnownRemoteVersion(v: Int) {
-        prefs.edit().putInt(KEY_REMOTE_VERSION, v).apply()
-    }
+    private fun setLastKnownRemoteVersion(v: Int) = prefs.putInt(KEY_REMOTE_VERSION, v)
 
     private fun encodeLocal(state: EncryptedUserState, masterKey: ByteArray): String {
         val plaintext = state.toJson().toByteArray(Charsets.UTF_8)
         val wire = Aead.encrypt(masterKey, plaintext)
-        return Base64.encodeToString(wire, Base64.NO_WRAP)
+        // java.util.Base64 (not android.util.Base64) — same wire format
+        // (RFC 4648 with padding) and works in pure-JVM unit tests too.
+        return Base64.getEncoder().encodeToString(wire)
     }
 
     private fun decodeRemote(blobB64: String, masterKey: ByteArray): EncryptedUserState {
         if (blobB64.isBlank()) return EncryptedUserState()
-        val wire = Base64.decode(blobB64, Base64.NO_WRAP)
+        val wire = Base64.getDecoder().decode(blobB64)
         val plaintext = Aead.decrypt(masterKey, wire)
         return EncryptedUserState.fromJson(plaintext.toString(Charsets.UTF_8))
     }
 
     private companion object {
         const val TAG = "UserStateRepo"
-        const val PREFS_NAME = "syncler.user_state.enc"
         const val KEY_STATE_JSON = "state_json"
         const val KEY_REMOTE_VERSION = "remote_version"
         const val KEY_DIRTY = "dirty"

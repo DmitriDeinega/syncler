@@ -61,14 +61,22 @@ async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com
     return user_id, login.json()["session_token"]
 
 
-async def _enroll_device(client: AsyncClient, session_token: str, fcm_token: str = "fcm-token-stub") -> uuid.UUID:
+async def _enroll_device(client: AsyncClient, session_token: str, fcm_token: str = "fcm-token-stub") -> tuple[uuid.UUID, str]:
+    """Enroll a device and return (device_id, device_bound_session_token).
+
+    Phase 0 (device-bound JWT): callers must use the returned
+    device-bound token for any subsequent call to sensitive routes
+    (state, inbox, message detail, dismiss). The bootstrap token is
+    rejected.
+    """
     response = await client.post(
         "/v1/auth/devices/enroll",
         headers={"Authorization": f"Bearer {session_token}"},
         json={"public_key": _b64(b"d" * 32), "fcm_token": fcm_token},
     )
     assert response.status_code == 201, response.text
-    return uuid.UUID(response.json()["device_id"])
+    body = response.json()
+    return uuid.UUID(body["device_id"]), body["session_token"]
 
 
 async def _register_sender(client: AsyncClient) -> tuple[uuid.UUID, Ed25519PrivateKey]:
@@ -169,8 +177,8 @@ async def _send_payload(
 async def test_send_message_round_trip(
     app_client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    user_id, session_token = await _signup_and_login(app_client)
-    await _enroll_device(app_client, session_token)
+    user_id, bootstrap_token = await _signup_and_login(app_client)
+    _, session_token = await _enroll_device(app_client, bootstrap_token)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_plugin(db_session, user_id=user_id, sender_id=sender_id)
 
@@ -267,14 +275,16 @@ async def test_send_succeeds_when_device_has_no_fcm_token(
     google-services.json) must still be able to receive messages via the
     /v1/messages/inbox pull endpoint. Storage is the source of truth; FCM is
     a best-effort delivery channel on top of it."""
-    user_id, session_token = await _signup_and_login(app_client)
-    # Enroll device WITHOUT fcm_token
+    user_id, bootstrap_token = await _signup_and_login(app_client)
+    # Enroll device WITHOUT fcm_token. Capture the device-bound session_token
+    # from the enroll response — that's what sensitive routes require.
     response = await app_client.post(
         "/v1/auth/devices/enroll",
-        headers={"Authorization": f"Bearer {session_token}"},
+        headers={"Authorization": f"Bearer {bootstrap_token}"},
         json={"public_key": _b64(b"d" * 32)},
     )
     assert response.status_code == 201
+    session_token = response.json()["session_token"]
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_plugin(db_session, user_id=user_id, sender_id=sender_id)
 
@@ -314,11 +324,20 @@ async def test_send_returns_410_when_user_has_no_devices(
 
 
 @pytest.mark.asyncio
-async def test_dismiss_rejects_foreign_device(
+async def test_dismiss_uses_jwt_bound_device(
     app_client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    user_id, session_token = await _signup_and_login(app_client)
-    device_id = await _enroll_device(app_client, session_token)
+    """Phase 0: device identity comes from the JWT, not from a query
+    parameter. The previous "foreign device" attack vector (caller
+    spoofing `device_id` in the URL) is now structurally impossible —
+    the auth context dependency rejects any token whose `did` claim
+    doesn't match an active device the user owns.
+
+    This test verifies the post-Phase-0 dismiss works end-to-end with
+    a device-bound JWT, replacing the M5.1 foreign-device test (whose
+    attack model no longer exists)."""
+    user_id, bootstrap_token = await _signup_and_login(app_client)
+    _, session_token = await _enroll_device(app_client, bootstrap_token)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_plugin(db_session, user_id=user_id, sender_id=sender_id)
 
@@ -328,18 +347,8 @@ async def test_dismiss_rejects_foreign_device(
     send = await app_client.post("/v1/messages/send", json=body)
     message_id = send.json()["message_id"]
 
-    foreign_device = uuid.uuid4()
     dismiss = await app_client.post(
         f"/v1/messages/{message_id}/dismiss",
-        params={"device_id": str(foreign_device)},
-        headers={"Authorization": f"Bearer {session_token}"},
-    )
-    assert dismiss.status_code == 404
-
-    # Own device works
-    dismiss = await app_client.post(
-        f"/v1/messages/{message_id}/dismiss",
-        params={"device_id": str(device_id)},
         headers={"Authorization": f"Bearer {session_token}"},
     )
     assert dismiss.status_code == 204
