@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.config import get_settings
 from app.db import dispose_engine, init_engine
-from app.routers import auth, devices, messages, pairing, plugins, senders, state
+from app.routers import auth, devices, events, messages, pairing, plugins, senders, state
 
 
 @asynccontextmanager
@@ -40,6 +40,7 @@ app.include_router(pairing.router, prefix="/v1/pairing")
 app.include_router(messages.router, prefix="/v1/messages")
 app.include_router(state.router, prefix="/v1/state")
 app.include_router(plugins.router, prefix="/v1/plugins")
+app.include_router(events.router, prefix="/v1/events")
 
 
 @app.exception_handler(RequestValidationError)

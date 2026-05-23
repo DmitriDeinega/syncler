@@ -8,6 +8,7 @@ from app.db import get_db
 from app.models import User
 from app.schemas import DeviceEnrollRequest, DeviceEnrollResponse, DeviceListItem, decode_base64
 from app.services.devices import DeviceNotFoundError, enroll_device, list_devices, revoke_device
+from app.services.events import get_event_bus
 
 router = APIRouter(tags=["devices"])
 
@@ -52,6 +53,12 @@ async def revoke(
     except DeviceNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="device not found") from exc
 
+    # Close any open SSE stream for the revoked device immediately,
+    # rather than waiting for its JWT to expire. The revoked device
+    # would also be rejected by current_auth_context on its next
+    # request, but a long-lived event stream that's already past
+    # handshake would otherwise stay open.
+    await get_event_bus().close_device_subscribers(device_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

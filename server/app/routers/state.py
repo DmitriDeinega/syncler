@@ -16,6 +16,7 @@ from app.schemas import (
     StatePutResponse,
     decode_base64,
 )
+from app.services.events import get_event_bus
 from app.services.state import (
     StateConflictError,
     get_state,
@@ -69,4 +70,12 @@ async def put_user_state(
             status_code=status.HTTP_409_CONFLICT,
             detail=body.model_dump(),
         ) from exc
+    # SSE hint: notify other foreground devices that the encrypted state
+    # blob just changed so they pull the new version instead of waiting
+    # for the next refresh tick.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="state.changed",
+        data={"version": updated.state_version},
+    )
     return StatePutResponse(new_state_version=updated.state_version)

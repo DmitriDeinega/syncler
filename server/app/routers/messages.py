@@ -43,6 +43,7 @@ from app.services.messages import (
     store_message,
 )
 from app.services.devices import touch_device_last_seen
+from app.services.events import get_event_bus
 from app.services.push import push_dismiss_to_other_devices, push_message_to_user_devices
 from app.services.senders import (
     SenderNotFoundError,
@@ -144,6 +145,14 @@ async def send_message(
     registry.mark(sender_key, nonce_bytes)
 
     await push_message_to_user_devices(db, message=message)
+    # SSE hint: nudge any device the recipient has in foreground to pull
+    # /v1/messages/inbox now. Devices in background rely on the FCM
+    # wakeup already triggered by push_message_to_user_devices.
+    await get_event_bus().publish_to_user(
+        user_id=message.user_id,
+        event_type="inbox.changed",
+        data={"message_id": str(message.id), "sent_at": message.sent_at.isoformat()},
+    )
     return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
 
 
@@ -221,6 +230,14 @@ async def dismiss_message(
     # is encoded on the device side (in the plugin manifest), but the platform
     # always sends the event — devices decide locally whether to act on it.
     await push_dismiss_to_other_devices(db, message=message, dismissing_device_id=ctx.device.id)
+    # SSE hint: nudge OTHER foreground devices to update their local
+    # dismiss state. The dismissing device knows already; we mark its id
+    # so the client-side handler can no-op for self-originated events.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="dismiss",
+        data={"message_id": str(message_id), "source_device_id": str(ctx.device.id)},
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
