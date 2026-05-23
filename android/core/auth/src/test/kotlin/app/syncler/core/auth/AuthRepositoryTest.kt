@@ -26,7 +26,7 @@ class AuthRepositoryTest {
         val tokenStore = InMemoryTokenStore()
         val session = Session(tokenStore)
         val identityStore = FakeDeviceIdentityStore()
-        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore)
+        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore())
 
         val result = repository.signup("User@Example.com", "correct horse battery staple".toCharArray())
 
@@ -53,6 +53,7 @@ class AuthRepositoryTest {
             session,
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
+            FakePairedSenderStore(),
         )
 
         // Run signup to set up a user and pairing-key material the login
@@ -77,6 +78,7 @@ class AuthRepositoryTest {
             session,
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
+            FakePairedSenderStore(),
         )
 
         repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
@@ -94,13 +96,53 @@ class AuthRepositoryTest {
     fun logoutClearsStoredDeviceId() = runTest {
         val api = FakeApi()
         val identityStore = FakeDeviceIdentityStore()
-        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore)
+        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore())
         repository.signup("u@example.com", "correct horse battery staple".toCharArray())
         assertEquals("device-1", identityStore.value)
 
         repository.logout()
 
         assertEquals(null, identityStore.value)
+    }
+
+    @Test
+    fun loginInvokesPhase1MigrationWithServerOwnedPairingIds() = runTest {
+        // Codex consultation 54 RED #2: legacy migration must be gated on
+        // server-side pairing ownership so user A's legacy entries can't
+        // bleed into user B's account. Verify that AuthRepository.login
+        // (a) calls listPairings, (b) forwards the active pairingIds (not
+        // revoked ones) to migratePhase1Owned.
+        val api = FakeApi()
+        api.listPairingsResult = listOf(
+            app.syncler.core.network.PairingItemDto(
+                id = "owned-1",
+                senderId = "sender-x",
+                createdAt = "2026-05-20T10:00:00Z",
+                revokedAt = null,
+            ),
+            app.syncler.core.network.PairingItemDto(
+                id = "revoked-1",
+                senderId = "sender-y",
+                createdAt = "2026-05-20T10:00:00Z",
+                revokedAt = "2026-05-21T10:00:00Z",
+            ),
+        )
+        val store = FakePairedSenderStore()
+        val repository = AuthRepository(
+            api,
+            Session(InMemoryTokenStore()),
+            FixedDevicePublicKeyProvider(),
+            FakeDeviceIdentityStore(),
+            store,
+        )
+
+        repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
+
+        // Signup calls login internally → exactly one migration trigger.
+        assertEquals(1, store.migrateCalls)
+        // Only the active (non-revoked) pairing's id should reach the store.
+        assertEquals(setOf("owned-1"), store.lastOwnedIds)
+        assertEquals(1, api.listPairingsCalls)
     }
 
     @Test
@@ -111,6 +153,7 @@ class AuthRepositoryTest {
             Session(InMemoryTokenStore()),
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
+            FakePairedSenderStore(),
         )
 
         val result = repository.revokeDevice("missing")
@@ -124,6 +167,22 @@ private class FakeDeviceIdentityStore : DeviceIdentityStore {
     override fun read(): String? = value
     override fun write(deviceId: String) { value = deviceId }
     override fun clear() { value = null }
+}
+
+private class FakePairedSenderStore : app.syncler.core.storage.PairedSenderStore {
+    var migrateCalls: Int = 0
+    var lastOwnedIds: Set<String>? = null
+    override val pairedSenders: kotlinx.coroutines.flow.StateFlow<List<app.syncler.core.storage.PairedSender>> =
+        kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+    override suspend fun add(pairedSender: app.syncler.core.storage.PairedSender) {}
+    override suspend fun remove(pairingId: String) {}
+    override suspend fun byPairingId(pairingId: String) = null
+    override suspend fun bySenderId(senderId: String) = null
+    override suspend fun activePairingsForSender(senderId: String) = emptyList<app.syncler.core.storage.PairedSender>()
+    override suspend fun migratePhase1Owned(ownedPairingIds: Set<String>) {
+        migrateCalls++
+        lastOwnedIds = ownedPairingIds
+    }
 }
 
 private class InMemoryTokenStore : TokenStore {
@@ -205,7 +264,12 @@ private class FakeApi(
     override suspend fun previewPairing(token: String) = stub()
     override suspend fun completePairing(body: app.syncler.core.network.PairingCompleteRequestDto) = stub()
     override suspend fun revokePairing(id: String): Response<Unit> = stub()
-    override suspend fun listPairings() = stub()
+    var listPairingsCalls: Int = 0
+    var listPairingsResult: List<app.syncler.core.network.PairingItemDto> = emptyList()
+    override suspend fun listPairings(): List<app.syncler.core.network.PairingItemDto> {
+        listPairingsCalls++
+        return listPairingsResult
+    }
     override suspend fun getUserState() = stub()
     override suspend fun putUserState(body: app.syncler.core.network.StatePutRequestDto): Response<app.syncler.core.network.StatePutResponseDto> = stub()
     override suspend fun getPluginLatest(senderId: String, pluginIdentifier: String) = stub()

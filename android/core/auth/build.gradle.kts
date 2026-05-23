@@ -30,6 +30,7 @@ dependencies {
     implementation(project(":core:storage"))
     implementation(libs.hilt.android)
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.timber)
 
     ksp(libs.hilt.compiler)
 

@@ -10,12 +10,14 @@ import app.syncler.core.network.LoginRequest
 import app.syncler.core.network.PreLoginRequest
 import app.syncler.core.network.SignupRequest
 import app.syncler.core.network.SynclerApi
+import app.syncler.core.storage.PairedSenderStore
 import java.security.SecureRandom
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 data class SignupResult(val userId: String)
 data class LoginResult(val userId: String)
@@ -26,6 +28,7 @@ class AuthRepository @Inject constructor(
     private val session: Session,
     private val deviceKeyProvider: DevicePublicKeyProvider,
     private val deviceIdentityStore: DeviceIdentityStore,
+    private val pairedSenderStore: PairedSenderStore,
 ) {
     suspend fun signup(email: String, password: CharArray): Result<SignupResult> = runCatching {
         val normalizedEmail = normalizedEmail(email)
@@ -96,6 +99,24 @@ class AuthRepository @Inject constructor(
             // device-bound token already installed. No observer ever
             // sees the bootstrap token in an unlocked session.
             session.authenticate(enrollResponse.sessionToken, masterKey)
+
+            // Phase 1 legacy migration with explicit ownership proof.
+            // Fetches the server-side pairing list (scoped to the user
+            // we just authenticated) and asks the PairedSenderStore to
+            // import only legacy local entries whose pairingId is
+            // server-recognized for THIS user. Closes the multi-user
+            // race Codex flagged in consultation 54.
+            //
+            // Network failure or no-op (no legacy + already migrated)
+            // is silently swallowed; the store's phase1MigrationDoneAt
+            // gate is idempotent so we retry harmlessly on next login.
+            runCatching {
+                val owned = api.listPairings()
+                    .filter { it.revokedAt == null }
+                    .map { it.id }
+                    .toSet()
+                pairedSenderStore.migratePhase1Owned(owned)
+            }.onFailure { Timber.tag("AuthRepo").w(it, "phase 1 migration deferred") }
         } finally {
             masterKey.fill(0)
             keys.authKey.fill(0)

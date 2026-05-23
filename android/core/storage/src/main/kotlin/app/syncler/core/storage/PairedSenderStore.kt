@@ -65,6 +65,28 @@ interface PairedSenderStore {
      * each candidate pairing key when decrypting an incoming message.
      */
     suspend fun activePairingsForSender(senderId: String): List<PairedSender>
+
+    /**
+     * One-shot Phase 1 legacy migration with explicit ownership proof.
+     *
+     * Caller (typically `AuthRepository.login` immediately after
+     * authentication) fetches the server-side list of pairings for the
+     * current user and passes the set of owned `pairingId`s here. The
+     * store reads its legacy local prefs (pre-Phase-1 pairings written
+     * by [EncryptedPairedSenderStore] before Phase 1 landed) and
+     * imports ONLY entries whose `pairingId` is in [ownedPairingIds].
+     *
+     * Without the ownership check, a multi-user device would push one
+     * user's legacy entries into the next-logged-in user's account
+     * (Codex consultation 54 RED #2 — the previous session-gate alone
+     * was insufficient because the in-memory state on a fresh login is
+     * the empty default; the per-user `phase1MigrationDoneAt` flag
+     * hasn't been pulled from the server yet).
+     *
+     * Idempotent — caller may invoke on every login; the store's
+     * `phase1MigrationDoneAt` field gates the actual work.
+     */
+    suspend fun migratePhase1Owned(ownedPairingIds: Set<String>)
 }
 
 /**
@@ -128,18 +150,13 @@ class SyncedPairedSenderStore @Inject constructor(
             .onEach { state -> activeFlow.value = projectActive(state) }
             .launchIn(scope)
 
-        // First-launch migration is session-gated. We wait for isUnlocked
-        // before reading legacy entries — without the gate, the @Singleton
-        // init block fires before login and we could push one user's legacy
-        // pairings into the next-logged-in user's account on a multi-user
-        // device (Codex consultation 53 RED #2). The synced
-        // `phase1MigrationDoneAt` is per-user, so it correctly prevents
-        // re-migration for the same user across sessions.
-        mutator.isUnlocked
-            .onEach { unlocked ->
-                if (unlocked) migrateLegacyEntriesIfNeeded()
-            }
-            .launchIn(scope)
+        // Phase 1 legacy migration is NOT auto-triggered here anymore
+        // (Codex consultation 54 RED #2 — session-gating alone was
+        // insufficient; the in-memory state on a fresh login is the
+        // empty default before the first server pull, so a session
+        // observer could fire migration with no ownership proof).
+        // `AuthRepository.login` now calls `migratePhase1Owned(...)`
+        // explicitly with server-verified pairingIds.
     }
 
     private fun projectActive(state: EncryptedUserState): List<PairedSender> =
@@ -211,52 +228,42 @@ class SyncedPairedSenderStore @Inject constructor(
     override suspend fun activePairingsForSender(senderId: String): List<PairedSender> =
         activeFlow.value.filter { it.senderId == senderId }
 
-    /**
-     * Session+per-user-gated bootstrap. The first time a user unlocks the
-     * session after Phase 1 lands, we read this device's legacy local
-     * pairings (the pre-Phase-1 [EncryptedPairedSenderStore] file) and
-     * push them into the synced state with `source = "migration"`. The
-     * synced [EncryptedUserState.phase1MigrationDoneAt] field is the
-     * per-user flag — once any device sets it, the merger's
-     * sticky-once-set semantics keep it set across sessions, so no later
-     * login for the same user will re-migrate.
-     *
-     * Multi-user safety (Codex consultation 53 RED #2): the per-user flag
-     * lives in the user-scoped synced state, not in the device-scoped
-     * legacy prefs. Two users on the same device get their own flags;
-     * neither's migration affects the other's.
-     *
-     * Cross-sender safety (Codex consultation 53 YELLOW #4): we exclude
-     * legacy entries whose `senderId` already has a non-tombstoned synced
-     * pairing. Without this filter, importing a stale legacy entry could
-     * re-add a sender the user has since re-paired or revoked elsewhere.
-     */
-    private suspend fun migrateLegacyEntriesIfNeeded() {
-        writeMutex.withLock {
-            val state = mutator.state.value
-            // Per-user gate: skip if THIS user has already migrated.
-            if (state.phase1MigrationDoneAt != null) return@withLock
+    override suspend fun migratePhase1Owned(ownedPairingIds: Set<String>): Unit = writeMutex.withLock {
+        // Per-user gate: if THIS user has already migrated, no-op.
+        // Reads state.value here (outside the transform) only to avoid
+        // doing pointless disk reads / list-pairings work — the actual
+        // filter against current state runs INSIDE the transform below
+        // (Codex consultation 53 YELLOW #4).
+        if (mutator.state.value.phase1MigrationDoneAt != null) return@withLock
 
-            val legacy = loadLegacy()
-            // Even with no legacy entries, set the flag so we don't keep
-            // checking on every isUnlocked re-emission.
-            val activeSendersInState = state.pairedSenders
+        val legacy = loadLegacy()
+        val ownedLegacy = legacy.filter { it.pairingId in ownedPairingIds }
+
+        mutator.mutateAndPush { current ->
+            // Re-check the gate inside the transform: a concurrent merge
+            // from another device could have set phase1MigrationDoneAt
+            // between the outer read and the mutation.
+            if (current.phase1MigrationDoneAt != null) return@mutateAndPush current
+
+            val now = Instant.now(clock).toString()
+            val existingIds = current.pairedSenders.map { it.pairingId }.toSet()
+            val activeSenders = current.pairedSenders
                 .filter { it.removedAt == null }
                 .map { it.senderId }
                 .toSet()
-            val existingIdsInState = state.pairedSenders.map { it.pairingId }.toSet()
-            val toAdd = legacy
-                .filter { it.pairingId !in existingIdsInState }
-                .filter { it.senderId !in activeSendersInState }
+            // Final filter inside the transform: exclude pairings whose
+            // pairingId or senderId already exists in the current snapshot
+            // (the latter avoids re-adding a sender the user has since
+            // re-paired or revoked on another device).
+            val toAdd = ownedLegacy
+                .filter { it.pairingId !in existingIds }
+                .filter { it.senderId !in activeSenders }
                 .map { it.toEntry(firstPairedAtOverride = it.firstPairedAt, source = "migration") }
 
-            mutator.mutateAndPush { current ->
-                val now = Instant.now(clock).toString()
-                current.copy(
-                    pairedSenders = if (toAdd.isEmpty()) current.pairedSenders else current.pairedSenders + toAdd,
-                    phase1MigrationDoneAt = current.phase1MigrationDoneAt ?: now,
-                )
-            }
+            current.copy(
+                pairedSenders = if (toAdd.isEmpty()) current.pairedSenders else current.pairedSenders + toAdd,
+                phase1MigrationDoneAt = now,
+            )
         }
     }
 
