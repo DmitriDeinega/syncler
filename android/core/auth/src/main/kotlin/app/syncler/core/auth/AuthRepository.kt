@@ -4,6 +4,7 @@ import app.syncler.core.crypto.KeyDerivation
 import app.syncler.core.crypto.MasterKey
 import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.crypto.toBase64
+import app.syncler.core.network.AuthFailureHandler
 import app.syncler.core.network.DeviceEnrollRequest
 import app.syncler.core.network.DeviceItem
 import app.syncler.core.network.LoginRequest
@@ -15,7 +16,10 @@ import java.security.SecureRandom
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -29,7 +33,27 @@ class AuthRepository @Inject constructor(
     private val deviceKeyProvider: DevicePublicKeyProvider,
     private val deviceIdentityStore: DeviceIdentityStore,
     private val pairedSenderStore: PairedSenderStore,
-) {
+) : AuthFailureHandler {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * [AuthFailureHandler] implementation. EventStreamManager calls this
+     * when the SSE handshake returns 401 (bootstrap-only token, revoked
+     * device, or expired JWT). Clears the session so the AuthScreen
+     * picks up — the existing `session.logout()` flow already wipes
+     * device-identity and paired-sender state.
+     *
+     * Fires from any coroutine context (the EventStreamManager runs on
+     * its own IO scope); we relaunch on our scope to keep the suspend
+     * `logout()` call off the caller's thread.
+     */
+    override fun onAuthFailure() {
+        scope.launch {
+            Timber.tag("AuthRepo").w("SSE 401 — clearing session and routing to login")
+            logout()
+        }
+    }
+
     suspend fun signup(email: String, password: CharArray): Result<SignupResult> = runCatching {
         val normalizedEmail = normalizedEmail(email)
         val salt = generateAuthSalt()

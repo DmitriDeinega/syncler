@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.auth import AuthContext, current_auth_context
+from app.auth import AuthContext, ACCESS_TOKEN_EXPIRE_HOURS, current_auth_context
 from app.services.events import HEARTBEAT_BYTES, encode_sse, get_event_bus
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,13 @@ router = APIRouter(tags=["events"])
 # right below that keeps the connection alive without burning many
 # wake-ups on the device.
 _HEARTBEAT_INTERVAL_SECONDS = 25.0
+
+# Max stream age. Auth is enforced at handshake; once the JWT used to
+# authenticate expires, the stream is no longer covered by a valid
+# token. Proactively close just below the JWT TTL so a stale stream
+# can't outlive its authorization (Codex consultation 56 RED #6).
+# Client reconnects with a fresh token if it still has one.
+_MAX_STREAM_AGE_SECONDS = (ACCESS_TOKEN_EXPIRE_HOURS * 3600) - 60
 
 
 @router.get("")
@@ -62,9 +70,21 @@ async def events(
     bus = get_event_bus()
     sub = await bus.subscribe(user_id=ctx.user.id, device_id=ctx.device.id)
 
+    started_at = time.monotonic()
+
     async def stream() -> AsyncIterator[bytes]:
         try:
             while True:
+                # Max-age check: if the stream's JWT has effectively
+                # expired, close the connection so it can't outlive its
+                # authorization. Client reconnects with a fresh token.
+                if time.monotonic() - started_at > _MAX_STREAM_AGE_SECONDS:
+                    logger.info(
+                        "sse: stream max-age reached user=%s device=%s; closing",
+                        ctx.user.id, ctx.device.id,
+                    )
+                    return
+
                 try:
                     event = await asyncio.wait_for(
                         sub.queue.get(),

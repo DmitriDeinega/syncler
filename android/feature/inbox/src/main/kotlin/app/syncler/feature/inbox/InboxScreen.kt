@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
@@ -159,6 +160,20 @@ class InboxViewModel @Inject constructor(
                     is app.syncler.core.network.ServerEvent.Dismiss ->
                         repository.refresh()
                 }
+            }
+            .launchIn(viewModelScope)
+
+        // Phase 2 fix-up (Codex consultation 56 RED #9): close the
+        // race where the onForeground() refresh runs BEFORE the SSE
+        // handshake completes. If a server event arrived in that
+        // window, it wouldn't be in our snapshot. When the stream
+        // signals "ready" (onOpen fired), do a second catchup refresh
+        // so we never miss an event because the subscription wasn't
+        // live yet.
+        eventStream.streamReady
+            .onEach {
+                repository.refresh()
+                userState.pull()
             }
             .launchIn(viewModelScope)
     }
@@ -430,6 +445,15 @@ fun InboxScreen(
                         }
                     },
                     actions = {
+                        // Phase 2 fix-up (Codex consultation 56): with the
+                        // 15s polling loop removed, freshness depends on
+                        // SSE + lifecycle + FCM. A manual refresh is the
+                        // user's recovery path if the SSE stream stalls
+                        // (broken proxy, intermittent connectivity) or
+                        // if FCM didn't fire.
+                        IconButton(onClick = { viewModel.refresh() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        }
                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
                             Icon(Icons.Filled.Search, contentDescription = "Search")
                         }

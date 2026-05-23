@@ -85,4 +85,14 @@ abstract class SessionBindings {
 
     @Binds
     abstract fun bindDeviceIdentityStore(store: SecureDeviceIdentityStore): DeviceIdentityStore
+
+    /**
+     * SSE 401 handler. [AuthRepository] clears the session so the UI
+     * routes back to AuthScreen when the EventStreamManager sees a
+     * terminal auth failure (Codex consultation 56 RED #12).
+     */
+    @Binds
+    abstract fun bindAuthFailureHandler(
+        repository: AuthRepository,
+    ): app.syncler.core.network.AuthFailureHandler
 }

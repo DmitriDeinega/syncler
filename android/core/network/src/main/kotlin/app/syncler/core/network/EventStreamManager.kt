@@ -3,9 +3,16 @@ package app.syncler.core.network
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.min
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -22,39 +29,76 @@ import timber.log.Timber
  * is in the foreground, and translates incoming events into a
  * [SharedFlow<ServerEvent>] that feature-layer collectors subscribe to.
  *
- * Lifecycle: [start] is idempotent (no-op if a stream is already open);
- * [stop] cancels the current stream cleanly. The Android UI layer
- * binds these to `Lifecycle.Event.ON_RESUME` / `ON_PAUSE`.
+ * Lifecycle: [start] is idempotent (no-op if a stream is already open
+ * or a reconnect is scheduled); [stop] cancels the current stream AND
+ * any pending reconnect cleanly. The Android UI layer binds these to
+ * `Lifecycle.Event.ON_RESUME` / `ON_PAUSE`.
  *
- * Replaces the 15-second polling loop that lived in `InboxScreen.kt`'s
- * `LaunchedEffect`. Pulls now happen reactively: a server event nudges
- * the relevant repository (`InboxRepository.refresh`,
- * `UserStateRepository.pull`) to re-fetch on demand. Background
- * delivery still goes through FCM — SSE is the foreground-only,
- * sub-second freshness path (per consultations 46/47/48).
+ * Reactive freshness model replaces the V1 polling loop:
+ *  - SSE delivers hints (inbox.changed, state.changed, dismiss) while
+ *    the app is in foreground.
+ *  - Transient network failures auto-reconnect with exponential backoff
+ *    (Codex consultation 56 RED #13) so a network flip doesn't strand
+ *    the user until the next lifecycle event.
+ *  - 401 (bootstrap token / device-revoked / other auth failure) is
+ *    treated as terminal: the manager calls `onAuthFailure` so the
+ *    auth layer can clear the session and route to login.
+ *  - FCM remains the background-wakeup path (Doze kills any
+ *    long-lived stream the moment the app backgrounds anyway).
  */
 @Singleton
 class EventStreamManager @Inject constructor(
     private val httpClient: OkHttpClient,
     private val tokenProviders: Set<@JvmSuppressWildcards AuthTokenProvider>,
+    private val authFailureHandler: AuthFailureHandler,
 ) {
     private val _events = MutableSharedFlow<ServerEvent>(
-        // No replay — collectors only care about live events from the moment
-        // they subscribe. An events-since-resume catchup is what `pull` is
-        // for; we never want a stale `inbox.changed` triggering a refresh
-        // long after the actual message was already pulled.
         replay = 0,
         extraBufferCapacity = 64,
     )
     val events: SharedFlow<ServerEvent> = _events.asSharedFlow()
 
+    /**
+     * Emits Unit once the SSE handshake actually completes (server
+     * acknowledged the subscription). Collectors use this to do a
+     * "catchup" refresh AFTER the stream is open — closes the small
+     * race where `start()` returns before subscription is live and an
+     * event landed during that gap is missed (Codex consultation 56
+     * RED #9).
+     */
+    private val _streamReady = MutableSharedFlow<Unit>(
+        replay = 0,
+        extraBufferCapacity = 4,
+    )
+    val streamReady: SharedFlow<Unit> = _streamReady.asSharedFlow()
+
     @Volatile
     private var current: EventSource? = null
 
+    /**
+     * Tracks whether we've been asked to be running by lifecycle.
+     * Reconnect attempts only fire while this is true so a backgrounded
+     * app doesn't spin up new streams via the retry path.
+     */
+    @Volatile
+    private var wantRunning: Boolean = false
+
+    /**
+     * Active reconnect job. Cancelled on `stop()` so a queued retry
+     * after pause doesn't open a stream the user can't see.
+     */
+    private var reconnectJob: Job? = null
+
+    /**
+     * Current reconnect attempt count. Reset on successful onOpen.
+     * Used to compute exponential backoff (1s, 2s, 4s, 8s, 16s, 30s cap).
+     */
+    @Volatile
+    private var reconnectAttempt: Int = 0
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val sseFactory by lazy {
-        // SSE streams are long-lived; OkHttp's default 10s read timeout
-        // would kill an idle (heartbeat-only) connection. Set readTimeout
-        // to 0 (infinite) on a derived client so SSE can stay open.
         val sseClient = httpClient.newBuilder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(true)
@@ -65,15 +109,30 @@ class EventStreamManager @Inject constructor(
     /**
      * Open a stream if one isn't already open. Returns immediately;
      * the stream runs in the background and surfaces events through
-     * the [events] flow. Reconnects on transient failures are handled
-     * by the OkHttp client; semantic failures (401 auth) are NOT
-     * retried — the app must log in again.
+     * the [events] flow. Collectors that need a "stream is now live"
+     * signal observe [streamReady].
      */
     fun start() {
+        wantRunning = true
+        openStream()
+    }
+
+    /** Cancel the current stream + any pending reconnect. */
+    fun stop() {
+        wantRunning = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempt = 0
+        current?.cancel()
+        current = null
+        Timber.tag(TAG).i("event stream closed")
+    }
+
+    private fun openStream() {
         if (current != null) return
         val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
         if (token.isNullOrBlank()) {
-            Timber.tag(TAG).w("start() called without a session token; ignoring")
+            Timber.tag(TAG).w("openStream() called without a session token; ignoring")
             return
         }
         val request = Request.Builder()
@@ -82,19 +141,30 @@ class EventStreamManager @Inject constructor(
             .header("Accept", "text/event-stream")
             .build()
         current = sseFactory.newEventSource(request, listener)
-        Timber.tag(TAG).i("event stream opened")
+        Timber.tag(TAG).i("event stream opening (attempt=%d)", reconnectAttempt)
     }
 
-    /** Cancel the current stream. Safe to call when no stream is open. */
-    fun stop() {
-        current?.cancel()
-        current = null
-        Timber.tag(TAG).i("event stream closed")
+    private fun scheduleReconnect() {
+        if (!wantRunning) return
+        if (reconnectJob?.isActive == true) return
+        val attempt = ++reconnectAttempt
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
+        val delayMs = min(1_000L * (1L shl (attempt - 1).coerceAtMost(5)), 30_000L)
+        Timber.tag(TAG).i("scheduling SSE reconnect attempt=%d in %dms", attempt, delayMs)
+        reconnectJob = scope.launch {
+            delay(delayMs)
+            if (wantRunning) openStream()
+        }
     }
 
     private val listener = object : EventSourceListener() {
         override fun onOpen(eventSource: EventSource, response: Response) {
             Timber.tag(TAG).d("SSE open (status=%d)", response.code)
+            reconnectAttempt = 0
+            // Signal that the subscription is live. Collectors do a
+            // catchup refresh in response so any event that landed
+            // between the start() catchup and stream-open is picked up.
+            _streamReady.tryEmit(Unit)
         }
 
         override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
@@ -103,9 +173,6 @@ class EventStreamManager @Inject constructor(
                 Timber.tag(TAG).w("ignoring SSE event with unknown/bad payload: type=%s", type)
                 return
             }
-            // tryEmit because we never want a slow collector to block the
-            // OkHttp dispatcher thread. The buffer is sized so the bound
-            // shouldn't be hit in practice.
             val accepted = _events.tryEmit(parsed)
             if (!accepted) {
                 Timber.tag(TAG).w("SSE event dropped — buffer full: %s", type)
@@ -115,25 +182,49 @@ class EventStreamManager @Inject constructor(
         override fun onClosed(eventSource: EventSource) {
             Timber.tag(TAG).i("SSE closed by server")
             current = null
+            // Server-initiated close. Common reason: stream max-age
+            // reached (just below JWT TTL). Reconnect with the current
+            // token; if the token is also expired the next handshake
+            // gets 401 and the auth-failure path fires.
+            if (wantRunning) scheduleReconnect()
         }
 
         override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-            // 401 = bootstrap-token, device-revoked, or other auth failure —
-            // there's no point retrying without re-login. Other failures are
-            // transient (network blip, server restart) and clearing
-            // `current` lets the next `start()` reopen.
-            if (response?.code == 401) {
-                Timber.tag(TAG).w("SSE rejected with 401; not retrying — re-login required")
-            } else {
-                Timber.tag(TAG).w(t, "SSE failure (status=%s)", response?.code)
-            }
             current = null
+            val code = response?.code
+            if (code == 401) {
+                // Terminal auth failure: bootstrap-only token, revoked
+                // device, or expired-and-not-refreshed JWT. Stop the
+                // reconnect machinery and let the auth layer route to
+                // the login screen.
+                Timber.tag(TAG).w("SSE rejected with 401; signalling auth failure")
+                wantRunning = false
+                reconnectJob?.cancel()
+                reconnectJob = null
+                authFailureHandler.onAuthFailure()
+                return
+            }
+            Timber.tag(TAG).w(t, "SSE failure (status=%s); will retry", code)
+            if (wantRunning) scheduleReconnect()
         }
     }
 
     private companion object {
         const val TAG = "EventStream"
     }
+}
+
+/**
+ * Implemented by the auth layer (`AuthRepository` is the production
+ * binding). EventStreamManager calls [onAuthFailure] when the server
+ * rejects the SSE handshake with 401 — the auth layer is responsible
+ * for clearing the session and surfacing the login UI.
+ *
+ * Defined as an interface in `:core:network` so this module doesn't
+ * depend back on `:core:auth`.
+ */
+interface AuthFailureHandler {
+    fun onAuthFailure()
 }
 
 /**

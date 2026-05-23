@@ -124,21 +124,26 @@ class EventBus:
         logs a warning. The client pulls REST endpoints on resume so a
         dropped hint is non-fatal — at worst the user's freshness is
         delayed until next foreground or next FCM wakeup.
+
+        ID assignment AND enqueue both happen under the same lock so a
+        higher-id event can't be enqueued before a lower-id one when
+        two publishers race (Codex consultation 56 RED — would otherwise
+        violate per-subscriber ordering). put_nowait is non-blocking so
+        the lock isn't held while waiting on queue space.
         """
+        delivered = 0
         async with self._lock:
             self._next_id += 1
             event = Event(type=event_type, data=data, id=str(self._next_id))
-            subs = list(self._by_user.get(user_id, set()))
-        delivered = 0
-        for sub in subs:
-            try:
-                sub.queue.put_nowait(event)
-                delivered += 1
-            except asyncio.QueueFull:
-                logger.warning(
-                    "sse: queue full for user=%s device=%s; dropping event %s",
-                    sub.user_id, sub.device_id, event_type,
-                )
+            for sub in self._by_user.get(user_id, set()):
+                try:
+                    sub.queue.put_nowait(event)
+                    delivered += 1
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "sse: queue full for user=%s device=%s; dropping event %s",
+                        sub.user_id, sub.device_id, event_type,
+                    )
         return delivered
 
     async def close_device_subscribers(self, device_id: uuid.UUID) -> None:
