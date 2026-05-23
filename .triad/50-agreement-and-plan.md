@@ -337,6 +337,19 @@ this.
 - Action tap routes to the declared endpoint.
 - Backwards compat: `renderer` absent → treated as `"script"`.
 
+### Cross-device dismiss filtering (Phase 2 carry-over)
+
+- Phase 2's `dismiss` SSE event triggers `repository.refresh()` on
+  the other devices, but `GET /v1/inbox` does **not** filter by
+  `DeliveryStatus.dismissed_at`, and the client merge does not
+  remove dismissed rows. Result: a dismiss is only visibly
+  cross-device after the next full sync cycle.
+- Phase 3a fix: server filters out rows with
+  `DeliveryStatus.dismissed_at IS NOT NULL` from
+  `inbox_for_device(...)`; client confirms a refresh after a
+  `dismiss` event drops the row.
+- Tracked per Codex consultation 57; Phase 2 ships without it.
+
 ### Out of scope
 
 - Live field property on templates (whole-card live updates in

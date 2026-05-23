@@ -43,12 +43,22 @@ class AuthRepository @Inject constructor(
      * picks up — the existing `session.logout()` flow already wipes
      * device-identity and paired-sender state.
      *
+     * Token-scoped: only logs out if the session still holds the exact
+     * token that received the 401. A stale 401 — e.g., from an old
+     * EventSource that died after a fast re-login — must not wipe a
+     * newer successful session (Codex consultation 57 RED #12).
+     *
      * Fires from any coroutine context (the EventStreamManager runs on
      * its own IO scope); we relaunch on our scope to keep the suspend
      * `logout()` call off the caller's thread.
      */
-    override fun onAuthFailure() {
+    override fun onAuthFailure(failedToken: String) {
         scope.launch {
+            val currentToken = session.currentToken()
+            if (currentToken != failedToken) {
+                Timber.tag("AuthRepo").d("SSE 401 ignored — session token changed (stale failure)")
+                return@launch
+            }
             Timber.tag("AuthRepo").w("SSE 401 — clearing session and routing to login")
             logout()
         }
