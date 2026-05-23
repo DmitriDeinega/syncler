@@ -202,9 +202,12 @@ private class TestPairedSenderStore(
 
 private class FakeUserStateMutator(
     initial: EncryptedUserState = EncryptedUserState(),
+    unlocked: Boolean = true,
 ) : UserStateMutator {
     private val _state = MutableStateFlow(initial)
     override val state: StateFlow<EncryptedUserState> = _state.asStateFlow()
+    private val _isUnlocked = MutableStateFlow(unlocked)
+    override val isUnlocked: StateFlow<Boolean> = _isUnlocked.asStateFlow()
 
     fun current(): EncryptedUserState = _state.value
 

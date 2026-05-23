@@ -24,6 +24,17 @@ interface UserStateMutator {
     val state: StateFlow<EncryptedUserState>
 
     /**
+     * Whether the session is currently unlocked — i.e. there is a logged-in
+     * user with a master key in memory. Cross-module consumers that need to
+     * gate state mutations on session readiness (e.g.
+     * `SyncedPairedSenderStore`'s first-launch migration must not fire
+     * before a user is logged in, or it would risk pushing one user's
+     * legacy local pairings into another user's account on a shared
+     * device — Codex consultation 53 RED #2) observe this flag.
+     */
+    val isUnlocked: StateFlow<Boolean>
+
+    /**
      * Atomically applies [transform] to the current state, persists the
      * result locally, marks the state dirty, and schedules a push to the
      * server. Safe to call concurrently — the implementation serializes

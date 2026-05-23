@@ -9,6 +9,7 @@ import app.syncler.core.network.MessageInboxItemDto
 import app.syncler.core.network.SynclerApi
 import app.syncler.core.storage.PairedSender
 import app.syncler.core.storage.PairedSenderStore
+import app.syncler.core.storage.compareIsoTimestamps
 import app.syncler.feature.inbox.BuildConfig
 import java.security.MessageDigest
 import java.time.Instant
@@ -84,10 +85,19 @@ class InboxRepository @Inject constructor(
             // pairings by senderId so decrypt can try each key in turn.
             val pairingsBySender = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }
 
+            // Track whether any message was skipped because the local
+            // pairing set didn't have a candidate for it. If so, we do
+            // NOT advance `lastSince` — the messages might still resolve
+            // once a pending migration / state sync completes, and we
+            // want the next refresh to re-fetch them rather than losing
+            // them (Codex consultation 53 RED #1).
+            var sawMissingPairing = false
+
             val newDecrypted = response.messages.mapNotNull { dto ->
                 val candidates = pairingsBySender[dto.senderId].orEmpty()
                 if (candidates.isEmpty()) {
                     Timber.tag(TAG).w("no paired sender for senderId=%s; skipping", dto.senderId)
+                    sawMissingPairing = true
                     return@mapNotNull null
                 }
                 val decrypted = decryptWithAnyKey(
@@ -127,7 +137,14 @@ class InboxRepository @Inject constructor(
                         .thenByDescending { it.id },
                 )
             }
-            response.nextSince?.let { lastSince = it }
+            if (sawMissingPairing) {
+                Timber.tag(TAG).w(
+                    "holding lastSince at %s — at least one message had no pairing candidate; will re-fetch next refresh once pairings sync",
+                    lastSince,
+                )
+            } else {
+                response.nextSince?.let { lastSince = it }
+            }
             newDecrypted.size
         }.onFailure { Timber.tag(TAG).w(it, "refresh failed") }
     }
@@ -230,7 +247,11 @@ class InboxRepository @Inject constructor(
         userId: String,
         candidates: List<PairedSender>,
     ): InboxItem? {
-        val ordered = candidates.sortedByDescending { it.firstPairedAt }
+        // Try newest-first by parsed Instant — variable-fraction-second
+        // ISO-8601 strings don't sort lexicographically (consultation 53).
+        val ordered = candidates.sortedWith { a, b ->
+            compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt)  // b vs a = descending
+        }
         for (candidate in ordered) {
             if (candidate.pairingKey.size != 32) continue
             val item = decrypt(

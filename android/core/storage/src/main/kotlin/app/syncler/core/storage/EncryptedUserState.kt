@@ -32,6 +32,16 @@ data class EncryptedUserState(
      * device from resurrecting a revoked pairing on its next sync.
      */
     val pairedSenders: List<PairedSenderEntry> = emptyList(),
+    /**
+     * Phase 1: per-user marker for the one-shot legacy-prefs migration. When
+     * non-null, the SyncedPairedSenderStore has already imported (or
+     * inspected and decided to skip) any pre-Phase-1 local entries for this
+     * user. Per-user gating is essential: without it, a multi-user device
+     * could push one user's stale legacy pairings into the next user's
+     * account (Codex consultation 53 RED #2). The synced state is
+     * user-scoped, so this flag rides along with the right user.
+     */
+    val phase1MigrationDoneAt: String? = null,
 ) {
     fun toJson(): String = JSONObject().apply {
         put("schema_version", schemaVersion)
@@ -61,6 +71,7 @@ data class EncryptedUserState(
         put("paired_senders", JSONArray().apply {
             pairedSenders.forEach { put(it.toJson()) }
         })
+        put("phase1_migration_done_at", phase1MigrationDoneAt ?: JSONObject.NULL)
     }.toString()
 
     companion object {
@@ -150,6 +161,11 @@ data class EncryptedUserState(
                         }
                     }
                     .orEmpty(),
+                phase1MigrationDoneAt = if (obj.isNull("phase1_migration_done_at")) {
+                    null
+                } else {
+                    obj.optString("phase1_migration_done_at").takeIf { it.isNotEmpty() }
+                },
             )
         }
     }

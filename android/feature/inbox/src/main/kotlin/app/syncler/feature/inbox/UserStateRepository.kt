@@ -19,12 +19,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -77,6 +79,19 @@ class UserStateRepository @Inject constructor(
 
     private val _state = MutableStateFlow(loadFromDisk())
     override val state: StateFlow<EncryptedUserState> = _state.asStateFlow()
+
+    /**
+     * Mirrors [Session.sessionState.isUnlocked] as a StateFlow so cross-module
+     * consumers (e.g. SyncedPairedSenderStore's first-launch migration) can
+     * gate work on a logged-in session.
+     */
+    override val isUnlocked: StateFlow<Boolean> = session.sessionState
+        .map { it.isUnlocked }
+        .stateIn(
+            scope = scope,
+            started = SharingStarted.Eagerly,
+            initialValue = session.sessionState.value.isUnlocked,
+        )
 
     /**
      * [UserStateMutator] implementation. Cross-module callers (e.g. the

@@ -18,7 +18,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -113,33 +112,49 @@ class SyncedPairedSenderStore @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writeMutex = Mutex()
 
-    private val activeFlow = MutableStateFlow<List<PairedSender>>(emptyList())
+    // Initialize synchronously from the mutator's current state so the very
+    // first refresh after construction sees the right pairings — without
+    // this, an async `onEach { activeFlow.value = ... }` would leave the
+    // flow empty briefly and InboxRepository.refresh could advance lastSince
+    // past undecryptable messages (Codex consultation 53 RED #1).
+    private val activeFlow: MutableStateFlow<List<PairedSender>> =
+        MutableStateFlow(projectActive(mutator.state.value))
     override val pairedSenders: StateFlow<List<PairedSender>> = activeFlow.asStateFlow()
 
     init {
-        // Project the synced state's pairedSenders into active-only PairedSender
-        // records on every state change. Tombstoned entries are filtered out
-        // here — they remain in the synced blob for resurrection protection
-        // but the rest of the app sees only active pairings.
+        // Subscribe to subsequent state changes (the initial value is already
+        // captured above).
         mutator.state
-            .onEach { state ->
-                activeFlow.value = state.pairedSenders
-                    .filter { it.removedAt == null }
-                    .map { it.toPairedSender() }
-                    .sortedBy { it.firstPairedAt }
-            }
+            .onEach { state -> activeFlow.value = projectActive(state) }
             .launchIn(scope)
 
-        // One-shot first-launch migration. Reads legacy local entries and
-        // pushes them into the synced state with source="migration" so the
-        // user's other devices pick them up on next pull.
-        scope.launch { migrateLegacyEntries() }
+        // First-launch migration is session-gated. We wait for isUnlocked
+        // before reading legacy entries — without the gate, the @Singleton
+        // init block fires before login and we could push one user's legacy
+        // pairings into the next-logged-in user's account on a multi-user
+        // device (Codex consultation 53 RED #2). The synced
+        // `phase1MigrationDoneAt` is per-user, so it correctly prevents
+        // re-migration for the same user across sessions.
+        mutator.isUnlocked
+            .onEach { unlocked ->
+                if (unlocked) migrateLegacyEntriesIfNeeded()
+            }
+            .launchIn(scope)
     }
 
+    private fun projectActive(state: EncryptedUserState): List<PairedSender> =
+        state.pairedSenders
+            .filter { it.removedAt == null }
+            .map { it.toPairedSender() }
+            // Use Instant comparison rather than lexical (consultation 53):
+            // variable-fraction-second ISO-8601 strings don't sort correctly
+            // as raw text.
+            .sortedWith { a, b -> compareIsoTimestamps(a.firstPairedAt, b.firstPairedAt) }
+
     override suspend fun add(pairedSender: PairedSender): Unit = writeMutex.withLock {
-        val now = Instant.now(clock).toString()
         val newEntry = pairedSender.toEntry(firstPairedAtOverride = pairedSender.firstPairedAt, source = "manual")
         mutator.mutateAndPush { state ->
+            val now = Instant.now(clock).toString()
             // Re-pair semantics: tombstone any existing active pairing for the
             // same senderId so bySenderId() resolves cleanly and the sender's
             // old pairing key cannot decrypt new messages (forward-secrecy
@@ -154,9 +169,17 @@ class SyncedPairedSenderStore @Inject constructor(
                     existing
                 }
             }
-            // Replace-or-append for the new entry (idempotent for retries).
-            val withoutNew = rotated.filterNot { it.pairingId == pairedSender.pairingId }
-            state.copy(pairedSenders = withoutNew + newEntry)
+            // Idempotent replace-or-append. Filter out any existing ACTIVE
+            // entry with the same pairingId (a retry of the same add); do
+            // NOT filter tombstoned entries with the same pairingId, even
+            // defensively — tombstones must stay monotone (Codex
+            // consultation 53 YELLOW #5). UUID collisions on tombstones
+            // are astronomically improbable but the merger relies on
+            // tombstones never disappearing, so we honor that here.
+            val withoutActiveDup = rotated.filterNot {
+                it.pairingId == pairedSender.pairingId && it.removedAt == null
+            }
+            state.copy(pairedSenders = withoutActiveDup + newEntry)
         }
     }
 
@@ -179,41 +202,62 @@ class SyncedPairedSenderStore @Inject constructor(
         activeFlow.value.firstOrNull { it.pairingId == pairingId }
 
     override suspend fun bySenderId(senderId: String): PairedSender? =
-        // The active list is sorted by firstPairedAt ascending; the LAST entry
-        // for a senderId is the newest. Re-pair tombstones the old entries
-        // atomically so there's usually exactly one active per sender; during
-        // the migration window or a pending CAS push, there might be more.
-        activeFlow.value.filter { it.senderId == senderId }.maxByOrNull { it.firstPairedAt }
+        // Pick the newest pairing for the sender. Use Instant comparison
+        // rather than lexical (consultation 53): variable-fraction-second
+        // ISO-8601 strings don't sort correctly as raw text.
+        activeFlow.value.filter { it.senderId == senderId }
+            .maxWithOrNull { a, b -> compareIsoTimestamps(a.firstPairedAt, b.firstPairedAt) }
 
     override suspend fun activePairingsForSender(senderId: String): List<PairedSender> =
         activeFlow.value.filter { it.senderId == senderId }
 
     /**
-     * One-shot bootstrap: push any legacy local entries into the synced
-     * state. Guarded by [MIGRATION_FLAG] so subsequent launches no-op.
+     * Session+per-user-gated bootstrap. The first time a user unlocks the
+     * session after Phase 1 lands, we read this device's legacy local
+     * pairings (the pre-Phase-1 [EncryptedPairedSenderStore] file) and
+     * push them into the synced state with `source = "migration"`. The
+     * synced [EncryptedUserState.phase1MigrationDoneAt] field is the
+     * per-user flag — once any device sets it, the merger's
+     * sticky-once-set semantics keep it set across sessions, so no later
+     * login for the same user will re-migrate.
      *
-     * The push is via the same `mutateAndPush` path everything else uses,
-     * so a network failure leaves the dirty flag set and the migration
-     * is retried on the next foreground tick. The flag is set
-     * **after** the push schedules — at worst we re-push the same set of
-     * entries, which the merger deduplicates.
+     * Multi-user safety (Codex consultation 53 RED #2): the per-user flag
+     * lives in the user-scoped synced state, not in the device-scoped
+     * legacy prefs. Two users on the same device get their own flags;
+     * neither's migration affects the other's.
+     *
+     * Cross-sender safety (Codex consultation 53 YELLOW #4): we exclude
+     * legacy entries whose `senderId` already has a non-tombstoned synced
+     * pairing. Without this filter, importing a stale legacy entry could
+     * re-add a sender the user has since re-paired or revoked elsewhere.
      */
-    private suspend fun migrateLegacyEntries() {
-        if (legacyPrefs.getBoolean(MIGRATION_FLAG, false)) return
-        val legacy = loadLegacy()
-        if (legacy.isEmpty()) {
-            legacyPrefs.edit().putBoolean(MIGRATION_FLAG, true).apply()
-            return
-        }
-        mutator.mutateAndPush { state ->
-            val existingIds = state.pairedSenders.map { it.pairingId }.toSet()
+    private suspend fun migrateLegacyEntriesIfNeeded() {
+        writeMutex.withLock {
+            val state = mutator.state.value
+            // Per-user gate: skip if THIS user has already migrated.
+            if (state.phase1MigrationDoneAt != null) return@withLock
+
+            val legacy = loadLegacy()
+            // Even with no legacy entries, set the flag so we don't keep
+            // checking on every isUnlocked re-emission.
+            val activeSendersInState = state.pairedSenders
+                .filter { it.removedAt == null }
+                .map { it.senderId }
+                .toSet()
+            val existingIdsInState = state.pairedSenders.map { it.pairingId }.toSet()
             val toAdd = legacy
-                .filter { it.pairingId !in existingIds }
+                .filter { it.pairingId !in existingIdsInState }
+                .filter { it.senderId !in activeSendersInState }
                 .map { it.toEntry(firstPairedAtOverride = it.firstPairedAt, source = "migration") }
-            if (toAdd.isEmpty()) state
-            else state.copy(pairedSenders = state.pairedSenders + toAdd)
+
+            mutator.mutateAndPush { current ->
+                val now = Instant.now(clock).toString()
+                current.copy(
+                    pairedSenders = if (toAdd.isEmpty()) current.pairedSenders else current.pairedSenders + toAdd,
+                    phase1MigrationDoneAt = current.phase1MigrationDoneAt ?: now,
+                )
+            }
         }
-        legacyPrefs.edit().putBoolean(MIGRATION_FLAG, true).apply()
     }
 
     private fun loadLegacy(): List<PairedSender> {
@@ -246,7 +290,6 @@ class SyncedPairedSenderStore @Inject constructor(
     private companion object {
         const val PREFS_NAME = "syncler.paired_senders.enc"
         const val KEY_IDS = "paired_ids"
-        const val MIGRATION_FLAG = "phase1_migration_done"
     }
 }
 

@@ -271,6 +271,44 @@ class StateMergerTest {
         assertEquals(original, parsed)
     }
 
+    @Test
+    fun `phase1MigrationDoneAt is sticky-once-set across merges`() {
+        // Local has the flag, remote doesn't → keep local.
+        val local = EncryptedUserState(phase1MigrationDoneAt = "2026-05-22T10:00:00Z")
+        val remote = EncryptedUserState()
+        assertEquals(
+            "2026-05-22T10:00:00Z",
+            StateMerger.merge(local, remote).phase1MigrationDoneAt,
+        )
+        // Symmetric.
+        assertEquals(
+            "2026-05-22T10:00:00Z",
+            StateMerger.merge(remote, local).phase1MigrationDoneAt,
+        )
+    }
+
+    @Test
+    fun `phase1MigrationDoneAt picks the earlier non-null timestamp on both-set`() {
+        // Both sides set → keep the earlier (whichever device migrated first
+        // is authoritative). Sticky-monotone: never null after set.
+        val earlier = EncryptedUserState(phase1MigrationDoneAt = "2026-05-22T10:00:00Z")
+        val later = EncryptedUserState(phase1MigrationDoneAt = "2026-05-22T11:00:00Z")
+        assertEquals(
+            "2026-05-22T10:00:00Z",
+            StateMerger.merge(earlier, later).phase1MigrationDoneAt,
+        )
+        assertEquals(
+            "2026-05-22T10:00:00Z",
+            StateMerger.merge(later, earlier).phase1MigrationDoneAt,
+        )
+    }
+
+    @Test
+    fun `phase1MigrationDoneAt stays null when neither side has set it`() {
+        val merged = StateMerger.merge(EncryptedUserState(), EncryptedUserState())
+        assertEquals(null, merged.phase1MigrationDoneAt)
+    }
+
     private fun paired(
         pairingId: String,
         senderId: String,
