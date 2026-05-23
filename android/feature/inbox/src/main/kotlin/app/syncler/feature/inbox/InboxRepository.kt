@@ -7,6 +7,7 @@ import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.crypto.toCanonicalJsonBytes
 import app.syncler.core.network.MessageInboxItemDto
 import app.syncler.core.network.SynclerApi
+import app.syncler.core.storage.PairedSender
 import app.syncler.core.storage.PairedSenderStore
 import app.syncler.feature.inbox.BuildConfig
 import java.security.MessageDigest
@@ -76,19 +77,30 @@ class InboxRepository @Inject constructor(
         runCatching {
             val response = api.inbox(since = lastSince)
             val userId = session.currentUserId() ?: return@runCatching 0
-            val pairings = pairedSenderStore.pairedSenders.value.associateBy { it.senderId }
+            // Phase 1: a single sender may have multiple active pairings
+            // during the transition window where pre-sync devices each
+            // paired separately (each got its own pairingKey; the sender
+            // encrypts under whichever it received). Group all active
+            // pairings by senderId so decrypt can try each key in turn.
+            val pairingsBySender = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }
 
             val newDecrypted = response.messages.mapNotNull { dto ->
-                val sender = pairings[dto.senderId] ?: run {
+                val candidates = pairingsBySender[dto.senderId].orEmpty()
+                if (candidates.isEmpty()) {
                     Timber.tag(TAG).w("no paired sender for senderId=%s; skipping", dto.senderId)
                     return@mapNotNull null
                 }
-                if (sender.pairingKey.size != 32) {
-                    Timber.tag(TAG).w("paired sender %s has no pairing key; skipping", dto.senderId)
+                val decrypted = decryptWithAnyKey(
+                    dto = dto,
+                    userId = userId,
+                    candidates = candidates,
+                ) ?: run {
+                    Timber.tag(TAG).w(
+                        "no candidate pairing key decrypted message %s from sender %s",
+                        dto.id, dto.senderId,
+                    )
                     return@mapNotNull null
                 }
-                val decrypted = decrypt(dto, userId = userId, pairingKey = sender.pairingKey, senderName = sender.senderName)
-                    ?: return@mapNotNull null
                 // Resolve plugin bundle by historical row UUID (NOT by current
                 // /latest) so old messages render against the exact bundle
                 // they were validated for. Codex review 40: a sender publishing
@@ -199,6 +211,38 @@ class InboxRepository @Inject constructor(
         val bundleHashHex: String?,
         val revocationReason: String?,
     )
+
+    /**
+     * Try every candidate pairing key in turn until one decrypts successfully.
+     * Returns the first matching [InboxItem]; null if none of the keys work.
+     *
+     * Multi-key fallback exists for the Phase 1 transition window: pre-sync,
+     * each device paired separately with its own pairingKey. The sender
+     * encrypts under whichever key it has registered. After the user re-pairs
+     * (which tombstones the old pairings), this collapses to a single
+     * active key.
+     *
+     * Newest pairing first (by firstPairedAt descending) so a freshly-rotated
+     * key wins the race against stale legacy pairings.
+     */
+    private fun decryptWithAnyKey(
+        dto: MessageInboxItemDto,
+        userId: String,
+        candidates: List<PairedSender>,
+    ): InboxItem? {
+        val ordered = candidates.sortedByDescending { it.firstPairedAt }
+        for (candidate in ordered) {
+            if (candidate.pairingKey.size != 32) continue
+            val item = decrypt(
+                dto = dto,
+                userId = userId,
+                pairingKey = candidate.pairingKey,
+                senderName = candidate.senderName,
+            )
+            if (item != null) return item
+        }
+        return null
+    }
 
     private fun decrypt(
         dto: MessageInboxItemDto,
