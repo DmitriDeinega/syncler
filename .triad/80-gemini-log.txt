@@ -1,0 +1,24 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+Error when talking to Gemini API Full report available at: C:\Users\Dima\AppData\Local\Temp\gemini-client-error-Turn.run-sendMessageStream-2026-05-24T13-27-35-264Z.json TerminalQuotaError: You have exhausted your capacity on this model. Your quota will reset after 6h21m11s.
+    at classifyGoogleError (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:269776:18)
+    at retryWithBackoff (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:270380:31)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:292973:28)
+    at async GeminiChat.streamWithRetries (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:292811:29)
+    at async Turn.run (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:293304:24)
+    at async GeminiClient.processTurn (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:303598:22)
+    at async GeminiClient.sendMessageStream (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/chunk-UN6XCVMJ.js:303711:14)
+    at async file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/gemini-3OZCG3O2.js:10923:26
+    at async main (file:///C:/Users/Dima/AppData/Roaming/npm/node_modules/@google/gemini-cli/bundle/gemini-3OZCG3O2.js:15980:5) {
+  cause: {
+    code: 429,
+    message: 'You have exhausted your capacity on this model. Your quota will reset after 6h21m11s.',
+    details: [ [Object], [Object] ]
+  },
+  retryDelayMs: 22871667.061732,
+  reason: 'QUOTA_EXHAUSTED'
+}
+An unexpected critical error occurred:[object Object]

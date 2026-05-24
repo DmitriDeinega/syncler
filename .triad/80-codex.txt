@@ -1,0 +1,26 @@
+**Codex Review**
+
+1. `minPlatformVersion` 6-digit cap: **GREEN**  
+SDK stricter leading-zero handling is acceptable. Server accepting `01.0.0` while SDK rejects is a publish-time DX mismatch, not a security or compatibility blocker if SDK rejection is intentional.
+
+2. Action endpoint HTTPS / LAN HTTP rule: **RED**  
+Blocker: both helpers allow all `https://...` before checking userinfo, so `https://user:pass@host/...` passes the scheme helper despite the stated “reject `user:pass@host`” rule. See [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:423) and [schemas.py](D:/Projects/syncler/server/app/schemas.py:486).  
+Also, LAN IPv4 validation only checks first/second octets, so strings like `http://10.999.999.999/x` pass as “LAN private” even though they are not valid IPv4 literals. See [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:441) and [schemas.py](D:/Projects/syncler/server/app/schemas.py:504).  
+Localhost prefix flaw is not reintroduced: `localhost.evil.com` is rejected.
+
+3. `template.fields` key set: **GREEN**  
+SDK mirror matches current server layout rules for `standard_card`. Lockstep risk is documented.
+
+4. `cardKeyPath` strict grammar: **GREEN**  
+Applying the existing `$.field(.subfield)*` grammar consistently to `cardKeyPath` is right. SDK, schema, and service checks now align.
+
+5. Plugin id regex parity: **GREEN**  
+Server regex matches the SDK pattern exactly.
+
+**New Issues**
+
+The main new issue is action endpoint URL parsing. I would fix by parsing with `URL` / `urllib.parse`, rejecting any username/password for both HTTP and HTTPS, and validating all IPv4 octets are `0..255`.
+
+**Commit Readiness**
+
+**Hold.** Phase 5d is not ready to commit until item 2 is corrected and covered by tests for HTTPS userinfo plus invalid IPv4 octets.

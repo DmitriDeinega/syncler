@@ -1,0 +1,29 @@
+**Verdict: RED**
+
+Action endpoint check is not commit-ready. There are still SDK/server divergence cases in the actual implementation:
+
+- [server/app/schemas.py](/abs/path/D:/Projects/syncler/server/app/schemas.py:475) uses `re.IGNORECASE` without `re.ASCII`. Python case-insensitive ranges match extra Unicode letters, while JS does not. Server accepts these HTTPS hosts; SDK rejects them:
+  - `https://K.example/x`
+  - `https://İ.example/x`
+  - `https://ı.example/x`
+  - `https://ſ.example/x`
+
+- Python `\d` in the port also matches Unicode digits. Server accepts `https://api.example:١٢/x`; SDK rejects it.
+
+- Python `re.IGNORECASE` also lets the scheme match Unicode-folded `s`. Server accepts `httpſ://localhost/x` because host is `localhost`; SDK rejects it.
+
+- Path handling still diverges on some line terminators. Server accepts a lone carriage return in the path, e.g. `https://api.example/x\r`; SDK rejects it.
+
+There is also a doc/security accuracy issue: comments say whitespace/control chars are excluded, but both implementations allow tabs and other controls in the path via `.*`. They are excluded only from the host.
+
+**Over-restrictive cases**
+
+The scheme says “HTTPS always,” but the regex rejects legitimate HTTPS URL hosts such as bracketed IPv6 literals: `https://[::1]/x` or `https://[2001:db8::1]/x`. If IPv6 is intentionally out of scope, document that. If not, this is another compatibility gap.
+
+**Other Phase 5d items**
+
+I did not find reason to change the stated status for the non-action-endpoint items from your table. This review focused on the final action endpoint scheme.
+
+**Commit-readiness vote: NO**
+
+Recommended minimum fix: make Python regex ASCII-constrained, avoid Unicode `\d` by using `[0-9]`, and replace `.*` with an explicit path/query/fragment character policy shared by both SDK and server. Then add parity tests for Unicode casefold chars, Unicode port digits, `httpſ://localhost`, lone `\r`, and the intended IPv6 decision.

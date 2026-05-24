@@ -1,0 +1,43 @@
+**Codex Review: RED**
+
+Per-item:
+
+1. **Canonical IPv4 helper parity: GREEN**  
+   `isLanPrivateIpv4` and `_is_lan_private_ipv4` now match for canonical 4-octet decimal IPv4: no compressed forms, no leading-zero octets, full `0..255` range checks. The Consultation 81 cases are fixed.
+
+2. **Full SDK/server endpoint parity: RED**  
+   There are still WHATWG vs `urlparse` mismatches outside IPv4 normalization.
+
+**Blockers**
+
+1. **Empty userinfo still mismatches**
+
+   SDK accepts these because WHATWG exposes empty userinfo as empty `username/password`, and the raw-host regex consumes the `@`:
+
+   - `http://@10.0.0.1/x`
+   - `http://:@10.0.0.1/x`
+   - `https://@api.example.com/x`
+
+   Server rejects them because `urlparse(...).username` is `""`, which is still not `None`.
+
+   Relevant SDK path: [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:469) and raw host extraction at [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:481).  
+   Relevant server path: [schemas.py](D:/Projects/syncler/server/app/schemas.py:496).
+
+2. **Backslash URL normalization mismatches for HTTPS**
+
+   WHATWG accepts and normalizes backslashes:
+
+   - `https:\api.example.com/x`
+   - `https:\\api.example.com/x`
+
+   SDK returns true because `new URL(...)` normalizes these to `https://api.example.com/x`, then the HTTPS branch accepts immediately at [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:470).
+
+   Python `urlparse` sees no netloc/hostname, so server rejects at [schemas.py](D:/Projects/syncler/server/app/schemas.py:499).
+
+**Other quirks checked**
+
+Trailing-dot IPv4 like `127.0.0.1.` looks okay: SDK raw-host extraction rejects it for HTTP, server rejects it. Percent-encoded HTTP hostnames like `%6cocalhost` also look okay because SDK uses the raw host for HTTP and server does not decode it. IDN/punycode is not a clear blocker under the current rule because HTTPS allows public hosts and HTTP public hosts are rejected either way.
+
+**Commit-readiness vote: HOLD**
+
+The IPv4 parity fix itself is good, but the full action-endpoint scheme check is still not parser-equivalent. I would fix by requiring the raw URL string to match canonical `^https?://...` authority syntax for both HTTP and HTTPS, and rejecting any raw authority containing `@`, even if WHATWG reports empty userinfo. Then add regression tests for empty userinfo and HTTPS backslash normalization on both SDK and server.

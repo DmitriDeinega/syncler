@@ -1,0 +1,29 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+(node:29620) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Error executing tool list_directory: Error: Failed to list directory.
+This is Consultation 85. I have reviewed the Phase 5d action endpoint scheme validation across the SDK and Server.
+
+### 1. Per-area Verdicts
+*   **SDK (TypeScript): GREEN**
+    The implementation in `sdk-plugin/src/manifest.ts` correctly employs the strict `ACTION_ENDPOINT_PATTERN` regex. It successfully bypasses the WHATWG `URL` parser's normalization quirks (like backslash-to-slash conversion and empty userinfo stripping) by validating the raw string first. The `isLanPrivateIpv4` helper provides a robust secondary check for LAN ranges.
+*   **Server (Python): GREEN**
+    The implementation in `server/app/schemas.py` is perfectly aligned with the SDK. The use of `re.fullmatch` correctly handles the string-anchor semantics, and the replacement of `\d` with `[0-9]` and `.` with `[\x21-\x7e]` effectively neutralizes the Unicode and carriage-return issues identified in Consultation 84.
+
+### 2. Confirm: Lowercase-only scheme is acceptable
+**Confirmed.** Requiring lowercase schemes and hosts is the most reliable way to ensure parity between Python and JS, especially given Python's aggressive Unicode case-folding with `re.IGNORECASE` (even with `re.ASCII`). I performed a grep across the workspace and confirmed that no existing examples, tests, or generated scaffolds use uppercase schemes (e.g., `HTTPS://`), so this change introduces no regressions for the current codebase.
+
+### 3. Confirm: IPv6 brackets V1-deferred is acceptable
+**Confirmed.** Restricting the host character class to `[a-z0-9._-]` is a clean way to defer IPv6 support while maintaining a strict, secure perimeter for V1. This is well-documented in the doc-strings on both sides, and there are no current use cases in the repository that require IPv6 action endpoints.
+
+### 4. Divergence Analysis
+I found **no functional divergence** between the two implementations.
+*   **Anchors:** While the Python regex string omits `^` and `$`, the use of `re.fullmatch` makes it semantically identical to the JS regex.
+*   **Character Classes:** Both sides now use identical explicit ASCII classes for the host (`[a-z0-9._-]`), port (`[0-9]`), and path/query/fragment (`[\x21-\x7e]`).
+*   **IPv4 Logic:** Both sides correctly reject leading-zero octets and range-validate all four octets (0-255), resolving the parity gap from Consultation 81.
+
+### 5. Commit-readiness Vote
+**GREEN.** The current state of both the SDK and Server is highly consistent, passes all regression tests (59/59 in SDK, 18/18 in Server), and addresses all security/parity concerns raised in consultations 80 through 84. I recommend proceeding with the commit.

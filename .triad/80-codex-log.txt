@@ -1,0 +1,2195 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e5a2b-06f7-7be0-a655-667b864dae12
+--------
+user
+# Consultation 80 — Phase 5d review (validator polish batch)
+
+Phase 5d — validator polish batch — is implemented per the agreement
+at `.triad/70-phase5-agreement.md` lines 417-431. Single review pass
+(vs 3-cycle for substantive design) since the agreement locked the
+exact 5 items.
+
+## The 5 items + landing state
+
+### 1. `minPlatformVersion` 6-digit numeric component cap (SDK-only)
+- **Before**: SDK `semverPattern` accepted `1.0.1234567` (arbitrary
+  length). Server's `_SEMVER` in `services/plugins.py` already caps at
+  6 digits per component.
+- **After**: SDK pattern now `(0|[1-9]\d{0,5}).(0|[1-9]\d{0,5}).(0|[1-9]\d{0,5})…`
+  in [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:94).
+  Same component cap as the server. Note SDK is stricter than server
+  on leading-zero rule (`(0|[1-9]\d{0,5})` vs server's `\d{1,6}`) —
+  acceptable: SDK rejecting first is fine, server still accepts.
+
+### 2. Action endpoint HTTPS-in-release / HTTP-LAN-in-debug (both sides)
+- **Before**: Neither SDK nor server validated `template.actions[].endpoint`
+  scheme. A plugin could publish `http://attacker.example.com/ack`.
+- **After**:
+  - SDK: `isAllowedActionEndpointScheme(url)` in [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:415).
+    Allow HTTPS; allow HTTP only for `localhost`, `127.x.x.x`, `10.x.x.x`,
+    `172.16-31.x.x`, `192.168.x.x`. Reject `user:pass@host`.
+  - Server: `_is_allowed_action_endpoint_scheme` in [schemas.py](D:/Projects/syncler/server/app/schemas.py:475)
+    mirrors the SDK rule and fires inside `validate_renderer_template_pairing`.
+- Android release builds already reject cleartext at the network bridge
+  (NSC); this just catches it earlier at publish time.
+
+### 3. `template.fields` keys restricted to layout's allowed set (SDK-only)
+- **Before**: Server enforced `_LAYOUT_REQUIRED_FIELDS` ∪
+  `_LAYOUT_OPTIONAL_FIELDS` and 422'd. SDK accepted any key.
+- **After**: SDK mirror of the server's allowed-key sets in
+  [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:99).
+  `standard_card`: required `{title}`, optional `{subtitle, body}`.
+  `validateTemplateBlock` enforces.
+
+### 4. `cardKeyPath` strict `$.field(.subfield)*` grammar (both sides)
+- **Before**: Both SDK and server's services/plugins.py used
+  `startsWith("$")` only. So `$.items[0].id` passed publishing.
+- **After**:
+  - SDK: `jsonPathPattern` mirrors server's existing `_JSONPATH_REGEX`.
+    Applied to `cardKeyPath` AND every `template.fields.<k>.path`.
+  - Server: new `validate_card_key_path` field validator in [schemas.py](D:/Projects/syncler/server/app/schemas.py:625)
+    + same regex applied in services/plugins.py for defense-in-depth.
+
+### 5. Plugin id regex parity check (server fix)
+- **Before**: SDK enforced `^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*)+$`.
+  Server only had `Field(min_length=1, max_length=200)` — no character
+  class check.
+- **After**: New `_PLUGIN_IDENTIFIER_REGEX` in [schemas.py](D:/Projects/syncler/server/app/schemas.py:560)
+  matches the SDK exactly. `validate_plugin_identifier` field
+  validator rejects non-reverse-DNS strings.
+
+## Files touched
+
+- `sdk-plugin/src/manifest.ts`:
+  - Capped `semverPattern` components to 6 digits.
+  - New `jsonPathPattern`, `layoutRequiredFields`, `layoutOptionalFields`.
+  - Replaced `cardKeyPath` startsWith check with regex match.
+  - New `validateTemplateBlock(...)` covering layout, allowed keys,
+    required keys, action ids unique, action endpoint scheme + glob
+    match.
+  - Helpers: `isAllowedActionEndpointScheme`, `endpointMatchesAnyGlob`,
+    `endpointPatternToRegExp` (copy of network.ts's matcher).
+- `sdk-plugin/test/manifest.test.ts`: 11 new tests under
+  "Phase 5d polish" block. 44/44 SDK tests passing.
+- `server/app/schemas.py`:
+  - `_PLUGIN_IDENTIFIER_REGEX`, `_is_allowed_action_endpoint_scheme`,
+    `_HOST_PORT_PATTERN`.
+  - New `validate_plugin_identifier` + `validate_card_key_path` field
+    validators on `PluginPublishRequest`.
+  - `validate_renderer_template_pairing` now checks scheme before glob.
+- `server/app/services/plugins.py`: defense-in-depth `_JSONPATH_REGEX_SERVICE`
+  applied to field path + card_key_path checks.
+- `server/tests/test_phase5d_validators.py`: 9 unit tests, all
+  passing (`./.venv/Scripts/python.exe` direct, since conftest needs
+  a running Postgres — the tests themselves are schema-level only).
+
+## Test counts
+
+- `sdk-plugin/`: 44/44 passing (5 test files).
+- `server/tests/test_phase5d_validators.py`: 9/9 passing (direct
+  Python runner; conftest blocks pytest because the autouse fixture
+  needs Postgres — no DB-touching code in the file).
+
+## What I need from each reviewer
+
+1. **Per-item verdict** on:
+   - SDK `semverPattern` cap — anything weird about leading-zero
+     asymmetry (SDK stricter than server)?
+   - Action endpoint scheme rule — LAN ranges complete? Codex
+     consultation 75 RED #1 fixed a similar `startswith`-prefix
+     localhost flaw on broker URLs; same mistake reintroduced here?
+   - Template `fields` key set — mirror correct, lockstep risk
+     documented (both sides referenced)?
+   - `cardKeyPath` regex — server already had it for field paths;
+     applying it consistently here is right?
+   - Plugin id regex parity — byte-for-byte SDK ↔ server now?
+2. **Anything new** (security, footgun, doc accuracy).
+3. **Overall**: ready to commit / specific blockers / hold.
+
+## Output
+
+Per reviewer:
+1. Per-item: GREEN / YELLOW / RED.
+2. Blockers if any.
+3. Commit-readiness vote.
+
+If both GREEN, commit Phase 5d and move to Phase 5e (docs +
+roadmap closeout — the last phase in the V1.5 DX track).
+
+codex
+I’ll review the touched code and tests directly, then give a per-item verdict. I’ll focus on actual validator behavior and parity risks rather than re-litigating the already locked scope.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "PLUGIN_IDENTIFIER|allowed_action|HOST_PORT|validate_plugin_identifier|validate_card_key_path|validate_renderer_template_pairing|JSONPATH" server/app/schemas.py server/app/services/plugins.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "semverPattern|jsonPathPattern|layoutRequiredFields|layoutOptionalFields|validateTemplateBlock|isAllowedActionEndpointScheme|endpointMatchesAnyGlob|endpointPatternToRegExp|pluginIdentifier" sdk-plugin/src/manifest.ts' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "Phase 5d|semver|endpoint|cardKeyPath|plugin id|fields" sdk-plugin/test/manifest.test.ts server/tests/test_phase5d_validators.py' in D:\Projects\syncler
+ succeeded in 272ms:
+100:const semverPattern = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+103:const jsonPathPattern = /^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
+111:const layoutRequiredFields: Record<string, ReadonlySet<string>> = {
+114:const layoutOptionalFields: Record<string, ReadonlySet<string>> = {
+164:    if (!semverPattern.test(version)) issues.push('version must be semver');
+196:    if (!semverPattern.test(version)) issues.push('minPlatformVersion must be semver');
+233:    !jsonPathPattern.test(value.cardKeyPath)
+245:    validateTemplateBlock(value.template, value.declaredEndpoints, issues);
+326:function validateTemplateBlock(
+333:  const required = layout ? layoutRequiredFields[layout] : undefined;
+334:  const optional = layout ? layoutOptionalFields[layout] : undefined;
+337:      `template.layout must be one of: ${Object.keys(layoutRequiredFields).join(', ')}`,
+357:      if (!isRecord(field) || typeof field.path !== 'string' || !jsonPathPattern.test(field.path)) {
+400:        if (!isAllowedActionEndpointScheme(endpoint)) {
+408:        if (declaredEndpoints.length > 0 && !endpointMatchesAnyGlob(endpoint, declaredEndpoints)) {
+418:function isAllowedActionEndpointScheme(url: string): boolean {
+451:function endpointMatchesAnyGlob(url: string, patterns: readonly string[]): boolean {
+452:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+455:function endpointPatternToRegExp(pattern: string): RegExp {
+456:  // Mirror of network.ts:endpointPatternToRegExp. Duplicated here to
+
+ succeeded in 272ms:
+ M sdk-plugin/src/manifest.ts
+ M sdk-plugin/test/manifest.test.ts
+ M server/app/schemas.py
+ M server/app/services/plugins.py
+?? .triad/80-codex-log.txt
+?? .triad/80-gemini-log.txt
+?? .triad/80-phase5d-review-prompt.md
+?? server/tests/test_phase5d_validators.py
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 273ms:
+server/tests/test_phase5d_validators.py:1:"""Phase 5d — validator polish batch. Pure schema-level unit tests
+server/tests/test_phase5d_validators.py:13:    _is_allowed_action_endpoint_scheme,
+server/tests/test_phase5d_validators.py:30:    "endpoints": ["https://api.example.com/*"],
+server/tests/test_phase5d_validators.py:59:# ---------------------------- cardKeyPath grammar ----------------------------
+server/tests/test_phase5d_validators.py:83:# ---------------------------- Action endpoint scheme ----------------------------
+server/tests/test_phase5d_validators.py:86:def test_action_endpoint_scheme_helper() -> None:
+server/tests/test_phase5d_validators.py:87:    assert _is_allowed_action_endpoint_scheme("https://api.example.com/x")
+server/tests/test_phase5d_validators.py:88:    assert _is_allowed_action_endpoint_scheme("http://localhost:8001/x")
+server/tests/test_phase5d_validators.py:89:    assert _is_allowed_action_endpoint_scheme("http://10.0.2.2:8001/x")
+server/tests/test_phase5d_validators.py:90:    assert _is_allowed_action_endpoint_scheme("http://192.168.1.5/x")
+server/tests/test_phase5d_validators.py:91:    assert _is_allowed_action_endpoint_scheme("http://172.20.0.5/x")
+server/tests/test_phase5d_validators.py:92:    assert _is_allowed_action_endpoint_scheme("http://127.0.0.1/x")
+server/tests/test_phase5d_validators.py:94:    assert not _is_allowed_action_endpoint_scheme("http://api.example.com/x")
+server/tests/test_phase5d_validators.py:96:    assert not _is_allowed_action_endpoint_scheme("http://172.32.0.5/x")
+server/tests/test_phase5d_validators.py:98:    assert not _is_allowed_action_endpoint_scheme("http://localhost.evil.com/x")
+server/tests/test_phase5d_validators.py:100:    assert not _is_allowed_action_endpoint_scheme(
+server/tests/test_phase5d_validators.py:104:    assert not _is_allowed_action_endpoint_scheme("ftp://api.example.com/x")
+server/tests/test_phase5d_validators.py:105:    assert not _is_allowed_action_endpoint_scheme("file:///etc/passwd")
+server/tests/test_phase5d_validators.py:108:def test_publish_request_rejects_cleartext_action_endpoint_to_public_host() -> None:
+server/tests/test_phase5d_validators.py:112:        # The endpoint glob is also cleartext, so the
+server/tests/test_phase5d_validators.py:115:        "endpoints": ["http://api.example.com/*"],
+server/tests/test_phase5d_validators.py:118:            "fields": {"title": {"path": "$.title"}},
+server/tests/test_phase5d_validators.py:119:            "actions": [{"id": "ack", "label": "Ack", "endpoint": "http://api.example.com/ack"}],
+server/tests/test_phase5d_validators.py:127:def test_publish_request_accepts_lan_http_action_endpoint() -> None:
+server/tests/test_phase5d_validators.py:131:        "endpoints": ["http://192.168.1.10:8001/*"],
+server/tests/test_phase5d_validators.py:134:            "fields": {"title": {"path": "$.title"}},
+server/tests/test_phase5d_validators.py:136:                {"id": "ack", "label": "Ack", "endpoint": "http://192.168.1.10:8001/ack"},
+server/tests/test_phase5d_validators.py:152:            "fields": {
+server/tests/test_phase5d_validators.py:160:    assert "does not accept fields" in str(exc.value)
+sdk-plugin/test/manifest.test.ts:28:  it('rejects missing fields', () => {
+sdk-plugin/test/manifest.test.ts:105:  // Phase 5d: validator polish batch.
+sdk-plugin/test/manifest.test.ts:106:  describe('Phase 5d polish', () => {
+sdk-plugin/test/manifest.test.ts:110:      if (!result.valid) expect(result.issues).toContain('minPlatformVersion must be semver');
+sdk-plugin/test/manifest.test.ts:118:    it('rejects cardKeyPath with array indexing (must be $.field(.subfield)*)', () => {
+sdk-plugin/test/manifest.test.ts:122:        cardKeyPath: '$.items[0].id',
+sdk-plugin/test/manifest.test.ts:130:    it('accepts cardKeyPath with nested dotted access', () => {
+sdk-plugin/test/manifest.test.ts:134:        cardKeyPath: '$.order.id',
+sdk-plugin/test/manifest.test.ts:139:    it('rejects template.fields key not in the layout allowed set', () => {
+sdk-plugin/test/manifest.test.ts:145:          fields: {
+sdk-plugin/test/manifest.test.ts:156:        expect(result.issues.some((i) => i.includes('template.fields.headline'))).toBe(true);
+sdk-plugin/test/manifest.test.ts:166:          fields: {
+sdk-plugin/test/manifest.test.ts:176:    it('rejects template action with cleartext public-host endpoint', () => {
+sdk-plugin/test/manifest.test.ts:183:          fields: { title: { path: '$.title' } },
+sdk-plugin/test/manifest.test.ts:184:          actions: [{ id: 'ack', label: 'Ack', endpoint: 'http://api.example.com/ack' }],
+sdk-plugin/test/manifest.test.ts:193:    it('accepts template action with LAN HTTP endpoint', () => {
+sdk-plugin/test/manifest.test.ts:200:          fields: { title: { path: '$.title' } },
+sdk-plugin/test/manifest.test.ts:201:          actions: [{ id: 'ack', label: 'Ack', endpoint: 'http://192.168.1.10:8001/api/ack' }],
+sdk-plugin/test/manifest.test.ts:207:    it('accepts template action with HTTPS endpoint', () => {
+sdk-plugin/test/manifest.test.ts:214:          fields: { title: { path: '$.title' } },
+sdk-plugin/test/manifest.test.ts:215:          actions: [{ id: 'ack', label: 'Ack', endpoint: 'https://api.example.com/ack' }],
+sdk-plugin/test/manifest.test.ts:228:          fields: { title: { path: '$.title' } },
+sdk-plugin/test/manifest.test.ts:230:            { id: 'ack', label: 'Ack', endpoint: 'https://api.example.com/ack' },
+sdk-plugin/test/manifest.test.ts:231:            { id: 'ack', label: 'Ack 2', endpoint: 'https://api.example.com/ack2' },
+sdk-plugin/test/manifest.test.ts:241:    it('rejects template action endpoint not covered by declaredEndpoints', () => {
+sdk-plugin/test/manifest.test.ts:248:          fields: { title: { path: '$.title' } },
+sdk-plugin/test/manifest.test.ts:249:          actions: [{ id: 'ack', label: 'Ack', endpoint: 'https://other.example.com/ack' }],
+
+ succeeded in 275ms:
+server/app/schemas.py:467:_JSONPATH_REGEX = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+server/app/schemas.py:475:_HOST_PORT_PATTERN = re.compile(
+server/app/schemas.py:480:def _is_allowed_action_endpoint_scheme(url: str) -> bool:
+server/app/schemas.py:498:    match = _HOST_PORT_PATTERN.match(rest)
+server/app/schemas.py:550:        if not _JSONPATH_REGEX.match(value):
+server/app/schemas.py:604:_PLUGIN_IDENTIFIER_REGEX = re.compile(
+server/app/schemas.py:661:    def validate_plugin_identifier(cls, value: str) -> str:
+server/app/schemas.py:663:        if not _PLUGIN_IDENTIFIER_REGEX.match(value):
+server/app/schemas.py:672:    def validate_card_key_path(cls, value: str | None) -> str | None:
+server/app/schemas.py:678:        if not _JSONPATH_REGEX.match(value):
+server/app/schemas.py:686:    def validate_renderer_template_pairing(self) -> "PluginPublishRequest":
+server/app/schemas.py:697:                if not _is_allowed_action_endpoint_scheme(action.endpoint):
+server/app/services/plugins.py:20:# Mirror of schemas._JSONPATH_REGEX — duplicated here to keep this module
+server/app/services/plugins.py:23:_JSONPATH_REGEX_SERVICE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+server/app/services/plugins.py:66:        if not isinstance(path, str) or not _JSONPATH_REGEX_SERVICE.match(path):
+server/app/services/plugins.py:130:        if not _JSONPATH_REGEX_SERVICE.match(card_key_path):
+
+codex
+The search shows the expected touch points plus a few untracked review/log files. I’m reading the validator implementations now, especially URL host parsing and glob parity, since that’s where subtle bypasses usually hide.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/services/plugins.py | Select-Object -First 160' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/src/manifest.ts | Select-Object -Skip 320 -First 165' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/src/manifest.ts | Select-Object -Skip 80 -First 170' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/schemas.py | Select-Object -Skip 450 -First 260' in D:\Projects\syncler
+ succeeded in 377ms:
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateTemplateBlock(
+  template: Record<string, unknown>,
+  declaredEndpointsRaw: unknown,
+  issues: string[],
+): void {
+  // layout ג€” must be in the known set.
+  const layout = typeof template.layout === 'string' ? template.layout : undefined;
+  const required = layout ? layoutRequiredFields[layout] : undefined;
+  const optional = layout ? layoutOptionalFields[layout] : undefined;
+  if (!layout || !required || !optional) {
+    issues.push(
+      `template.layout must be one of: ${Object.keys(layoutRequiredFields).join(', ')}`,
+    );
+    return;
+  }
+  const allowed = new Set<string>([...required, ...optional]);
+
+  // fields ג€” keys must be in the layout's allowed set; required keys
+  // must be present. (Mirrors server's TemplateObject.validate_fields_for_layout.)
+  const fields = template.fields;
+  if (!isRecord(fields)) {
+    issues.push('template.fields must be an object');
+  } else {
+    for (const key of Object.keys(fields)) {
+      if (!allowed.has(key)) {
+        issues.push(
+          `template.fields.${key} is not allowed for layout "${layout}" ` +
+            `(allowed: ${[...allowed].sort().join(', ')})`,
+        );
+      }
+      const field = fields[key];
+      if (!isRecord(field) || typeof field.path !== 'string' || !jsonPathPattern.test(field.path)) {
+        issues.push(
+          `template.fields.${key}.path must match $.field(.subfield)*`,
+        );
+      }
+    }
+    for (const key of required) {
+      if (!(key in fields)) {
+        issues.push(`template.fields.${key} is required for layout "${layout}"`);
+      }
+    }
+  }
+
+  // actions ג€” endpoint must be HTTPS, or HTTP targeting a LAN private
+  // range / localhost. (Debug builds on Android also accept LAN HTTP;
+  // release builds reject cleartext at the bridge. Server-side mirror
+  // enforces the same rule at publish time.)
+  const declaredEndpoints = Array.isArray(declaredEndpointsRaw)
+    ? declaredEndpointsRaw.filter((p): p is string => typeof p === 'string')
+    : [];
+  const actions = template.actions;
+  if (actions !== undefined) {
+    if (!Array.isArray(actions)) {
+      issues.push('template.actions must be an array');
+    } else {
+      const seen = new Set<string>();
+      for (let index = 0; index < actions.length; index += 1) {
+        const action = actions[index];
+        if (!isRecord(action)) {
+          issues.push(`template.actions[${index}] must be an object`);
+          continue;
+        }
+        const aid = typeof action.id === 'string' ? action.id : undefined;
+        const label = typeof action.label === 'string' ? action.label : undefined;
+        const endpoint = typeof action.endpoint === 'string' ? action.endpoint : undefined;
+        if (!aid || !label || !endpoint) {
+          issues.push(`template.actions[${index}] must set id, label, and endpoint`);
+          continue;
+        }
+        if (seen.has(aid)) {
+          issues.push(`template.actions[${index}].id "${aid}" is duplicated`);
+        }
+        seen.add(aid);
+        if (!isAllowedActionEndpointScheme(endpoint)) {
+          issues.push(
+            `template.actions[${index}].endpoint "${endpoint}" must be HTTPS, ` +
+              'or HTTP targeting localhost / a LAN private range (10.x, 172.16-31, 192.168.x).',
+          );
+        }
+        // Match against declaredEndpoints globs (same matcher as
+        // `assertEndpointDeclared` so behavior agrees).
+        if (declaredEndpoints.length > 0 && !endpointMatchesAnyGlob(endpoint, declaredEndpoints)) {
+          issues.push(
+            `template.actions[${index}].endpoint "${endpoint}" not covered by declaredEndpoints`,
+          );
+        }
+      }
+    }
+  }
+}
+
+function isAllowedActionEndpointScheme(url: string): boolean {
+  // HTTPS always allowed. HTTP allowed only when the host is localhost or
+  // a literal IPv4 in a LAN private range. Cleartext to public hosts
+  // would be rejected by Android release builds at the network bridge,
+  // so we reject at publish time too.
+  if (url.startsWith('https://')) return true;
+  if (!url.startsWith('http://')) return false;
+  const rest = url.slice('http://'.length);
+  // Strip user-info if present (rejected separately elsewhere; treat as
+  // not-localhost here regardless).
+  if (rest.includes('@')) return false;
+  // Pull host (up to first ':' or '/').
+  const hostEnd = (() => {
+    const colon = rest.indexOf(':');
+    const slash = rest.indexOf('/');
+    if (colon === -1 && slash === -1) return rest.length;
+    if (colon === -1) return slash;
+    if (slash === -1) return colon;
+    return Math.min(colon, slash);
+  })();
+  const host = rest.slice(0, hostEnd).toLowerCase();
+  if (host === 'localhost') return true;
+  // IPv4 in LAN private ranges.
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!ipv4) return false;
+  const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 127) return true; // 127.0.0.0/8
+  return false;
+}
+
+function endpointMatchesAnyGlob(url: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+}
+
+function endpointPatternToRegExp(pattern: string): RegExp {
+  // Mirror of network.ts:endpointPatternToRegExp. Duplicated here to
+  // avoid pulling network's `assertEndpointDeclared` (which reads the
+  // active runtime manifest) into manifest-validation context.
+  const schemeEnd = pattern.indexOf('://');
+  const searchFrom = schemeEnd === -1 ? 0 : schemeEnd + 3;
+  const slash = pattern.indexOf('/', searchFrom);
+  const pathStart = slash === -1 ? pattern.length : slash;
+  let source = '';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === '*') {
+      source += index < pathStart ? '[^./]*' : '[^/]*';
+    } else if (/[.+?^${}()|[\]\\]/.test(character)) {
+      source += `\\${character}`;
+    } else {
+      source += character;
+    }
+  }
+  return new RegExp(`^${source}$`);
+}
+
+ succeeded in 400ms:
+ */
+export class ManifestValidationError extends Error {
+  /** Individual validation failures. */
+  readonly issues: string[];
+
+  constructor(issues: string[]) {
+    super(`Invalid plugin manifest: ${issues.join('; ')}`);
+    this.name = 'ManifestValidationError';
+    this.issues = issues;
+  }
+}
+
+// Plugin id regex. The server-side parity check now enforces the same
+// pattern on `plugin_identifier` (server/app/schemas.py), so authors get
+// the same rejection client-side and server-side.
+const idPattern = /^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*)+$/;
+// Semver-lite with 6-digit caps on each numeric component, matching the
+// server's `_SEMVER` (server/app/services/plugins.py). Capping the
+// components keeps client + server Int parsers in agreement.
+const semverPattern = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+// $.field(.subfield)* ג€” same surface as the server's `_JSONPATH_REGEX`.
+// No array indexing, wildcards, or filters in V1.
+const jsonPathPattern = /^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
+const hexPattern = /^[0-9a-fA-F]+$/;
+const allCapabilities = new Set<string>(Object.values(Capability));
+const allDismissBehaviors = new Set<string>(Object.values(DismissBehavior));
+
+// Layout ג†’ allowed `template.fields` keys (required גˆ× optional). Mirror of
+// the server's `_LAYOUT_REQUIRED_FIELDS` + `_LAYOUT_OPTIONAL_FIELDS`. Adding
+// a new layout here MUST track the server change in lockstep.
+const layoutRequiredFields: Record<string, ReadonlySet<string>> = {
+  standard_card: new Set(['title']),
+};
+const layoutOptionalFields: Record<string, ReadonlySet<string>> = {
+  standard_card: new Set(['subtitle', 'body']),
+};
+
+let activeManifest: PluginManifest | undefined;
+
+/**
+ * Options for [validatePluginManifest] and [assertPluginManifest].
+ */
+export interface ValidatePluginManifestOptions {
+  /**
+   * When true, accepts any non-empty string for `bundleHash` and `signature`
+   * (skipping the hex format + 64/128-length checks). The runtime path ג€”
+   * `registerPlugin` inside a loaded bundle ג€” uses this because:
+   *  - the in-bundle source manifest can't know its own bundle hash or
+   *    signature (those are produced by `tools/sign-bundle.ts` and written
+   *    to `manifest.signed.json` on disk, not back into the JS source);
+   *  - the host doesn't trust these fields from the loaded bundle anyway ג€”
+   *    it has the authoritative signed values from the server side.
+   * Publish-time tooling and server validators keep the default (false).
+   */
+  allowUnsignedPlaceholders?: boolean;
+}
+
+/**
+ * Returns true when `value` is a valid plugin manifest.
+ */
+export function isPluginManifest(value: unknown): value is PluginManifest {
+  return validatePluginManifest(value).valid;
+}
+
+/**
+ * Validates unknown JSON-like data as a `PluginManifest`.
+ */
+export function validatePluginManifest(
+  value: unknown,
+  options: ValidatePluginManifestOptions = {},
+): { valid: true; manifest: PluginManifest } | { valid: false; issues: string[] } {
+  const issues: string[] = [];
+  const allowUnsignedPlaceholders = options.allowUnsignedPlaceholders === true;
+
+  if (!isRecord(value)) {
+    return { valid: false, issues: ['manifest must be an object'] };
+  }
+
+  requireString(value, 'id', issues, (id) => {
+    if (!idPattern.test(id)) issues.push('id must be reverse-DNS format');
+  });
+  requireString(value, 'name', issues);
+  requireString(value, 'version', issues, (version) => {
+    if (!semverPattern.test(version)) issues.push('version must be semver');
+  });
+  requireString(value, 'senderId', issues);
+  // bundleHash is SHA-256 of the bundle bytes ג†’ 32 bytes ג†’ 64 hex chars.
+  // signature is Ed25519 over (canonical manifest || bundleHash) ג†’ 64 bytes
+  // ג†’ 128 hex chars. The previous "any hex" check let "00" or any other
+  // placeholder through validation, which authors hit constantly: the
+  // server rejects at publish time with a 422, but the SDK should have
+  // caught it locally. (External DX review, lottery-claude, Phase 4.1 #1.)
+  requireString(value, 'bundleHash', issues, (hash) => {
+    if (allowUnsignedPlaceholders) return;
+    if (!hexPattern.test(hash)) {
+      issues.push('bundleHash must be hex');
+    } else if (hash.length !== 64) {
+      issues.push(
+        'bundleHash must be 64 hex chars (SHA-256). ' +
+          'Run sign-bundle.ts on your built bundle to populate this field.',
+      );
+    }
+  });
+  requireString(value, 'signature', issues, (signature) => {
+    if (allowUnsignedPlaceholders) return;
+    if (!hexPattern.test(signature)) {
+      issues.push('signature must be hex');
+    } else if (signature.length !== 128) {
+      issues.push(
+        'signature must be 128 hex chars (Ed25519, 64 bytes). ' +
+          'Run sign-bundle.ts on your built bundle to populate this field.',
+      );
+    }
+  });
+  requireString(value, 'minPlatformVersion', issues, (version) => {
+    if (!semverPattern.test(version)) issues.push('minPlatformVersion must be semver');
+  });
+
+  // renderer + template pairing. Both are optional; server defaults
+  // renderer to 'script'. When present, renderer must be one of the
+  // two enum values, and template/script ג†” template-present pairing
+  // is enforced strictly (matches server's
+  // PluginPublishRequest.validate_renderer_template_pairing).
+  const renderer = value.renderer;
+  if (renderer !== undefined && renderer !== 'script' && renderer !== 'template') {
+    issues.push('renderer must be "script" or "template" when set');
+  }
+  const effectiveRenderer = renderer ?? 'script';
+  if (effectiveRenderer === 'template' && !value.template) {
+    issues.push('template required when renderer is "template"');
+  }
+  if (effectiveRenderer === 'script' && value.template !== undefined && value.template !== null) {
+    issues.push('template must be omitted when renderer is "script"');
+  }
+
+  // cardType + cardKeyPath pairing. Same defaulting rules ג€” optional in
+  // the SDK, server defaults to 'event'. cardKeyPath is required iff
+  // cardType is 'live'.
+  const cardType = value.cardType;
+  if (cardType !== undefined && cardType !== 'event' && cardType !== 'live') {
+    issues.push('cardType must be "event" or "live" when set');
+  }
+  const effectiveCardType = cardType ?? 'event';
+  if (effectiveCardType === 'live' && !value.cardKeyPath) {
+    issues.push('cardKeyPath required when cardType is "live"');
+  }
+  if (effectiveCardType === 'event' && value.cardKeyPath !== undefined && value.cardKeyPath !== null) {
+    issues.push('cardKeyPath must be omitted when cardType is "event"');
+  }
+  if (
+    effectiveCardType === 'live' &&
+    typeof value.cardKeyPath === 'string' &&
+    !jsonPathPattern.test(value.cardKeyPath)
+  ) {
+    issues.push(
+      'cardKeyPath must match $.field(.subfield)* ' +
+        '(no array indexing, wildcards, or filters)',
+    );
+  }
+
+  // Template block validation. Only run when the manifest has actually
+  // declared `renderer: 'template'` (or a template block is present); the
+  // renderer/template pairing rule above already covered presence/absence.
+  if (effectiveRenderer === 'template' && isRecord(value.template)) {
+    validateTemplateBlock(value.template, value.declaredEndpoints, issues);
+  }
+
+  if (!Array.isArray(value.declaredCapabilities)) {
+    issues.push('declaredCapabilities must be an array');
+  } else {
+
+ succeeded in 397ms:
+"""Plugin lifecycle service ג€” publish, fetch latest, revoke."""
+
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import and_, desc, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Plugin
+
+# Semver-lite: MAJOR.MINOR.PATCH[-prerelease]. Reject anything weirder.
+# Components capped at 6 digits each so server + client Int parsers agree.
+_SEMVER = re.compile(r"^(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:-[A-Za-z0-9.\-]+)?$")
+
+# Mirror of schemas._JSONPATH_REGEX ג€” duplicated here to keep this module
+# importable in isolation. Phase 5d hardens the previous startswith("$")
+# checks below to the same grammar the SDK and schemas layer use.
+_JSONPATH_REGEX_SERVICE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
+
+class PluginError(Exception):
+    """Base."""
+
+
+class InvalidVersionError(PluginError):
+    """Version string is not valid semver-lite."""
+
+
+class VersionRegressionError(PluginError):
+    """New version is not strictly greater than the latest published."""
+
+
+class DuplicateVersionError(PluginError):
+    """(sender_id, plugin_identifier, version) already exists."""
+
+
+class InvalidTemplateError(PluginError):
+    """Template configuration is malformed or invalid."""
+
+
+class PluginNotFoundError(PluginError):
+    """No plugin with that identifier."""
+
+
+def _validate_template(template: dict, declared_endpoints: list[str]) -> None:
+    layout = template.get("layout")
+    if layout != "standard_card":
+        raise InvalidTemplateError(f"unknown or missing layout: {layout}")
+
+    fields = template.get("fields", {})
+    if not isinstance(fields, dict):
+        raise InvalidTemplateError("fields must be a dictionary")
+
+    if "title" not in fields:
+        raise InvalidTemplateError("missing required field: title")
+
+    for name, config in fields.items():
+        if not isinstance(config, dict) or "path" not in config:
+            raise InvalidTemplateError(f"malformed config for field {name}")
+        path = config["path"]
+        if not isinstance(path, str) or not _JSONPATH_REGEX_SERVICE.match(path):
+            raise InvalidTemplateError(
+                f"invalid JSONPath for field {name}: {path} "
+                "(must match $.field(.subfield)*)",
+            )
+
+    actions = template.get("actions", [])
+    if not isinstance(actions, list):
+        raise InvalidTemplateError("actions must be a list")
+
+    for action in actions:
+        if not isinstance(action, dict):
+            raise InvalidTemplateError("malformed action")
+        aid = action.get("id")
+        label = action.get("label")
+        endpoint = action.get("endpoint")
+        if not aid or not label or not endpoint:
+            raise InvalidTemplateError("actions must have id, label, and endpoint")
+
+        if endpoint not in declared_endpoints:
+            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+                raise InvalidTemplateError(
+                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+                )
+
+
+def _parse_version(version: str) -> tuple[int, int, int, str]:
+    match = _SEMVER.match(version)
+    if not match:
+        raise InvalidVersionError(f"invalid version: {version}")
+    major, minor, patch = (int(g) for g in match.groups()[:3])
+    pre = match.group(0).partition("-")[2] or "~"  # "~" sorts after any prerelease
+    return major, minor, patch, pre
+
+
+async def publish_plugin(
+    db: AsyncSession,
+    *,
+    sender_id: uuid.UUID,
+    plugin_identifier: str,
+    version: str,
+    manifest_hash: bytes,
+    bundle_hash: bytes,
+    signature: bytes,
+    signed_bundle_url: str,
+    capabilities: list[str],
+    endpoints: list[str],
+    renderer: str = "script",
+    template: dict | None = None,
+    card_type: str = "event",
+    card_key_path: str | None = None,
+) -> Plugin:
+    new_key = _parse_version(version)
+
+    if renderer == "template":
+        if not template:
+            raise InvalidTemplateError("template object is required for renderer='template'")
+        _validate_template(template, endpoints)
+    elif renderer != "script":
+        raise InvalidTemplateError(f"unknown renderer type: {renderer}")
+
+    if card_type == "live":
+        if not card_key_path:
+            raise InvalidTemplateError("card_key_path is required for card_type='live'")
+        if not _JSONPATH_REGEX_SERVICE.match(card_key_path):
+            raise InvalidTemplateError(
+                f"invalid JSONPath for card_key_path: {card_key_path} "
+                "(must match $.field(.subfield)*)",
+            )
+    elif card_type != "event":
+        raise InvalidTemplateError(f"unknown card_type: {card_type}")
+
+    # Reject if any existing non-revoked version is >= new version.
+    existing = await db.execute(
+        select(Plugin).where(
+            and_(
+                Plugin.sender_id == sender_id,
+                Plugin.plugin_identifier == plugin_identifier,
+            ),
+        ),
+    )
+    for row in existing.scalars().all():
+        if _parse_version(row.version) >= new_key:
+            raise VersionRegressionError(
+                f"new version {version} not greater than existing {row.version}",
+            )
+
+    plugin = Plugin(
+        id=uuid.uuid4(),  # fresh row UUID per published version
+        sender_id=sender_id,
+        plugin_identifier=plugin_identifier,
+        version=version,
+        manifest_hash=manifest_hash,
+        bundle_hash=bundle_hash,
+        signature=signature,
+
+ succeeded in 397ms:
+#
+# Layouts and per-layout required fields. Senders publish a `template` object
+# alongside `renderer: "template"` to declare a native Compose rendering
+# instead of a WebView bundle. The publish-time validator enforces the
+# schema constraints below so the client never has to render a malformed
+# template at message time (Phase 3a in `.triad/50-agreement-and-plan.md`).
+_TEMPLATE_LAYOUTS: frozenset[str] = frozenset({"standard_card"})
+_LAYOUT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
+    "standard_card": frozenset({"title"}),
+}
+_LAYOUT_OPTIONAL_FIELDS: dict[str, frozenset[str]] = {
+    "standard_card": frozenset({"subtitle", "body"}),
+}
+# Only $.dotted.path navigation is supported in V1 (no array indexing, no
+# wildcards, no filters). Keep the surface tight so the client-side resolver
+# stays small and auditable.
+_JSONPATH_REGEX = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+# Path-length cap is shared with the hostPreview value cap (200 chars).
+_TEMPLATE_PATH_MAX = 200
+_ACTION_ID_MAX = 64
+_ACTION_LABEL_MAX = 64
+_ACTION_ENDPOINT_MAX = 2048
+
+
+_HOST_PORT_PATTERN = re.compile(
+    r"^(?P<host>[^:/?#@]+)(?::(?P<port>\d+))?$",
+)
+
+
+def _is_allowed_action_endpoint_scheme(url: str) -> bool:
+    """Phase 5d. HTTPS is always allowed. HTTP is only allowed when the
+    host is `localhost` or an IPv4 literal in a LAN private range
+    (10.x, 172.16-31, 192.168.x, 127.x). Mirror of the SDK's
+    `isAllowedActionEndpointScheme`.
+    """
+    if url.startswith("https://"):
+        return True
+    if not url.startswith("http://"):
+        return False
+    rest = url[len("http://"):]
+    if "@" in rest:
+        return False  # `user:pass@host` form ג€” rejected for parity with SDK.
+    # Strip path/query ג€” we only care about host:port.
+    for sep in ("/", "?", "#"):
+        idx = rest.find(sep)
+        if idx != -1:
+            rest = rest[:idx]
+    match = _HOST_PORT_PATTERN.match(rest)
+    if not match:
+        return False
+    host = match.group("host").lower()
+    if host == "localhost":
+        return True
+    ipv4 = re.fullmatch(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})", host)
+    if not ipv4:
+        return False
+    a, b = int(ipv4.group(1)), int(ipv4.group(2))
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 127:
+        return True
+    return False
+
+
+def _endpoint_pattern_matches(url: str, pattern: str) -> bool:
+    """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
+    the host as `[^./]*` (no subdomain leak), `*` in the path as `[^/]*`.
+    Required so the client and server agree on which action endpoints are
+    "in" the declared-endpoints set.
+    """
+    # Find where the path starts (first `/` after the scheme).
+    scheme_end = pattern.find("://")
+    if scheme_end == -1:
+        path_start = len(pattern)
+    else:
+        slash_after_authority = pattern.find("/", scheme_end + 3)
+        path_start = slash_after_authority if slash_after_authority != -1 else len(pattern)
+
+    out: list[str] = []
+    for index, character in enumerate(pattern):
+        if character == "*":
+            out.append("[^./]*" if index < path_start else "[^/]*")
+        else:
+            out.append(re.escape(character))
+    return re.match(f"^{''.join(out)}$", url) is not None
+
+
+class TemplateField(BaseModel):
+    """One template field ג€” a JSONPath expression that resolves against the
+    decrypted payload at render time."""
+    path: Annotated[str, Field(min_length=1, max_length=_TEMPLATE_PATH_MAX)]
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        if not _JSONPATH_REGEX.match(value):
+            raise ValueError(
+                f"invalid JSONPath {value!r}: must match $.field(.subfield)*",
+            )
+        return value
+
+
+class TemplateAction(BaseModel):
+    """One declared action button. Endpoint must match the plugin's
+    `endpoints` globs (enforced at publish time)."""
+    id: Annotated[str, Field(min_length=1, max_length=_ACTION_ID_MAX)]
+    label: Annotated[str, Field(min_length=1, max_length=_ACTION_LABEL_MAX)]
+    endpoint: Annotated[str, Field(min_length=1, max_length=_ACTION_ENDPOINT_MAX)]
+
+
+class TemplateObject(BaseModel):
+    """The Phase 3a template manifest block. Senders ship one of these
+    instead of a JS bundle when they want native Compose rendering."""
+    layout: str
+    fields: dict[str, TemplateField]
+    actions: list[TemplateAction] = []
+
+    @field_validator("layout")
+    @classmethod
+    def validate_layout(cls, value: str) -> str:
+        if value not in _TEMPLATE_LAYOUTS:
+            raise ValueError(
+                f"unknown template layout {value!r}; supported: {sorted(_TEMPLATE_LAYOUTS)}",
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_fields_for_layout(self) -> "TemplateObject":
+        required = _LAYOUT_REQUIRED_FIELDS.get(self.layout, frozenset())
+        optional = _LAYOUT_OPTIONAL_FIELDS.get(self.layout, frozenset())
+        allowed = required | optional
+        missing = required - self.fields.keys()
+        if missing:
+            raise ValueError(
+                f"layout {self.layout!r} requires fields {sorted(missing)}",
+            )
+        extra = self.fields.keys() - allowed
+        if extra:
+            raise ValueError(
+                f"layout {self.layout!r} does not accept fields {sorted(extra)}",
+            )
+        # Action ids must be unique within a template so the client can route
+        # an action tap unambiguously.
+        action_ids = [a.id for a in self.actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError(f"duplicate action ids in template")
+        return self
+
+
+_PLUGIN_IDENTIFIER_REGEX = re.compile(
+    r"^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*)+$"
+)
+"""Mirror of the SDK's idPattern (sdk-plugin/src/manifest.ts). Reverse-DNS
+identifier, ASCII only, must contain at least one dot. Phase 5d parity
+fix ג€” previously the server only enforced a length cap, letting the SDK
+catch malformed identifiers but accepting them server-side."""
+
+
+class PluginPublishRequest(BaseModel):
+    sender_id: UUID
+    plugin_identifier: Annotated[str, Field(min_length=1, max_length=200)]
+    version: Annotated[str, Field(min_length=1, max_length=64)]
+    manifest_hash: str  # base64 32 bytes
+    bundle_hash: str    # base64 32 bytes
+    signature: str      # base64 64 bytes Ed25519 (bundle signature)
+    signed_bundle_url: str
+    capabilities: list[str]
+    endpoints: list[str]
+    # Phase 3a. Defaults to "script" for backwards compat with senders
+    # published before the template renderer existed ג€” their canonical
+    # publish envelope does not include this field, so the conditional
+    # serialization in `_publish_envelope` keeps their signature valid.
+    renderer: Literal["script", "template"] = "script"
+    template: TemplateObject | None = None
+    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+    # for live cards.
+    card_type: Literal["event", "live"] = "event"
+    card_key_path: str | None = None
+    sender_signature: str  # base64 Ed25519 over canonical publish body
+
+    @field_validator("manifest_hash")
+    @classmethod
+    def validate_manifest_hash(cls, value: str) -> str:
+        decode_base64(value, field_name="manifest_hash", exact=32)
+        return value
+
+    @field_validator("bundle_hash")
+    @classmethod
+    def validate_bundle_hash(cls, value: str) -> str:
+        decode_base64(value, field_name="bundle_hash", exact=32)
+        return value
+
+    @field_validator("signature")
+    @classmethod
+    def validate_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="signature", exact=64)
+        return value
+
+    @field_validator("sender_signature")
+    @classmethod
+    def validate_sender_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="sender_signature", exact=64)
+        return value
+
+    @field_validator("plugin_identifier")
+    @classmethod
+    def validate_plugin_identifier(cls, value: str) -> str:
+        # Phase 5d parity fix: mirror the SDK's reverse-DNS check.
+        if not _PLUGIN_IDENTIFIER_REGEX.match(value):
+            raise ValueError(
+                "plugin_identifier must be reverse-DNS "
+                "(e.g. com.example.weather)",
+            )
+        return value
+
+    @field_validator("card_key_path")
+    @classmethod
+    def validate_card_key_path(cls, value: str | None) -> str | None:
+        # Phase 5d: enforce the same $.field(.subfield)* grammar that
+        # template field paths already use. Previously this was just a
+        # startsWith("$") check (server services/plugins.py).
+        if value is None:
+            return value
+        if not _JSONPATH_REGEX.match(value):
+            raise ValueError(
+                f"card_key_path {value!r} must match $.field(.subfield)* "
+                "(no array indexing, wildcards, or filters)",
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_renderer_template_pairing(self) -> "PluginPublishRequest":
+        # The pairing rules live here (not on TemplateObject) because the
+        # action-endpoint check needs the surrounding `endpoints` glob list.
+        if self.renderer == "template" and self.template is None:
+            raise ValueError("template required when renderer == 'template'")
+        if self.renderer == "script" and self.template is not None:
+            raise ValueError("template must be omitted when renderer == 'script'")
+        if self.template is not None:
+            for action in self.template.actions:
+                # Phase 5d: action endpoints must be HTTPS, or HTTP targeting
+                # localhost / a LAN private range (mirrors the SDK).
+                if not _is_allowed_action_endpoint_scheme(action.endpoint):
+                    raise ValueError(
+                        f"action {action.id!r} endpoint {action.endpoint!r} "
+                        f"must be HTTPS, or HTTP targeting localhost / a "
+                        f"LAN private range",
+                    )
+                if not any(
+                    _endpoint_pattern_matches(action.endpoint, p)
+                    for p in self.endpoints
+                ):
+                    raise ValueError(
+                        f"action {action.id!r} endpoint {action.endpoint!r} "
+                        f"not allowed by declared endpoints",
+                    )
+
+codex
+I found one concrete mismatch with the stated landing state: the action endpoint helper rejects `user:pass@host` only for `http://`, while `https://user:pass@example.com/...` is accepted by the scheme helper. I’m checking whether that is merely cosmetic or can pass the full publish model via declared endpoint matching.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"endpointPatternToRegExp|assertEndpointDeclared|EndpointMatcher|declaredEndpoints|startswith\\(p.rstrip\" -S sdk-plugin server android app plugin-host ." in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/tests/test_phase5d_validators.py | Select-Object -First 230' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/test/manifest.test.ts | Select-Object -Skip 95 -First 175' in D:\Projects\syncler
+ exited 1 in 283ms:
+server\app\schemas.py:520:    """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
+sdk-plugin\test\network.test.ts:18:    declaredEndpoints: ['https://api.example.com/v1/item', 'https://api.example.com/v1/*', 'https://*.example.net/feed'],
+server\tests\test_phase5d_validators.py:113:        # declaredEndpoints match would succeed; we test the
+sdk-plugin\test\manifest.test.ts:18:  declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:179:        declaredEndpoints: ['http://api.example.com/*', 'https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:196:        declaredEndpoints: ['http://192.168.1.10:8001/api/*'],
+sdk-plugin\test\manifest.test.ts:210:        declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:224:        declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:241:    it('rejects template action endpoint not covered by declaredEndpoints', () => {
+sdk-plugin\test\manifest.test.ts:244:        declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:254:        expect(result.issues.some((i) => i.includes('not covered by declaredEndpoints'))).toBe(true);
+sdk-plugin\test\base-plugin.test.ts:108:        declaredEndpoints: [],
+sdk-plugin\test\base-plugin.test.ts:135:    declaredEndpoints: [],
+.\create-plugin\index.js:220:    declaredEndpoints: ['https://your-app.example.com/api/*'],
+.\create-plugin\index.js:322:          // Replace the URL with one of your manifest's declaredEndpoints.
+.\create-plugin\index.js:360:    declaredEndpoints: ['https://your-app.example.com/api/*'],
+.\create-plugin\index.js:467:- [ ] Replace \`declaredEndpoints\` placeholders with your real backend URLs.
+server\app\services\plugins.py:86:            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+server\app\services\plugins.py:88:                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+sdk-plugin\src\network.ts:26:    assertEndpointDeclared(url);
+sdk-plugin\src\network.ts:35:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+sdk-plugin\src\network.ts:41:export function assertEndpointDeclared(url: string): void {
+sdk-plugin\src\network.ts:43:  if (!manifest || !isEndpointDeclared(url, manifest.declaredEndpoints)) {
+sdk-plugin\src\network.ts:48:function endpointPatternToRegExp(pattern: string): RegExp {
+.\examples\trading-bot\plugin\src\plugin.ts:34:  // declaredEndpoints below -- the URL must match one of those globs.
+.\examples\trading-bot\plugin\src\plugin.ts:52:    declaredEndpoints: [
+.\examples\trading-bot\plugin\src\plugin.ts:79:        // still enforces declaredEndpoints -- this just chooses among them.
+sdk-plugin\README.md:44:    declaredEndpoints: [],
+sdk-plugin\README.md:75:- `network.fetch` checks `manifest.declaredEndpoints` before calling `platform.network.fetch`.
+sdk-plugin\src\manifest.ts:13: * `declaredEndpoints` globs (validated server-side at publish time).
+sdk-plugin\src\manifest.ts:49:  declaredEndpoints: string[];
+sdk-plugin\src\manifest.ts:245:    validateTemplateBlock(value.template, value.declaredEndpoints, issues);
+sdk-plugin\src\manifest.ts:258:  if (!Array.isArray(value.declaredEndpoints)) {
+sdk-plugin\src\manifest.ts:259:    issues.push('declaredEndpoints must be an array');
+sdk-plugin\src\manifest.ts:261:    for (const endpoint of value.declaredEndpoints) {
+sdk-plugin\src\manifest.ts:263:        issues.push('declaredEndpoints entries must be non-empty strings');
+sdk-plugin\src\manifest.ts:328:  declaredEndpointsRaw: unknown,
+sdk-plugin\src\manifest.ts:374:  const declaredEndpoints = Array.isArray(declaredEndpointsRaw)
+sdk-plugin\src\manifest.ts:375:    ? declaredEndpointsRaw.filter((p): p is string => typeof p === 'string')
+sdk-plugin\src\manifest.ts:406:        // Match against declaredEndpoints globs (same matcher as
+sdk-plugin\src\manifest.ts:407:        // `assertEndpointDeclared` so behavior agrees).
+sdk-plugin\src\manifest.ts:408:        if (declaredEndpoints.length > 0 && !endpointMatchesAnyGlob(endpoint, declaredEndpoints)) {
+sdk-plugin\src\manifest.ts:410:            `template.actions[${index}].endpoint "${endpoint}" not covered by declaredEndpoints`,
+sdk-plugin\src\manifest.ts:452:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+sdk-plugin\src\manifest.ts:455:function endpointPatternToRegExp(pattern: string): RegExp {
+sdk-plugin\src\manifest.ts:456:  // Mirror of network.ts:endpointPatternToRegExp. Duplicated here to
+sdk-plugin\src\manifest.ts:457:  // avoid pulling network's `assertEndpointDeclared` (which reads the
+.\examples\trading-bot\plugin\manifest.json:9:  "declaredEndpoints": ["http://*.*.*.*:8001/api/*", "http://localhost:8001/api/*", "https://*.example.com/api/*"],
+sdk-plugin\src\index.ts:34:export { EndpointNotDeclaredError, assertEndpointDeclared, isEndpointDeclared, network } from './network';
+.\examples\trading-bot\bot.py:157:    # declaredEndpoints — `ACK_URL` must match one of the manifest's
+.\docs\integration-guide.md:125:    declaredEndpoints: ['https://your-app.example.com/api/*'],
+.\docs\integration-guide.md:177:- `platform.network.fetch(url, init)` — works, gated by `declaredEndpoints` glob match. Contract documented in §3.1 below.
+.\docs\integration-guide.md:180:### 3.1 `declaredEndpoints` glob syntax
+.\docs\integration-guide.md:182:`declaredEndpoints` controls which URLs your plugin may pass to `platform.network.fetch`. The host (both Android `EndpointMatcher.kt` and the TS SDK's `network.ts`) implements the same glob grammar:
+.\docs\integration-guide.md:200:  - `endpoint_not_declared` — URL doesn't match any `declaredEndpoints` glob (see §3.1).
+.\docs\integration-guide.md:567:- **Single-segment wildcard surprise in `declaredEndpoints`.** `https://example.com/api/*` matches `https://example.com/api/v1` but NOT `https://example.com/api/v1/users`. `*` is one segment, never multiple. Card shows *"endpoint not declared"*. See §3.1 for the full glob grammar.
+sdk-plugin\examples\minimal\src\plugin.ts:24:    declaredEndpoints: [],
+sdk-plugin\examples\minimal\manifest.json:9:  "declaredEndpoints": [],
+.\server\tests\test_phase5d_validators.py:113:        # declaredEndpoints match would succeed; we test the
+.\sdk-plugin\examples\minimal\manifest.json:9:  "declaredEndpoints": [],
+.\sdk-plugin\test\network.test.ts:18:    declaredEndpoints: ['https://api.example.com/v1/item', 'https://api.example.com/v1/*', 'https://*.example.net/feed'],
+.\sdk-plugin\test\manifest.test.ts:18:  declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:179:        declaredEndpoints: ['http://api.example.com/*', 'https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:196:        declaredEndpoints: ['http://192.168.1.10:8001/api/*'],
+.\sdk-plugin\test\manifest.test.ts:210:        declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:224:        declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:241:    it('rejects template action endpoint not covered by declaredEndpoints', () => {
+.\sdk-plugin\test\manifest.test.ts:244:        declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:254:        expect(result.issues.some((i) => i.includes('not covered by declaredEndpoints'))).toBe(true);
+.\sdk-plugin\examples\minimal\src\plugin.ts:24:    declaredEndpoints: [],
+.\sdk-plugin\test\base-plugin.test.ts:108:        declaredEndpoints: [],
+.\sdk-plugin\test\base-plugin.test.ts:135:    declaredEndpoints: [],
+.\server\app\schemas.py:520:    """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
+.\sdk-plugin\src\network.ts:26:    assertEndpointDeclared(url);
+.\sdk-plugin\src\network.ts:35:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+.\sdk-plugin\src\network.ts:41:export function assertEndpointDeclared(url: string): void {
+.\sdk-plugin\src\network.ts:43:  if (!manifest || !isEndpointDeclared(url, manifest.declaredEndpoints)) {
+.\sdk-plugin\src\network.ts:48:function endpointPatternToRegExp(pattern: string): RegExp {
+.\sdk-plugin\src\manifest.ts:13: * `declaredEndpoints` globs (validated server-side at publish time).
+.\sdk-plugin\src\manifest.ts:49:  declaredEndpoints: string[];
+.\sdk-plugin\src\manifest.ts:245:    validateTemplateBlock(value.template, value.declaredEndpoints, issues);
+.\sdk-plugin\src\manifest.ts:258:  if (!Array.isArray(value.declaredEndpoints)) {
+.\sdk-plugin\src\manifest.ts:259:    issues.push('declaredEndpoints must be an array');
+.\sdk-plugin\src\manifest.ts:261:    for (const endpoint of value.declaredEndpoints) {
+.\sdk-plugin\src\manifest.ts:263:        issues.push('declaredEndpoints entries must be non-empty strings');
+.\sdk-plugin\src\manifest.ts:328:  declaredEndpointsRaw: unknown,
+.\sdk-plugin\src\manifest.ts:374:  const declaredEndpoints = Array.isArray(declaredEndpointsRaw)
+.\sdk-plugin\src\manifest.ts:375:    ? declaredEndpointsRaw.filter((p): p is string => typeof p === 'string')
+.\sdk-plugin\src\manifest.ts:406:        // Match against declaredEndpoints globs (same matcher as
+.\sdk-plugin\src\manifest.ts:407:        // `assertEndpointDeclared` so behavior agrees).
+.\sdk-plugin\src\manifest.ts:408:        if (declaredEndpoints.length > 0 && !endpointMatchesAnyGlob(endpoint, declaredEndpoints)) {
+.\sdk-plugin\src\manifest.ts:410:            `template.actions[${index}].endpoint "${endpoint}" not covered by declaredEndpoints`,
+.\sdk-plugin\src\manifest.ts:452:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+.\sdk-plugin\src\manifest.ts:455:function endpointPatternToRegExp(pattern: string): RegExp {
+.\sdk-plugin\src\manifest.ts:456:  // Mirror of network.ts:endpointPatternToRegExp. Duplicated here to
+.\sdk-plugin\src\manifest.ts:457:  // avoid pulling network's `assertEndpointDeclared` (which reads the
+.\sdk-plugin\src\index.ts:34:export { EndpointNotDeclaredError, assertEndpointDeclared, isEndpointDeclared, network } from './network';
+.\sdk-plugin\README.md:44:    declaredEndpoints: [],
+.\sdk-plugin\README.md:75:- `network.fetch` checks `manifest.declaredEndpoints` before calling `platform.network.fetch`.
+.\server\app\services\plugins.py:86:            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+.\server\app\services\plugins.py:88:                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\PluginLoaderTest.kt:104:            "declaredEndpoints" to listOf("https://api.example.com/v1/*"),
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:7:class EndpointMatcherTest {
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:10:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf("https://api.example.com/v1/item")))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:17:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:18:        assertFalse(EndpointMatcher.matches("https://api.example.com/v1/item/child", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:25:        assertTrue(EndpointMatcher.matches("https://news.example.net/feed", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:26:        assertFalse(EndpointMatcher.matches("https://a.b.example.net/feed", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:31:        assertFalse(EndpointMatcher.matches("https://evil.example.com/v1/item", listOf("https://api.example.com/v1/*")))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:31:        declaredEndpoints = emptyList(),
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:81:            bundleJs = null, declaredEndpoints = emptyList(),
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\PluginLoaderTest.kt:104:            "declaredEndpoints" to listOf("https://api.example.com/v1/*"),
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:7:class EndpointMatcherTest {
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:10:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf("https://api.example.com/v1/item")))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:17:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:18:        assertFalse(EndpointMatcher.matches("https://api.example.com/v1/item/child", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:25:        assertTrue(EndpointMatcher.matches("https://news.example.net/feed", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:26:        assertFalse(EndpointMatcher.matches("https://a.b.example.net/feed", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:31:        assertFalse(EndpointMatcher.matches("https://evil.example.com/v1/item", listOf("https://api.example.com/v1/*")))
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\EndpointMatcher.kt:3:object EndpointMatcher {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:31:        declaredEndpoints = emptyList(),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:81:            bundleJs = null, declaredEndpoints = emptyList(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:60:    @Suppress("UNUSED_PARAMETER") declaredEndpoints: List<String>,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:192: * action endpoints are sender-controlled (the plugin's `declaredEndpoints`
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginManifest.kt:13:    val declaredEndpoints: List<String> = emptyList(),
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\EndpointMatcher.kt:3:object EndpointMatcher {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:952:                    declaredEndpoints = item.declaredEndpoints,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:959:                    declaredEndpoints = item.declaredEndpoints,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1005:    declaredEndpoints: List<String>,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1022:                val bridge = CardBridge(webView = this, declaredEndpoints = declaredEndpoints)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:117:                    declaredEndpoints = plugin?.endpoints.orEmpty(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:211:            declaredEndpoints = plugin?.endpoints.orEmpty(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:274:            // endpoint גˆˆ declaredEndpoints) at publish time, so the client
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:396:                    declaredEndpoints = emptyList(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:447:                    declaredEndpoints = emptyList(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:504:    val declaredEndpoints: List<String>,
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginManifest.kt:13:    val declaredEndpoints: List<String> = emptyList(),
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:5:import app.syncler.android.pluginhost.EndpointMatcher
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:44:        if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:34:    private val declaredEndpoints: List<String>,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:84:        if (!matchesAny(url, declaredEndpoints)) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:115:    // Same logic as :feature:plugin-host's EndpointMatcher; inlined here so
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:5:import app.syncler.android.pluginhost.EndpointMatcher
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:44:        if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:60:    @Suppress("UNUSED_PARAMETER") declaredEndpoints: List<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:192: * action endpoints are sender-controlled (the plugin's `declaredEndpoints`
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:952:                    declaredEndpoints = item.declaredEndpoints,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:959:                    declaredEndpoints = item.declaredEndpoints,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1005:    declaredEndpoints: List<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1022:                val bridge = CardBridge(webView = this, declaredEndpoints = declaredEndpoints)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:34:    private val declaredEndpoints: List<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:84:        if (!matchesAny(url, declaredEndpoints)) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:115:    // Same logic as :feature:plugin-host's EndpointMatcher; inlined here so
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:117:                    declaredEndpoints = plugin?.endpoints.orEmpty(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:211:            declaredEndpoints = plugin?.endpoints.orEmpty(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:274:            // endpoint גˆˆ declaredEndpoints) at publish time, so the client
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:396:                    declaredEndpoints = emptyList(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:447:                    declaredEndpoints = emptyList(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:504:    val declaredEndpoints: List<String>,
+rg: app: The system cannot find the file specified. (os error 2)
+rg: plugin-host: The system cannot find the file specified. (os error 2)
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+2026-05-24T13:27:49.554988Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+server\app\schemas.py:520:    """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
+sdk-plugin\test\network.test.ts:18:    declaredEndpoints: ['https://api.example.com/v1/item', 'https://api.example.com/v1/*', 'https://*.example.net/feed'],
+server\tests\test_phase5d_validators.py:113:        # declaredEndpoints match would succeed; we test the
+sdk-plugin\test\manifest.test.ts:18:  declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:179:        declaredEndpoints: ['http://api.example.com/*', 'https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:196:        declaredEndpoints: ['http://192.168.1.10:8001/api/*'],
+sdk-plugin\test\manifest.test.ts:210:        declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:224:        declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:241:    it('rejects template action endpoint not covered by declaredEndpoints', () => {
+sdk-plugin\test\manifest.test.ts:244:        declaredEndpoints: ['https://api.example.com/*'],
+sdk-plugin\test\manifest.test.ts:254:        expect(result.issues.some((i) => i.includes('not covered by declaredEndpoints'))).toBe(true);
+sdk-plugin\test\base-plugin.test.ts:108:        declaredEndpoints: [],
+sdk-plugin\test\base-plugin.test.ts:135:    declaredEndpoints: [],
+.\create-plugin\index.js:220:    declaredEndpoints: ['https://your-app.example.com/api/*'],
+.\create-plugin\index.js:322:          // Replace the URL with one of your manifest's declaredEndpoints.
+.\create-plugin\index.js:360:    declaredEndpoints: ['https://your-app.example.com/api/*'],
+.\create-plugin\index.js:467:- [ ] Replace \`declaredEndpoints\` placeholders with your real backend URLs.
+server\app\services\plugins.py:86:            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+server\app\services\plugins.py:88:                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+sdk-plugin\src\network.ts:26:    assertEndpointDeclared(url);
+sdk-plugin\src\network.ts:35:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+sdk-plugin\src\network.ts:41:export function assertEndpointDeclared(url: string): void {
+sdk-plugin\src\network.ts:43:  if (!manifest || !isEndpointDeclared(url, manifest.declaredEndpoints)) {
+sdk-plugin\src\network.ts:48:function endpointPatternToRegExp(pattern: string): RegExp {
+.\examples\trading-bot\plugin\src\plugin.ts:34:  // declaredEndpoints below -- the URL must match one of those globs.
+.\examples\trading-bot\plugin\src\plugin.ts:52:    declaredEndpoints: [
+.\examples\trading-bot\plugin\src\plugin.ts:79:        // still enforces declaredEndpoints -- this just chooses among them.
+sdk-plugin\README.md:44:    declaredEndpoints: [],
+sdk-plugin\README.md:75:- `network.fetch` checks `manifest.declaredEndpoints` before calling `platform.network.fetch`.
+sdk-plugin\src\manifest.ts:13: * `declaredEndpoints` globs (validated server-side at publish time).
+sdk-plugin\src\manifest.ts:49:  declaredEndpoints: string[];
+sdk-plugin\src\manifest.ts:245:    validateTemplateBlock(value.template, value.declaredEndpoints, issues);
+sdk-plugin\src\manifest.ts:258:  if (!Array.isArray(value.declaredEndpoints)) {
+sdk-plugin\src\manifest.ts:259:    issues.push('declaredEndpoints must be an array');
+sdk-plugin\src\manifest.ts:261:    for (const endpoint of value.declaredEndpoints) {
+sdk-plugin\src\manifest.ts:263:        issues.push('declaredEndpoints entries must be non-empty strings');
+sdk-plugin\src\manifest.ts:328:  declaredEndpointsRaw: unknown,
+sdk-plugin\src\manifest.ts:374:  const declaredEndpoints = Array.isArray(declaredEndpointsRaw)
+sdk-plugin\src\manifest.ts:375:    ? declaredEndpointsRaw.filter((p): p is string => typeof p === 'string')
+sdk-plugin\src\manifest.ts:406:        // Match against declaredEndpoints globs (same matcher as
+sdk-plugin\src\manifest.ts:407:        // `assertEndpointDeclared` so behavior agrees).
+sdk-plugin\src\manifest.ts:408:        if (declaredEndpoints.length > 0 && !endpointMatchesAnyGlob(endpoint, declaredEndpoints)) {
+sdk-plugin\src\manifest.ts:410:            `template.actions[${index}].endpoint "${endpoint}" not covered by declaredEndpoints`,
+sdk-plugin\src\manifest.ts:452:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+sdk-plugin\src\manifest.ts:455:function endpointPatternToRegExp(pattern: string): RegExp {
+sdk-plugin\src\manifest.ts:456:  // Mirror of network.ts:endpointPatternToRegExp. Duplicated here to
+sdk-plugin\src\manifest.ts:457:  // avoid pulling network's `assertEndpointDeclared` (which reads the
+.\examples\trading-bot\plugin\manifest.json:9:  "declaredEndpoints": ["http://*.*.*.*:8001/api/*", "http://localhost:8001/api/*", "https://*.example.com/api/*"],
+sdk-plugin\src\index.ts:34:export { EndpointNotDeclaredError, assertEndpointDeclared, isEndpointDeclared, network } from './network';
+.\examples\trading-bot\bot.py:157:    # declaredEndpoints — `ACK_URL` must match one of the manifest's
+.\docs\integration-guide.md:125:    declaredEndpoints: ['https://your-app.example.com/api/*'],
+.\docs\integration-guide.md:177:- `platform.network.fetch(url, init)` — works, gated by `declaredEndpoints` glob match. Contract documented in §3.1 below.
+.\docs\integration-guide.md:180:### 3.1 `declaredEndpoints` glob syntax
+.\docs\integration-guide.md:182:`declaredEndpoints` controls which URLs your plugin may pass to `platform.network.fetch`. The host (both Android `EndpointMatcher.kt` and the TS SDK's `network.ts`) implements the same glob grammar:
+.\docs\integration-guide.md:200:  - `endpoint_not_declared` — URL doesn't match any `declaredEndpoints` glob (see §3.1).
+.\docs\integration-guide.md:567:- **Single-segment wildcard surprise in `declaredEndpoints`.** `https://example.com/api/*` matches `https://example.com/api/v1` but NOT `https://example.com/api/v1/users`. `*` is one segment, never multiple. Card shows *"endpoint not declared"*. See §3.1 for the full glob grammar.
+sdk-plugin\examples\minimal\src\plugin.ts:24:    declaredEndpoints: [],
+sdk-plugin\examples\minimal\manifest.json:9:  "declaredEndpoints": [],
+.\server\tests\test_phase5d_validators.py:113:        # declaredEndpoints match would succeed; we test the
+.\sdk-plugin\examples\minimal\manifest.json:9:  "declaredEndpoints": [],
+.\sdk-plugin\test\network.test.ts:18:    declaredEndpoints: ['https://api.example.com/v1/item', 'https://api.example.com/v1/*', 'https://*.example.net/feed'],
+.\sdk-plugin\test\manifest.test.ts:18:  declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:179:        declaredEndpoints: ['http://api.example.com/*', 'https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:196:        declaredEndpoints: ['http://192.168.1.10:8001/api/*'],
+.\sdk-plugin\test\manifest.test.ts:210:        declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:224:        declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:241:    it('rejects template action endpoint not covered by declaredEndpoints', () => {
+.\sdk-plugin\test\manifest.test.ts:244:        declaredEndpoints: ['https://api.example.com/*'],
+.\sdk-plugin\test\manifest.test.ts:254:        expect(result.issues.some((i) => i.includes('not covered by declaredEndpoints'))).toBe(true);
+.\sdk-plugin\examples\minimal\src\plugin.ts:24:    declaredEndpoints: [],
+.\sdk-plugin\test\base-plugin.test.ts:108:        declaredEndpoints: [],
+.\sdk-plugin\test\base-plugin.test.ts:135:    declaredEndpoints: [],
+.\server\app\schemas.py:520:    """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
+.\sdk-plugin\src\network.ts:26:    assertEndpointDeclared(url);
+.\sdk-plugin\src\network.ts:35:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+.\sdk-plugin\src\network.ts:41:export function assertEndpointDeclared(url: string): void {
+.\sdk-plugin\src\network.ts:43:  if (!manifest || !isEndpointDeclared(url, manifest.declaredEndpoints)) {
+.\sdk-plugin\src\network.ts:48:function endpointPatternToRegExp(pattern: string): RegExp {
+.\sdk-plugin\src\manifest.ts:13: * `declaredEndpoints` globs (validated server-side at publish time).
+.\sdk-plugin\src\manifest.ts:49:  declaredEndpoints: string[];
+.\sdk-plugin\src\manifest.ts:245:    validateTemplateBlock(value.template, value.declaredEndpoints, issues);
+.\sdk-plugin\src\manifest.ts:258:  if (!Array.isArray(value.declaredEndpoints)) {
+.\sdk-plugin\src\manifest.ts:259:    issues.push('declaredEndpoints must be an array');
+.\sdk-plugin\src\manifest.ts:261:    for (const endpoint of value.declaredEndpoints) {
+.\sdk-plugin\src\manifest.ts:263:        issues.push('declaredEndpoints entries must be non-empty strings');
+.\sdk-plugin\src\manifest.ts:328:  declaredEndpointsRaw: unknown,
+.\sdk-plugin\src\manifest.ts:374:  const declaredEndpoints = Array.isArray(declaredEndpointsRaw)
+.\sdk-plugin\src\manifest.ts:375:    ? declaredEndpointsRaw.filter((p): p is string => typeof p === 'string')
+.\sdk-plugin\src\manifest.ts:406:        // Match against declaredEndpoints globs (same matcher as
+.\sdk-plugin\src\manifest.ts:407:        // `assertEndpointDeclared` so behavior agrees).
+.\sdk-plugin\src\manifest.ts:408:        if (declaredEndpoints.length > 0 && !endpointMatchesAnyGlob(endpoint, declaredEndpoints)) {
+.\sdk-plugin\src\manifest.ts:410:            `template.actions[${index}].endpoint "${endpoint}" not covered by declaredEndpoints`,
+.\sdk-plugin\src\manifest.ts:452:  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+.\sdk-plugin\src\manifest.ts:455:function endpointPatternToRegExp(pattern: string): RegExp {
+.\sdk-plugin\src\manifest.ts:456:  // Mirror of network.ts:endpointPatternToRegExp. Duplicated here to
+.\sdk-plugin\src\manifest.ts:457:  // avoid pulling network's `assertEndpointDeclared` (which reads the
+.\sdk-plugin\src\index.ts:34:export { EndpointNotDeclaredError, assertEndpointDeclared, isEndpointDeclared, network } from './network';
+.\sdk-plugin\README.md:44:    declaredEndpoints: [],
+.\sdk-plugin\README.md:75:- `network.fetch` checks `manifest.declaredEndpoints` before calling `platform.network.fetch`.
+.\server\app\services\plugins.py:86:            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+.\server\app\services\plugins.py:88:                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\PluginLoaderTest.kt:104:            "declaredEndpoints" to listOf("https://api.example.com/v1/*"),
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:7:class EndpointMatcherTest {
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:10:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf("https://api.example.com/v1/item")))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:17:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:18:        assertFalse(EndpointMatcher.matches("https://api.example.com/v1/item/child", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:25:        assertTrue(EndpointMatcher.matches("https://news.example.net/feed", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:26:        assertFalse(EndpointMatcher.matches("https://a.b.example.net/feed", listOf(pattern)))
+android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:31:        assertFalse(EndpointMatcher.matches("https://evil.example.com/v1/item", listOf("https://api.example.com/v1/*")))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:31:        declaredEndpoints = emptyList(),
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:81:            bundleJs = null, declaredEndpoints = emptyList(),
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\PluginLoaderTest.kt:104:            "declaredEndpoints" to listOf("https://api.example.com/v1/*"),
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:7:class EndpointMatcherTest {
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:10:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf("https://api.example.com/v1/item")))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:17:        assertTrue(EndpointMatcher.matches("https://api.example.com/v1/item", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:18:        assertFalse(EndpointMatcher.matches("https://api.example.com/v1/item/child", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:25:        assertTrue(EndpointMatcher.matches("https://news.example.net/feed", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:26:        assertFalse(EndpointMatcher.matches("https://a.b.example.net/feed", listOf(pattern)))
+.\android\feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\EndpointMatcherTest.kt:31:        assertFalse(EndpointMatcher.matches("https://evil.example.com/v1/item", listOf("https://api.example.com/v1/*")))
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\EndpointMatcher.kt:3:object EndpointMatcher {
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:31:        declaredEndpoints = emptyList(),
+.\android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\InboxSearchTest.kt:81:            bundleJs = null, declaredEndpoints = emptyList(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:60:    @Suppress("UNUSED_PARAMETER") declaredEndpoints: List<String>,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:192: * action endpoints are sender-controlled (the plugin's `declaredEndpoints`
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginManifest.kt:13:    val declaredEndpoints: List<String> = emptyList(),
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\EndpointMatcher.kt:3:object EndpointMatcher {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:952:                    declaredEndpoints = item.declaredEndpoints,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:959:                    declaredEndpoints = item.declaredEndpoints,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1005:    declaredEndpoints: List<String>,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1022:                val bridge = CardBridge(webView = this, declaredEndpoints = declaredEndpoints)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:117:                    declaredEndpoints = plugin?.endpoints.orEmpty(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:211:            declaredEndpoints = plugin?.endpoints.orEmpty(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:274:            // endpoint גˆˆ declaredEndpoints) at publish time, so the client
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:396:                    declaredEndpoints = emptyList(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:447:                    declaredEndpoints = emptyList(),
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:504:    val declaredEndpoints: List<String>,
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginManifest.kt:13:    val declaredEndpoints: List<String> = emptyList(),
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:5:import app.syncler.android.pluginhost.EndpointMatcher
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:44:        if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:34:    private val declaredEndpoints: List<String>,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:84:        if (!matchesAny(url, declaredEndpoints)) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:115:    // Same logic as :feature:plugin-host's EndpointMatcher; inlined here so
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:5:import app.syncler.android.pluginhost.EndpointMatcher
+.\android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\NetworkBridge.kt:44:        if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:60:    @Suppress("UNUSED_PARAMETER") declaredEndpoints: List<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\TemplateCard.kt:192: * action endpoints are sender-controlled (the plugin's `declaredEndpoints`
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:952:                    declaredEndpoints = item.declaredEndpoints,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:959:                    declaredEndpoints = item.declaredEndpoints,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1005:    declaredEndpoints: List<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxScreen.kt:1022:                val bridge = CardBridge(webView = this, declaredEndpoints = declaredEndpoints)
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:34:    private val declaredEndpoints: List<String>,
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:84:        if (!matchesAny(url, declaredEndpoints)) {
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:115:    // Same logic as :feature:plugin-host's EndpointMatcher; inlined here so
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:117:                    declaredEndpoints = plugin?.endpoints.orEmpty(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:211:            declaredEndpoints = plugin?.endpoints.orEmpty(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:274:            // endpoint גˆˆ declaredEndpoints) at publish time, so the client
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:396:                    declaredEndpoints = emptyList(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:447:                    declaredEndpoints = emptyList(),
+.\android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:504:    val declaredEndpoints: List<String>,
+rg: app: The system cannot find the file specified. (os error 2)
+rg: plugin-host: The system cannot find the file specified. (os error 2)
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ succeeded in 340ms:
+      { ...validManifest, declaredCapabilities: ['telepathy'] },
+      { allowUnsignedPlaceholders: true },
+    );
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.issues).toContain('unknown capability: telepathy');
+    }
+  });
+
+  // Phase 5d: validator polish batch.
+  describe('Phase 5d polish', () => {
+    it('rejects minPlatformVersion components longer than 6 digits', () => {
+      const result = validatePluginManifest({ ...validManifest, minPlatformVersion: '1.0.1234567' });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.issues).toContain('minPlatformVersion must be semver');
+    });
+
+    it('accepts minPlatformVersion at the 6-digit cap', () => {
+      const result = validatePluginManifest({ ...validManifest, minPlatformVersion: '999999.999999.999999' });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects cardKeyPath with array indexing (must be $.field(.subfield)*)', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        cardType: 'live',
+        cardKeyPath: '$.items[0].id',
+      });
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.issues.some((i) => i.includes('$.field(.subfield)'))).toBe(true);
+      }
+    });
+
+    it('accepts cardKeyPath with nested dotted access', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        cardType: 'live',
+        cardKeyPath: '$.order.id',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects template.fields key not in the layout allowed set', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: {
+            title: { path: '$.title' },
+            // `headline` is not in standard_card's allowed set
+            // ({title, subtitle, body}) ג€” server would 422; SDK
+            // catches locally.
+            headline: { path: '$.headline' },
+          },
+        },
+      });
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.issues.some((i) => i.includes('template.fields.headline'))).toBe(true);
+      }
+    });
+
+    it('accepts a fully valid standard_card template block', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: {
+            title: { path: '$.title' },
+            subtitle: { path: '$.subtitle' },
+            body: { path: '$.body' },
+          },
+        },
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects template action with cleartext public-host endpoint', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        declaredEndpoints: ['http://api.example.com/*', 'https://api.example.com/*'],
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: { title: { path: '$.title' } },
+          actions: [{ id: 'ack', label: 'Ack', endpoint: 'http://api.example.com/ack' }],
+        },
+      });
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.issues.some((i) => i.includes('must be HTTPS'))).toBe(true);
+      }
+    });
+
+    it('accepts template action with LAN HTTP endpoint', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        declaredEndpoints: ['http://192.168.1.10:8001/api/*'],
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: { title: { path: '$.title' } },
+          actions: [{ id: 'ack', label: 'Ack', endpoint: 'http://192.168.1.10:8001/api/ack' }],
+        },
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts template action with HTTPS endpoint', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        declaredEndpoints: ['https://api.example.com/*'],
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: { title: { path: '$.title' } },
+          actions: [{ id: 'ack', label: 'Ack', endpoint: 'https://api.example.com/ack' }],
+        },
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects duplicate template action ids', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        declaredEndpoints: ['https://api.example.com/*'],
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: { title: { path: '$.title' } },
+          actions: [
+            { id: 'ack', label: 'Ack', endpoint: 'https://api.example.com/ack' },
+            { id: 'ack', label: 'Ack 2', endpoint: 'https://api.example.com/ack2' },
+          ],
+        },
+      });
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.issues.some((i) => i.includes('duplicated'))).toBe(true);
+      }
+    });
+
+    it('rejects template action endpoint not covered by declaredEndpoints', () => {
+      const result = validatePluginManifest({
+        ...validManifest,
+        declaredEndpoints: ['https://api.example.com/*'],
+        renderer: 'template',
+        template: {
+          layout: 'standard_card',
+          fields: { title: { path: '$.title' } },
+          actions: [{ id: 'ack', label: 'Ack', endpoint: 'https://other.example.com/ack' }],
+        },
+      });
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.issues.some((i) => i.includes('not covered by declaredEndpoints'))).toBe(true);
+      }
+    });
+  });
+});
+
+ succeeded in 341ms:
+"""Phase 5d ג€” validator polish batch. Pure schema-level unit tests
+(no DB / no app client) for the 5 new validation rules. Mirror of
+sdk-plugin/test/manifest.test.ts.
+"""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+
+from app.schemas import (
+    PluginPublishRequest,
+    _is_allowed_action_endpoint_scheme,
+    _PLUGIN_IDENTIFIER_REGEX,
+)
+
+
+_VALID_B64_32 = "A" * 43 + "="          # 32-byte base64 (32 / 3 * 4 with pad)
+_VALID_B64_64 = "B" * 86 + "=="         # 64-byte base64
+
+_BASE_PUBLISH_BODY: dict = {
+    "sender_id": "00000000-1111-2222-3333-444444444444",
+    "plugin_identifier": "com.example.weather",
+    "version": "1.0.0",
+    "manifest_hash": _VALID_B64_32,
+    "bundle_hash": _VALID_B64_32,
+    "signature": _VALID_B64_64,
+    "signed_bundle_url": "https://example.com/bundle.js",
+    "capabilities": ["network"],
+    "endpoints": ["https://api.example.com/*"],
+    "sender_signature": _VALID_B64_64,
+}
+
+
+# ---------------------------- Plugin identifier regex ----------------------------
+
+
+def test_plugin_identifier_regex_accepts_reverse_dns() -> None:
+    assert _PLUGIN_IDENTIFIER_REGEX.match("com.example.weather")
+    assert _PLUGIN_IDENTIFIER_REGEX.match("com.example.deep.sub")
+    assert _PLUGIN_IDENTIFIER_REGEX.match("org.trad-bot.app")
+
+
+def test_plugin_identifier_regex_rejects_non_reverse_dns() -> None:
+    assert not _PLUGIN_IDENTIFIER_REGEX.match("not-a-reverse-dns")
+    assert not _PLUGIN_IDENTIFIER_REGEX.match("123.example.app")  # starts with digit
+    assert not _PLUGIN_IDENTIFIER_REGEX.match("com")  # no dot
+    assert not _PLUGIN_IDENTIFIER_REGEX.match("")
+    assert not _PLUGIN_IDENTIFIER_REGEX.match(".com.example")
+
+
+def test_publish_request_rejects_non_reverse_dns_identifier() -> None:
+    bad = {**_BASE_PUBLISH_BODY, "plugin_identifier": "not-a-reverse-dns"}
+    with pytest.raises(ValidationError) as exc:
+        PluginPublishRequest.model_validate(bad)
+    assert "reverse-DNS" in str(exc.value)
+
+
+# ---------------------------- cardKeyPath grammar ----------------------------
+
+
+def test_publish_request_rejects_card_key_path_with_array_indexing() -> None:
+    bad = {
+        **_BASE_PUBLISH_BODY,
+        "card_type": "live",
+        "card_key_path": "$.items[0].id",
+    }
+    with pytest.raises(ValidationError) as exc:
+        PluginPublishRequest.model_validate(bad)
+    assert "$.field(.subfield)" in str(exc.value)
+
+
+def test_publish_request_accepts_nested_card_key_path() -> None:
+    good = {
+        **_BASE_PUBLISH_BODY,
+        "card_type": "live",
+        "card_key_path": "$.order.id",
+    }
+    parsed = PluginPublishRequest.model_validate(good)
+    assert parsed.card_key_path == "$.order.id"
+
+
+# ---------------------------- Action endpoint scheme ----------------------------
+
+
+def test_action_endpoint_scheme_helper() -> None:
+    assert _is_allowed_action_endpoint_scheme("https://api.example.com/x")
+    assert _is_allowed_action_endpoint_scheme("http://localhost:8001/x")
+    assert _is_allowed_action_endpoint_scheme("http://10.0.2.2:8001/x")
+    assert _is_allowed_action_endpoint_scheme("http://192.168.1.5/x")
+    assert _is_allowed_action_endpoint_scheme("http://172.20.0.5/x")
+    assert _is_allowed_action_endpoint_scheme("http://127.0.0.1/x")
+    # Cleartext to public hosts:
+    assert not _is_allowed_action_endpoint_scheme("http://api.example.com/x")
+    # 172.32 is OUTSIDE the 172.16-31 private range:
+    assert not _is_allowed_action_endpoint_scheme("http://172.32.0.5/x")
+    # Localhost-lookalike doesn't count:
+    assert not _is_allowed_action_endpoint_scheme("http://localhost.evil.com/x")
+    # user:pass@ form rejected:
+    assert not _is_allowed_action_endpoint_scheme(
+        "http://user:pass@10.0.0.1/x"
+    )
+    # Non-http schemes:
+    assert not _is_allowed_action_endpoint_scheme("ftp://api.example.com/x")
+    assert not _is_allowed_action_endpoint_scheme("file:///etc/passwd")
+
+
+def test_publish_request_rejects_cleartext_action_endpoint_to_public_host() -> None:
+    bad = {
+        **_BASE_PUBLISH_BODY,
+        "renderer": "template",
+        # The endpoint glob is also cleartext, so the
+        # declaredEndpoints match would succeed; we test the
+        # scheme rule specifically.
+        "endpoints": ["http://api.example.com/*"],
+        "template": {
+            "layout": "standard_card",
+            "fields": {"title": {"path": "$.title"}},
+            "actions": [{"id": "ack", "label": "Ack", "endpoint": "http://api.example.com/ack"}],
+        },
+    }
+    with pytest.raises(ValidationError) as exc:
+        PluginPublishRequest.model_validate(bad)
+    assert "HTTPS" in str(exc.value)
+
+
+def test_publish_request_accepts_lan_http_action_endpoint() -> None:
+    good = {
+        **_BASE_PUBLISH_BODY,
+        "renderer": "template",
+        "endpoints": ["http://192.168.1.10:8001/*"],
+        "template": {
+            "layout": "standard_card",
+            "fields": {"title": {"path": "$.title"}},
+            "actions": [
+                {"id": "ack", "label": "Ack", "endpoint": "http://192.168.1.10:8001/ack"},
+            ],
+        },
+    }
+    PluginPublishRequest.model_validate(good)
+
+
+# ---------------------------- standard_card field key set ----------------------------
+
+
+def test_publish_request_rejects_unknown_template_field_key() -> None:
+    bad = {
+        **_BASE_PUBLISH_BODY,
+        "renderer": "template",
+        "template": {
+            "layout": "standard_card",
+            "fields": {
+                "title": {"path": "$.title"},
+                "headline": {"path": "$.headline"},  # not in allowed set
+            },
+        },
+    }
+    with pytest.raises(ValidationError) as exc:
+        PluginPublishRequest.model_validate(bad)
+    assert "does not accept fields" in str(exc.value)
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/EndpointMatcher.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path .triad/70-phase5-agreement.md | Select-Object -Skip 405 -First 40' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/src/network.ts | Select-Object -First 90' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/CardBridge.kt | Select-Object -Skip 70 -First 80' in D:\Projects\syncler
+ succeeded in 302ms:
+package app.syncler.android.pluginhost
+
+object EndpointMatcher {
+    fun matches(url: String, patterns: List<String>): Boolean =
+        patterns.any { pattern -> endpointPatternToRegex(pattern).matches(url) }
+
+    private fun endpointPatternToRegex(pattern: String): Regex {
+        val pathStart = findPathStart(pattern)
+        val source = buildString {
+            pattern.forEachIndexed { index, character ->
+                if (character == '*') {
+                    append(if (index < pathStart) "[^./]*" else "[^/]*")
+                } else {
+                    append(Regex.escape(character.toString()))
+                }
+            }
+        }
+        return Regex("^$source$")
+    }
+
+    private fun findPathStart(pattern: String): Int {
+        val schemeEnd = pattern.indexOf("://")
+        val searchFrom = if (schemeEnd == -1) 0 else schemeEnd + 3
+        val slash = pattern.indexOf('/', searchFrom)
+        return if (slash == -1) pattern.length else slash
+    }
+}
+
+ succeeded in 344ms:
+  src/plugin.ts              # BasePlugin subclass, defaults
+  manifest.json              # UNSIGNED placeholders, fields filled
+  build.sh
+  package.json               # build / build:sign / publish scripts
+  README.md                  # step-by-step instructions
+  .gitignore                 # dist/, manifest.signed.json, *.pem
+```
+
+Plain template literals inside the Node script. No handlebars.
+Tiny sender stub or pointer to `examples/trading-bot/`.
+
+## Phase 5d ג€” Validator polish backlog (first batch)
+
+Define what lands now vs later. **First batch** (this commit):
+
+1. `minPlatformVersion` numeric component caps (6 digits each)
+   ג€” match the existing `version` regex.
+2. Action endpoint URL validation: HTTPS in release; http only
+   for LAN private ranges in debug.
+3. `template.fields` keys that aren't in the layout's allowed
+   set: SDK rejects, instead of forwarding to the server's 422.
+4. `cardKeyPath` full `$.field(.subfield)*` grammar
+   (currently `startsWith("$")`).
+5. Plugin `id` regex parity check: confirm the SDK regex matches
+   the server's character class exactly.
+
+**Deferred** (not in 5d, file in V1.5 DX #9 backlog):
+- `card_key` ג†” `card_key_path` payload-side mismatch ג€” not pure
+  manifest validation; needs payload sample or test convention.
+- `template.actions.endpoint` glob-shape validation beyond
+  HTTPS ג€” overlaps with #2; revisit if needed.
+
+## Phase 5e ג€” Docs + roadmap update
+
+Move V1.5 DX items 6ג€“9 from "planned" to "shipped" in
+`docs/ROADMAP.md`. Add automated pairing protocol spec to
+`docs/crypto-spec.md` (already drafted in 5a-1).
+`docs/integration-guide.md` gains:
+- ֲ§1 mention of automated pairing
+- ֲ§8 (testing) updated walk-through
+
+ succeeded in 343ms:
+import { getRegisteredManifest } from './manifest';
+import { callPlatform } from './platform';
+
+/**
+ * Error raised when a URL does not match the plugin manifest endpoint allowlist.
+ */
+export class EndpointNotDeclaredError extends Error {
+  /** URL rejected before reaching the native bridge. */
+  readonly url: string;
+
+  constructor(url: string) {
+    super(`Endpoint is not declared by plugin manifest: ${url}`);
+    this.name = 'EndpointNotDeclaredError';
+    this.url = url;
+  }
+}
+
+/**
+ * Typed wrapper for `platform.network`.
+ */
+export const network = {
+  /**
+   * Fetches a URL through the host bridge after checking the manifest endpoint allowlist.
+   */
+  async fetch(url: string, init?: RequestInit): Promise<Response> {
+    assertEndpointDeclared(url);
+    return await callPlatform('network.fetch', (bridge) => bridge.network.fetch(url, init));
+  },
+};
+
+/**
+ * Returns true when a URL matches at least one declared endpoint pattern.
+ */
+export function isEndpointDeclared(url: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
+}
+
+/**
+ * Throws `EndpointNotDeclaredError` when the active plugin manifest does not declare a URL.
+ */
+export function assertEndpointDeclared(url: string): void {
+  const manifest = getRegisteredManifest();
+  if (!manifest || !isEndpointDeclared(url, manifest.declaredEndpoints)) {
+    throw new EndpointNotDeclaredError(url);
+  }
+}
+
+function endpointPatternToRegExp(pattern: string): RegExp {
+  const pathStart = findPathStart(pattern);
+  let source = '';
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === '*') {
+      source += index < pathStart ? '[^./]*' : '[^/]*';
+    } else {
+      source += escapeRegExp(character);
+    }
+  }
+
+  return new RegExp(`^${source}$`);
+}
+
+function findPathStart(pattern: string): number {
+  const schemeEnd = pattern.indexOf('://');
+  const searchFrom = schemeEnd === -1 ? 0 : schemeEnd + 3;
+  const slash = pattern.indexOf('/', searchFrom);
+  return slash === -1 ? pattern.length : slash;
+}
+
+function escapeRegExp(character: string | undefined): string {
+  if (!character) return '';
+  return /[.+?^${}()|[\]\\]/.test(character) ? `\\${character}` : character;
+}
+
+ succeeded in 342ms:
+    private suspend fun dispatch(method: String, argsJson: String): String = when (method) {
+        "platform.network.fetch" -> doFetch(argsJson)
+        else -> throw UnsupportedOperationException("$method is not wired in inbox mode")
+    }
+
+    private suspend fun doFetch(argsJson: String): String = withContext(Dispatchers.IO) {
+        val args = JSONObject(argsJson)
+        val url = args.optString("url").ifBlank { throw IllegalArgumentException("missing url") }
+        // Scheme check (defense in depth ג€” the OkHttp client already refuses
+        // cleartext in release via its connectionSpecs, but failing explicitly
+        // here gives a clearer error and survives future client wiring drift).
+        val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
+        if (!schemeOk) throw SecurityException("fetch URL must be HTTPS: $url")
+        if (!matchesAny(url, declaredEndpoints)) {
+            throw SecurityException("endpoint not declared: $url")
+        }
+        val init = args.optJSONObject("init")
+        val method = init?.optString("method")?.uppercase()?.takeIf { it.isNotBlank() } ?: "GET"
+        val bodyText = init?.optString("body")?.takeIf { it.isNotBlank() && method !in setOf("GET", "HEAD") }
+        val mediaType = init?.optString("contentType")?.takeIf { it.isNotBlank() }?.toMediaTypeOrNull()
+        val request = Request.Builder().url(url).method(method, bodyText?.toRequestBody(mediaType)).apply {
+            init?.optJSONObject("headers")?.let { headers ->
+                headers.keys().forEach { key -> header(key, headers.optString(key)) }
+            }
+        }.build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            val headersJson = JSONObject().also { h ->
+                response.headers.names().forEach { name ->
+                    h.put(name, response.headers(name).joinToString(","))
+                }
+            }
+            JSONObject()
+                .put("status", response.code)
+                .put("headers", headersJson)
+                .put("body", responseBody)
+                .toString()
+        }
+    }
+
+    private fun matchesAny(url: String, patterns: List<String>): Boolean =
+        patterns.any { pattern -> endpointPatternToRegex(pattern).matches(url) }
+
+    // Same logic as :feature:plugin-host's EndpointMatcher; inlined here so
+    // :feature:inbox doesn't need to depend on the whole plugin-host module
+    // graph just for this glob match.
+    private fun endpointPatternToRegex(pattern: String): Regex {
+        val pathStart = findPathStart(pattern)
+        val source = buildString {
+            pattern.forEachIndexed { index, character ->
+                if (character == '*') {
+                    append(if (index < pathStart) "[^./]*" else "[^/]*")
+                } else {
+                    append(Regex.escape(character.toString()))
+                }
+            }
+        }
+        return Regex("^$source$")
+    }
+
+    private fun findPathStart(pattern: String): Int {
+        val schemeEnd = pattern.indexOf("://")
+        val searchFrom = if (schemeEnd == -1) 0 else schemeEnd + 3
+        val slash = pattern.indexOf('/', searchFrom)
+        return if (slash == -1) pattern.length else slash
+    }
+
+    companion object {
+        const val NATIVE_BRIDGE_NAME = "__syncler_native__"
+    }
+}
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/schemas.py | ForEach-Object { if ($i -ge 604 -and $i -le 680) { '"'{0}:{1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/services/plugins.py | ForEach-Object { if ($i -ge 70 -and $i -le 90) { '"'{0}:{1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-plugin/src/manifest.ts | ForEach-Object { if ($i -ge 418 -and $i -le 447) { '"'{0}:{1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/schemas.py | ForEach-Object { if ($i -ge 480 -and $i -le 516) { '"'{0}:{1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+ succeeded in 300ms:
+418:function isAllowedActionEndpointScheme(url: string): boolean {
+419:  // HTTPS always allowed. HTTP allowed only when the host is localhost or
+420:  // a literal IPv4 in a LAN private range. Cleartext to public hosts
+421:  // would be rejected by Android release builds at the network bridge,
+422:  // so we reject at publish time too.
+423:  if (url.startsWith('https://')) return true;
+424:  if (!url.startsWith('http://')) return false;
+425:  const rest = url.slice('http://'.length);
+426:  // Strip user-info if present (rejected separately elsewhere; treat as
+427:  // not-localhost here regardless).
+428:  if (rest.includes('@')) return false;
+429:  // Pull host (up to first ':' or '/').
+430:  const hostEnd = (() => {
+431:    const colon = rest.indexOf(':');
+432:    const slash = rest.indexOf('/');
+433:    if (colon === -1 && slash === -1) return rest.length;
+434:    if (colon === -1) return slash;
+435:    if (slash === -1) return colon;
+436:    return Math.min(colon, slash);
+437:  })();
+438:  const host = rest.slice(0, hostEnd).toLowerCase();
+439:  if (host === 'localhost') return true;
+440:  // IPv4 in LAN private ranges.
+441:  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+442:  if (!ipv4) return false;
+443:  const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+444:  if (a === 10) return true;
+445:  if (a === 172 && b >= 16 && b <= 31) return true;
+446:  if (a === 192 && b === 168) return true;
+447:  if (a === 127) return true; // 127.0.0.0/8
+
+ succeeded in 305ms:
+480:def _is_allowed_action_endpoint_scheme(url: str) -> bool:
+481:    """Phase 5d. HTTPS is always allowed. HTTP is only allowed when the
+482:    host is `localhost` or an IPv4 literal in a LAN private range
+483:    (10.x, 172.16-31, 192.168.x, 127.x). Mirror of the SDK's
+484:    `isAllowedActionEndpointScheme`.
+485:    """
+486:    if url.startswith("https://"):
+487:        return True
+488:    if not url.startswith("http://"):
+489:        return False
+490:    rest = url[len("http://"):]
+491:    if "@" in rest:
+492:        return False  # `user:pass@host` form ג€” rejected for parity with SDK.
+493:    # Strip path/query ג€” we only care about host:port.
+494:    for sep in ("/", "?", "#"):
+495:        idx = rest.find(sep)
+496:        if idx != -1:
+497:            rest = rest[:idx]
+498:    match = _HOST_PORT_PATTERN.match(rest)
+499:    if not match:
+500:        return False
+501:    host = match.group("host").lower()
+502:    if host == "localhost":
+503:        return True
+504:    ipv4 = re.fullmatch(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})", host)
+505:    if not ipv4:
+506:        return False
+507:    a, b = int(ipv4.group(1)), int(ipv4.group(2))
+508:    if a == 10:
+509:        return True
+510:    if a == 172 and 16 <= b <= 31:
+511:        return True
+512:    if a == 192 and b == 168:
+513:        return True
+514:    if a == 127:
+515:        return True
+516:    return False
+
+ succeeded in 310ms:
+604:_PLUGIN_IDENTIFIER_REGEX = re.compile(
+605:    r"^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*)+$"
+606:)
+607:"""Mirror of the SDK's idPattern (sdk-plugin/src/manifest.ts). Reverse-DNS
+608:identifier, ASCII only, must contain at least one dot. Phase 5d parity
+609:fix ג€” previously the server only enforced a length cap, letting the SDK
+610:catch malformed identifiers but accepting them server-side."""
+611:
+612:
+613:class PluginPublishRequest(BaseModel):
+614:    sender_id: UUID
+615:    plugin_identifier: Annotated[str, Field(min_length=1, max_length=200)]
+616:    version: Annotated[str, Field(min_length=1, max_length=64)]
+617:    manifest_hash: str  # base64 32 bytes
+618:    bundle_hash: str    # base64 32 bytes
+619:    signature: str      # base64 64 bytes Ed25519 (bundle signature)
+620:    signed_bundle_url: str
+621:    capabilities: list[str]
+622:    endpoints: list[str]
+623:    # Phase 3a. Defaults to "script" for backwards compat with senders
+624:    # published before the template renderer existed ג€” their canonical
+625:    # publish envelope does not include this field, so the conditional
+626:    # serialization in `_publish_envelope` keeps their signature valid.
+627:    renderer: Literal["script", "template"] = "script"
+628:    template: TemplateObject | None = None
+629:    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+630:    # for live cards.
+631:    card_type: Literal["event", "live"] = "event"
+632:    card_key_path: str | None = None
+633:    sender_signature: str  # base64 Ed25519 over canonical publish body
+634:
+635:    @field_validator("manifest_hash")
+636:    @classmethod
+637:    def validate_manifest_hash(cls, value: str) -> str:
+638:        decode_base64(value, field_name="manifest_hash", exact=32)
+639:        return value
+640:
+641:    @field_validator("bundle_hash")
+642:    @classmethod
+643:    def validate_bundle_hash(cls, value: str) -> str:
+644:        decode_base64(value, field_name="bundle_hash", exact=32)
+645:        return value
+646:
+647:    @field_validator("signature")
+648:    @classmethod
+649:    def validate_signature(cls, value: str) -> str:
+650:        decode_base64(value, field_name="signature", exact=64)
+651:        return value
+652:
+653:    @field_validator("sender_signature")
+654:    @classmethod
+655:    def validate_sender_signature(cls, value: str) -> str:
+656:        decode_base64(value, field_name="sender_signature", exact=64)
+657:        return value
+658:
+659:    @field_validator("plugin_identifier")
+660:    @classmethod
+661:    def validate_plugin_identifier(cls, value: str) -> str:
+662:        # Phase 5d parity fix: mirror the SDK's reverse-DNS check.
+663:        if not _PLUGIN_IDENTIFIER_REGEX.match(value):
+664:            raise ValueError(
+665:                "plugin_identifier must be reverse-DNS "
+666:                "(e.g. com.example.weather)",
+667:            )
+668:        return value
+669:
+670:    @field_validator("card_key_path")
+671:    @classmethod
+672:    def validate_card_key_path(cls, value: str | None) -> str | None:
+673:        # Phase 5d: enforce the same $.field(.subfield)* grammar that
+674:        # template field paths already use. Previously this was just a
+675:        # startsWith("$") check (server services/plugins.py).
+676:        if value is None:
+677:            return value
+678:        if not _JSONPATH_REGEX.match(value):
+679:            raise ValueError(
+680:                f"card_key_path {value!r} must match $.field(.subfield)* "
+
+ succeeded in 325ms:
+70:            )
+71:
+72:    actions = template.get("actions", [])
+73:    if not isinstance(actions, list):
+74:        raise InvalidTemplateError("actions must be a list")
+75:
+76:    for action in actions:
+77:        if not isinstance(action, dict):
+78:            raise InvalidTemplateError("malformed action")
+79:        aid = action.get("id")
+80:        label = action.get("label")
+81:        endpoint = action.get("endpoint")
+82:        if not aid or not label or not endpoint:
+83:            raise InvalidTemplateError("actions must have id, label, and endpoint")
+84:
+85:        if endpoint not in declared_endpoints:
+86:            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+87:                raise InvalidTemplateError(
+88:                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+89:                )
+90:
+
+codex
+**Codex Review**
+
+1. `minPlatformVersion` 6-digit cap: **GREEN**  
+SDK stricter leading-zero handling is acceptable. Server accepting `01.0.0` while SDK rejects is a publish-time DX mismatch, not a security or compatibility blocker if SDK rejection is intentional.
+
+2. Action endpoint HTTPS / LAN HTTP rule: **RED**  
+Blocker: both helpers allow all `https://...` before checking userinfo, so `https://user:pass@host/...` passes the scheme helper despite the stated “reject `user:pass@host`” rule. See [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:423) and [schemas.py](D:/Projects/syncler/server/app/schemas.py:486).  
+Also, LAN IPv4 validation only checks first/second octets, so strings like `http://10.999.999.999/x` pass as “LAN private” even though they are not valid IPv4 literals. See [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:441) and [schemas.py](D:/Projects/syncler/server/app/schemas.py:504).  
+Localhost prefix flaw is not reintroduced: `localhost.evil.com` is rejected.
+
+3. `template.fields` key set: **GREEN**  
+SDK mirror matches current server layout rules for `standard_card`. Lockstep risk is documented.
+
+4. `cardKeyPath` strict grammar: **GREEN**  
+Applying the existing `$.field(.subfield)*` grammar consistently to `cardKeyPath` is right. SDK, schema, and service checks now align.
+
+5. Plugin id regex parity: **GREEN**  
+Server regex matches the SDK pattern exactly.
+
+**New Issues**
+
+The main new issue is action endpoint URL parsing. I would fix by parsing with `URL` / `urllib.parse`, rejecting any username/password for both HTTP and HTTPS, and validating all IPv4 octets are `0..255`.
+
+**Commit Readiness**
+
+**Hold.** Phase 5d is not ready to commit until item 2 is corrected and covered by tests for HTTPS userinfo plus invalid IPv4 octets.
+tokens used
+32,843
+**Codex Review**
+
+1. `minPlatformVersion` 6-digit cap: **GREEN**  
+SDK stricter leading-zero handling is acceptable. Server accepting `01.0.0` while SDK rejects is a publish-time DX mismatch, not a security or compatibility blocker if SDK rejection is intentional.
+
+2. Action endpoint HTTPS / LAN HTTP rule: **RED**  
+Blocker: both helpers allow all `https://...` before checking userinfo, so `https://user:pass@host/...` passes the scheme helper despite the stated “reject `user:pass@host`” rule. See [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:423) and [schemas.py](D:/Projects/syncler/server/app/schemas.py:486).  
+Also, LAN IPv4 validation only checks first/second octets, so strings like `http://10.999.999.999/x` pass as “LAN private” even though they are not valid IPv4 literals. See [manifest.ts](D:/Projects/syncler/sdk-plugin/src/manifest.ts:441) and [schemas.py](D:/Projects/syncler/server/app/schemas.py:504).  
+Localhost prefix flaw is not reintroduced: `localhost.evil.com` is rejected.
+
+3. `template.fields` key set: **GREEN**  
+SDK mirror matches current server layout rules for `standard_card`. Lockstep risk is documented.
+
+4. `cardKeyPath` strict grammar: **GREEN**  
+Applying the existing `$.field(.subfield)*` grammar consistently to `cardKeyPath` is right. SDK, schema, and service checks now align.
+
+5. Plugin id regex parity: **GREEN**  
+Server regex matches the SDK pattern exactly.
+
+**New Issues**
+
+The main new issue is action endpoint URL parsing. I would fix by parsing with `URL` / `urllib.parse`, rejecting any username/password for both HTTP and HTTPS, and validating all IPv4 octets are `0..255`.
+
+**Commit Readiness**
+
+**Hold.** Phase 5d is not ready to commit until item 2 is corrected and covered by tests for HTTPS userinfo plus invalid IPv4 octets.
