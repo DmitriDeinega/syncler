@@ -1,6 +1,33 @@
 import { Capability, DismissBehavior } from './enums';
 
 /**
+ * One template field — a JSONPath into the decrypted payload. V1 dialect is
+ * `$.field(.subfield)*` only (no array indexing, wildcards, or filters).
+ */
+export interface TemplateField {
+  path: string;
+}
+
+/**
+ * One template action button. `endpoint` MUST match one of the plugin's
+ * `declaredEndpoints` globs (validated server-side at publish time).
+ */
+export interface TemplateAction {
+  id: string;
+  label: string;
+  endpoint: string;
+}
+
+/**
+ * Template manifest block. Required when `renderer === 'template'`.
+ */
+export interface TemplateBlock {
+  layout: 'standard_card';
+  fields: Record<string, TemplateField>;
+  actions?: TemplateAction[];
+}
+
+/**
  * Plugin metadata consumed by the native host before loading a bundle.
  */
 export interface PluginManifest {
@@ -24,6 +51,29 @@ export interface PluginManifest {
   dismissBehavior: DismissBehavior;
   /** Minimum compatible native bridge version. */
   minPlatformVersion: string;
+  /**
+   * Render mode. `'script'` (default) loads the JS bundle in a WebView.
+   * `'template'` ships no JS and uses a native Compose card driven by
+   * [template]. Server defaults to `'script'` when omitted.
+   */
+  renderer?: 'script' | 'template';
+  /**
+   * Template manifest. Required when [renderer] is `'template'`; rejected
+   * when [renderer] is `'script'`. Validated server-side at publish time.
+   */
+  template?: TemplateBlock;
+  /**
+   * Card delivery semantics. `'event'` (default) — each send is a new
+   * immutable inbox row. `'live'` — persistent, upsertable; see
+   * `docs/integration-guide.md §5.2`. Server defaults to `'event'`.
+   */
+  cardType?: 'event' | 'live';
+  /**
+   * JSONPath into the decrypted payload that yields the stable card
+   * identity. REQUIRED when [cardType] is `'live'`; rejected otherwise.
+   * V1 validates only `startsWith("$")` server-side.
+   */
+  cardKeyPath?: string;
 }
 
 /**
@@ -82,6 +132,45 @@ export function validatePluginManifest(value: unknown): { valid: true; manifest:
   requireString(value, 'minPlatformVersion', issues, (version) => {
     if (!semverPattern.test(version)) issues.push('minPlatformVersion must be semver');
   });
+
+  // renderer + template pairing. Both are optional; server defaults
+  // renderer to 'script'. When present, renderer must be one of the
+  // two enum values, and template/script ↔ template-present pairing
+  // is enforced strictly (matches server's
+  // PluginPublishRequest.validate_renderer_template_pairing).
+  const renderer = value.renderer;
+  if (renderer !== undefined && renderer !== 'script' && renderer !== 'template') {
+    issues.push('renderer must be "script" or "template" when set');
+  }
+  const effectiveRenderer = renderer ?? 'script';
+  if (effectiveRenderer === 'template' && !value.template) {
+    issues.push('template required when renderer is "template"');
+  }
+  if (effectiveRenderer === 'script' && value.template !== undefined && value.template !== null) {
+    issues.push('template must be omitted when renderer is "script"');
+  }
+
+  // cardType + cardKeyPath pairing. Same defaulting rules — optional in
+  // the SDK, server defaults to 'event'. cardKeyPath is required iff
+  // cardType is 'live'.
+  const cardType = value.cardType;
+  if (cardType !== undefined && cardType !== 'event' && cardType !== 'live') {
+    issues.push('cardType must be "event" or "live" when set');
+  }
+  const effectiveCardType = cardType ?? 'event';
+  if (effectiveCardType === 'live' && !value.cardKeyPath) {
+    issues.push('cardKeyPath required when cardType is "live"');
+  }
+  if (effectiveCardType === 'event' && value.cardKeyPath !== undefined && value.cardKeyPath !== null) {
+    issues.push('cardKeyPath must be omitted when cardType is "event"');
+  }
+  if (
+    effectiveCardType === 'live' &&
+    typeof value.cardKeyPath === 'string' &&
+    !value.cardKeyPath.startsWith('$')
+  ) {
+    issues.push('cardKeyPath must begin with "$"');
+  }
 
   if (!Array.isArray(value.declaredCapabilities)) {
     issues.push('declaredCapabilities must be an array');

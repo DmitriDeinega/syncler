@@ -1,17 +1,24 @@
 # Syncler integration guide
 
-You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes encrypted blobs to a user's phone, and a JavaScript plugin you wrote renders them and handles taps. **Read this end-to-end before writing code; it's ~7 pages.**
+You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes end-to-end-encrypted blobs to a user's phone, and your plugin renders them. **Read this end-to-end before writing code; it's ~9 pages.**
 
-Syncler does not know what your data looks like, what your UI says, or what your buttons do. Your payload, your plugin code, your callback endpoint — Syncler just routes bytes.
+Syncler does not know what your data looks like, what your UI says, or what your buttons do. Your payload, your plugin code (or template manifest), your callback endpoint — Syncler just routes bytes.
 
 ## 1. What you're building
 
-Two artifacts:
+You pick one of two render modes when you publish:
 
-1. A **JavaScript plugin** that runs in the Syncler Android app's WebView and renders the **detail view** of a card when the user taps it. The plugin defines buttons that POST back to your backend.
-2. **Backend code** that pushes a card to the user via the Syncler server, and an HTTP endpoint that receives the action callback.
+- **Script** (`renderer: "script"`) — a JavaScript bundle running inside a sandboxed WebView. Maximum flexibility; you ship a `render(payload)` function that returns HTML. Buttons POST through `platform.network.fetch`.
+- **Template** (`renderer: "template"`) — no JavaScript. You ship a small JSON manifest that maps fields out of your payload via JSONPath (`$.title`, `$.body.summary`) into a native Material 3 card. Buttons are host-rendered and the host POSTs the decrypted payload to the action's declared endpoint. Faster, lighter, no JS attack surface; constrained to a fixed set of layouts.
 
-The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, arrival time. The host draws that row from structured metadata you embed in the payload (`hostPreview`, §2). The plugin's `render()` is reserved for the full-screen detail view that appears when the user taps a row.
+And one of two delivery modes:
+
+- **Event** (`card_type: "event"`) — the default. Each `send_to` produces a new immutable inbox row. Good for notifications, alerts, transactional events.
+- **Live** (`card_type: "live"`) — persistent, upsertable. Subsequent upserts to the same `card_key` replace the previous payload (highest `sequence_number` wins). Good for status cards that change over time (delivery progress, market position, sensor reading). Server-enforced 48h TTL; you re-upsert to extend.
+
+In every case you also need **backend code** that publishes the plugin once and sends payloads on demand, plus (for script renderer) an HTTP endpoint that receives the action callback.
+
+The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, arrival time — pulled from the `hostPreview` block you embed in your payload (§2). The detail view that opens on tap is what your script bundle's `render()` or your template manifest produces.
 
 ### What the host does for you
 
@@ -25,6 +32,9 @@ Once a card is in a user's inbox, the host handles all of the following without 
 - **Mute sync** — the user can mute your plugin globally (all devices) or locally (this device only) from the host-owned settings sheet. Muted plugins are hidden from the active inbox but remain accessible in the Senders tab for unmuting.
 - **Bottom navigation** (Inbox / Senders / Settings) — the user is always one tap away from your card.
 - **Revocation UX** — if you revoke a plugin version with a `compromised` reason, the host refuses to execute the bundle on the device and shows a security banner instead. See §5.5.
+- **Live cards pin above events.** When mixed in the same inbox, live cards (`card_type: "live"`) sort above event cards (`card_type: "event"`), each subsorted by recency. The "Live" view in the drawer shows only live cards.
+- **Per-device dismiss (server-side filter).** When the user dismisses a message on device A, `/v1/messages/{id}/dismiss` writes a `DeliveryStatus` row keyed on `(message_id, device_id=A)`. Subsequent calls to `/v1/messages/inbox` from device A LEFT JOIN `DeliveryStatus` for `device_id=A` and filter rows where `dismissed_at IS NOT NULL` out of A's feed. The dismiss SSE event still fans out to *all* of the user's devices, but the server-side filter is per-device — devices B, C, etc. receive the hint and refresh, but their own feeds keep the row until they dismiss it themselves. V1 design: dismiss is a per-device gesture (some users want a card visible elsewhere); cross-device "dismiss everywhere" is a V1.5 add.
+- **Real-time hints over SSE.** Foreground devices keep an authenticated Server-Sent Events stream open to `/v1/events`. The server pushes content-blind hints — `inbox.changed`, `state.changed`, `dismiss`, `card.upsert`, `card.delete` — and the client re-fetches over REST in response. The actual payloads still flow over the existing pull endpoints; SSE is the wakeup signal, not the data channel. Backgrounded devices fall back to FCM.
 
 You don't need to opt into any of these. Populate `hostPreview` and they all work.
 
@@ -86,6 +96,7 @@ The platform does **not** inject `device_id` into the body in V1 — see §7 for
 ```ts
 import {
   BasePlugin,
+  Capability,
   DismissBehavior,
   registerPlugin,
   type HostPreview,
@@ -110,12 +121,14 @@ class MyPlugin extends BasePlugin {
     senderId: '<your-sender-id>',    // the UUID Syncler issued you
     bundleHash: '<set by sign-bundle.ts>',
     signature: '<set by sign-bundle.ts>',
-    declaredCapabilities: ['network'],
+    declaredCapabilities: [Capability.NETWORK],  // enum, not the string literal
     declaredEndpoints: ['https://your-app.example.com/api/*'],
     renderer: 'script',              // or 'template' for native Compose UI
-    template: undefined,             // required if renderer is 'template'
     cardType: 'event',               // or 'live' for persistent cards
-    cardKeyPath: undefined,          // required if cardType is 'live'
+    // template / cardKeyPath are omitted here: required only when renderer
+    // is 'template' / cardType is 'live'. The validator rejects them when
+    // they don't belong, so leave them unset for an event-mode script
+    // plugin like this one.
     dismissBehavior: DismissBehavior.DISMISS_ALL,
     minPlatformVersion: '1.0.0',
   };
@@ -228,66 +241,161 @@ response = client.publish_plugin(
 
 print("Published row:", response["plugin_row_id"])
 # Save this — you'll need it in `send_to(plugin_id=...)`.
+```
 
 ### 5.1 Native Template Renderer
 
-If you set `renderer="template"`, the host uses a native Material 3 Compose renderer instead of a WebView. This is faster and uses less battery. You must supply a `template` object:
+Set `renderer="template"` to ship a Compose-rendered native card instead of a JS bundle. The publish call looks like this:
 
-```json
-{
-  "layout": "standard_card",
-  "fields": {
-    "title":    { "path": "$.title" },
-    "subtitle": { "path": "$.subtitle" },
-    "body":     { "path": "$.body" }
-  },
-  "actions": [
-    { "id": "ack", "label": "Acknowledge", "endpoint": "https://example.com/api/ack" }
-  ]
-}
+```python
+response = client.publish_plugin(
+    plugin_identifier="com.example.weather",
+    version="1.0.0",
+    manifest_hash=hashlib.sha256(b"manifest-placeholder").digest(),
+    bundle_hash=hashlib.sha256(b"unused-for-template").digest(),
+    bundle_signature=b"\x00" * 64,            # ignored for template
+    signed_bundle_url="https://example.com/unused",  # ignored for template
+    capabilities=[],
+    endpoints=["https://example.com/api/*"],
+    renderer="template",
+    template={
+        "layout": "standard_card",
+        "fields": {
+            "title":    {"path": "$.title"},
+            "subtitle": {"path": "$.subtitle"},
+            "body":     {"path": "$.body"},
+        },
+        "actions": [
+            {"id": "ack", "label": "Acknowledge", "endpoint": "https://example.com/api/ack"},
+        ],
+    },
+)
 ```
 
-- **JSONPath mapping**: Fields are extracted from your decrypted payload using simple `$.path` syntax.
-- **Standard Layout**: `standard_card` supports `title` (required), `subtitle`, and `body`.
-- **Native Actions**: Buttons in the card POST your payload to the specified `endpoint`. Endpoints must be in your `declaredEndpoints`.
+**JSONPath dialect.** Only `$.field(.subfield)*` is accepted. No array indexing (`$.items[0]`), no wildcards (`$.*`), no filters (`$.items[?(@.x>0)]`). Field-name segments must match `[A-Za-z_][A-Za-z0-9_]*`. The server rejects manifests with malformed paths at publish time, and the client-side resolver returns `null` for malformed input as a defense-in-depth.
+
+**Layouts.** V1 ships one layout:
+
+| Layout | Required fields | Optional fields | Notes |
+|---|---|---|---|
+| `standard_card` | `title` | `subtitle`, `body` | All values rendered as plain text via Compose `Text`. No markdown / HTML / link interpretation — a hostile payload value cannot inject a clickable link. |
+
+Additional layouts (`compact_row`, `score_card`, etc.) are deferred to a future phase.
+
+**Actions.** Each action is a button on the card. When tapped, the host POSTs the **full decrypted payload as `application/json`** to `endpoint`. No `Authorization` header is attached — the host explicitly uses an unauthenticated HTTP client for action POSTs so the user's Syncler bearer token never reaches your plugin endpoint (security boundary). If you need request authentication, HMAC the body using a sender-specific secret your backend knows out of band, or rely on TLS + endpoint allowlisting alone.
+
+**Validation rules** the publish endpoint enforces (returns 422 otherwise):
+
+- `layout` is in the supported set.
+- Required fields for the layout are present.
+- No fields outside the layout's allowed set.
+- Every `path` matches the JSONPath regex.
+- Every `action.endpoint` matches at least one of your declared `endpoints` globs (the same glob syntax that gates `platform.network.fetch` in script renderers).
+- Every `action.id` is unique within the template.
 
 ### 5.2 Live Cards
 
-If you set `card_type="live"`, the host treats the card as a persistent, upsertable unit rather than a one-off event. You must provide `card_key_path` (JSONPath into your payload yielding a stable ID for the card).
+Set `card_type="live"` to ship a persistent, upsertable card. The plugin manifest must also provide `card_key_path` — a JSONPath into your decrypted payload that yields the stable identity for each card (e.g. `$.order_id`). This lets the inbox merge multiple upserts for the same logical card into one row.
+
+```python
+response = client.publish_plugin(
+    plugin_identifier="com.example.delivery",
+    version="1.0.0",
+    manifest_hash=hashlib.sha256(b"manifest").digest(),
+    bundle_hash=hashlib.sha256(open("dist/plugin.bundle.js","rb").read()).digest(),
+    bundle_signature=bytes.fromhex(manifest["signature"]),
+    signed_bundle_url="https://example.com/plugin.bundle.js",
+    capabilities=["network"],
+    endpoints=["https://example.com/api/*"],
+    card_type="live",
+    card_key_path="$.order_id",
+)
+```
+
+Live cards work with **either** renderer. The most common combo is `renderer="template"` + `card_type="live"` (delivery progress card with no JS).
 
 #### Upserting a live card
 
-Use `upsert_card` to create or update a card. The host performs a sequence number check to prevent stale updates.
-
 ```python
+from syncler.crypto import assemble_live_card_aad, encrypt_payload
+from datetime import datetime, timedelta, UTC
+import json
+
+expires_at = datetime.now(UTC) + timedelta(hours=12)
+
+# Live card plaintext. Include `hostPreview` so the inbox row uses your
+# title/subtitle instead of the generic "New message from {sender_name}"
+# fallback. The `order_id` field is what the manifest's
+# `card_key_path="$.order_id"` resolves to and MUST equal the `card_key`
+# you pass to `upsert_card` below — see the note after the example.
+plaintext = json.dumps({
+    "hostPreview": {
+        "title": "Pizza Delivery",
+        "subtitle": "Order #456",
+        "summary": "Out for delivery — ETA 8 minutes",
+    },
+    "order_id": "order-456",
+    "title": "Pizza Delivery",
+    "subtitle": "Order #456 • ETA 8 minutes",
+    "body": "Driver: Sam. Truck: 7F-12.",
+}).encode("utf-8")
+
+# AAD the device will verify against on AES-GCM decrypt. `sequence_number`
+# stays as a Python int — the canonical JSON emits an integer literal.
+aad = assemble_live_card_aad(
+    sender_id=client.sender_id,
+    user_id=user_id,
+    plugin_id=plugin_row_id,
+    card_key="order-456",
+    sequence_number=2,
+    expires_at=expires_at,
+)
+
+# encrypt_payload is keyword-only, generates a fresh 12-byte nonce
+# internally, and returns (nonce, ciphertext_with_tag). Do NOT generate
+# your own nonce — using the returned one is mandatory because that's the
+# one bound to the ciphertext by AES-GCM.
+nonce, ciphertext = encrypt_payload(
+    pairing_key=client.pairing_key,
+    plaintext=plaintext,
+    aad=aad,
+)
+
 client.upsert_card(
     user_id=user_id,
     plugin_id=plugin_row_id,
     card_key="order-456",
-    encrypted_payload=client.encrypt_payload({
-        "title": "Pizza Delivery",
-        "body": "Out for delivery! ETA: 8 mins"
-    }),
-    nonce=os.urandom(12),
+    encrypted_payload=ciphertext,
+    nonce=nonce,
     sequence_number=2,
-    expires_at=datetime.now(UTC) + timedelta(hours=48),
+    expires_at=expires_at,
 )
 ```
 
-- **Sequence Number**: Must be strictly increasing. The server and client both reject updates with `sequence_number <= current`.
-- **Rate Limit**: 1 upsert per second per card (60/min). Exceeding this returns 429.
-- **TTL**: Live cards expire automatically after `expires_at`. Maximum allowed TTL is 48 hours.
+**`card_key` must equal `card_key_path` resolved on the plaintext.** The manifest's `card_key_path` (declared at publish time, e.g. `"$.order_id"`) is the path the host extracts on decrypt to use as the merge key for this card. The `card_key` you pass to `upsert_card` is what the server stores. If the two disagree, the host's per-card merge breaks and your "live" card behaves like a series of event cards. The server doesn't cross-check the two — enforcement is your responsibility. (V1 validates `card_key_path` only as `startswith("$")`; a future phase will tighten this to the full `$.field(.subfield)*` JSONPath grammar used by template fields.)
 
-#### AAD binding
+See `docs/crypto-spec.md §8` for the exact `assemble_live_card_aad` canonical byte shape.
 
-For security, live card upserts bind metadata to the encrypted payload using AES-GCM Additional Authenticated Data (AAD). Your SDK handles this, but for reference, the following fields are bound:
-`card_key`, `card_type: "live"`, `sender_id`, `user_id`, `plugin_id`, `expires_at`, `sequence_number`.
+**Server-side gates on upsert** (return 4xx if violated — see §9):
+
+- **Active pairing required.** The `(sender_id, user_id)` pair must have a non-revoked `Pairing` row; otherwise 410. Mirrors the message-send path.
+- **Plugin must be active and live-type.** `Plugin.revoked_at IS NULL` and `card_type = "live"`; otherwise 410.
+- **TTL window.** `expires_at` must be strictly future (else 400) AND at most 48 hours from now (else 400). The cap is server-enforced and not negotiable.
+- **Sequence monotonicity.** New `sequence_number` must be strictly greater than the existing row's; else 409.
+- **Rate limit.** Fixed window of 60 upserts per minute per `(sender_id, user_id, card_key)`; else 429. (There's also an IP-bucketed pre-auth limit of 120/min for cheap DoS protection.)
+
+The successful response triggers a `card.upsert` SSE event to every active device of the user, so foreground clients refresh within ~1s.
 
 #### Deleting a live card
 
 ```python
-client.delete_card(card_key="order-456")
+client.delete_card(
+    user_id=user_id,
+    card_key="order-456",
+)
 ```
+
+`user_id` is **required**. The canonical signed envelope binds `(sender_id, user_id, card_key)` — without `user_id` in the signature, an attacker (or a coincidence: two users with the same `card_key` under the same sender) could be deleted by mistake. The delete endpoint matches exactly that triple in the row lookup.
 
 ### 5.5 Revoking a plugin version
 
@@ -340,7 +448,9 @@ result = client.send_to(
 
 ## 7. The action callback endpoint
 
-`https://your-app.example.com/api/action` accepts whatever body your plugin's `onclick` handler POSTs. In the example above that's:
+`https://your-app.example.com/api/action` accepts whatever body the host POSTs when the user taps an action button. The shape depends on which renderer you chose:
+
+**Script renderer** — your `onclick` handler builds the body via `platform.network.fetch`. In the §3 example that's:
 
 ```http
 POST /api/action
@@ -349,7 +459,9 @@ Content-Type: application/json
 { "item_id": "...", "acted_at": "..." }
 ```
 
-Note: the platform does **not** inject `device_id` into the body for you in V1. If you need to distinguish which device acted, include a sender-generated identifier in your payload and have the plugin echo it back. Dedupe by `item_id` alone if a single tap is what you care about.
+**Template renderer** — the host POSTs the **full decrypted payload** as the body, verbatim. There's no JS hook to intervene. Your endpoint receives the whole payload JSON; pull whatever fields you need server-side. No `Authorization` header is added by the host (the user's Syncler bearer token never reaches your endpoint — security boundary). If you need request authentication, HMAC the payload using a sender-specific secret your backend shares out of band with itself, or rely on TLS + endpoint allowlisting alone.
+
+Note: the platform does **not** inject `device_id` into the body for you in V1. If you need to distinguish which device acted, include a sender-generated identifier in your payload and (for script renderer) have the plugin echo it back. For template renderer, your `card_key` (or any other field in the payload) serves the same dedupe role. Dedupe by `item_id` / `card_key` alone if a single tap is what you care about.
 
 - Status 200 -> recorded.
 - Status 409 -> idempotent dedupe (already saw this item); platform may retry on transient network errors so be ready.
@@ -377,7 +489,7 @@ def action():
 5. After confirming, the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you.
 6. Publish your plugin (`client.publish_plugin(...)`) — save the `plugin_row_id`.
 7. Run `client.send_to(...)` with a test payload.
-8. Within ~15s the phone's inbox poll picks it up, decrypts it, fetches your bundle, and shows the native inbox row.
+8. The server pushes an `inbox.changed` event over the SSE stream the open app is subscribed to (foreground); the phone refreshes its inbox, decrypts the message, fetches your bundle (or applies your template manifest), and shows the native row within ~1s. If the app is backgrounded, FCM wakes it and the inbox refresh happens on the next foreground.
 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
 
@@ -388,6 +500,11 @@ def action():
 - **`410 recipient has no active devices`** — the user has no enrolled device (signed up but never opened the app, or revoked all devices). FCM availability is *not* required; messages are stored regardless and pulled via `/v1/messages/inbox`.
 - **`409 nonce already used`** — your code reused a nonce somehow; SDK generates fresh nonces per `send_to`, so this means you're calling `send_to` with cached envelope bytes. Rebuild.
 - **`429 rate limited`** — back off + retry per `Retry-After` header.
+- **`410 plugin missing, revoked, not live-type, or not owned by sender`** (cards upsert) — the plugin row's `card_type` isn't `"live"`, or the row has a non-null `revoked_at`, or the publish row's `sender_id` doesn't match the signed envelope's sender. The error message is intentionally generic so a probing caller can't distinguish the cases (don't leak which plugin UUIDs exist).
+- **`410 no active pairing`** (cards upsert) — the recipient user has not paired with your sender, or the pairing has been revoked. The user needs to re-scan your pairing QR.
+- **`400 expires_at exceeds the 48h live-card cap`** (cards upsert) — your supplied `expires_at` is more than 48 hours from now. Live cards are capped server-side to prevent slot squatting. Send shorter and re-upsert to extend.
+- **`400 expires_at is not in the future`** (cards upsert) — you sent an already-expired `expires_at`. Use a future timestamp.
+- **`409 sequence_number not greater than existing`** (cards upsert) — the existing card has a `sequence_number` ≥ what you sent. Sequence must be strictly increasing per `card_key`.
 - **Card shows "render failed: plugin did not install __syncler_internal_dispatch — missing registerPlugin() call?"** — your bundle defined the plugin class but didn't call `registerPlugin(new YourPlugin())` at module scope. See §3.
 - **Card shows "endpoint not declared"** — your `onclick` handler is calling a URL that doesn't match any pattern in your manifest's `declaredEndpoints`. Add the URL pattern (globs allowed: `https://example.com/api/*`) and re-publish.
 - **`HostPreviewValidationError: hostPreview.X is N UTF-8 bytes; max is M`** — caught at `client.send_to` time. Trim the offending field; see §2 for the caps. UTF-8 byte counts, not characters — emoji and accented characters cost more than one byte.

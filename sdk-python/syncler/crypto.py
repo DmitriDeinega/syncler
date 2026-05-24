@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import secrets
+import uuid
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
@@ -75,6 +76,81 @@ def assemble_envelope(
             "expires_at": expires_at,
             "encrypted_body": encrypted_body_b64,
             "nonce": nonce_b64,
+        }
+    )
+
+
+# --- Live cards (Phase 3b) -------------------------------------------------
+
+
+def _canon_uuid(value: Any) -> str:
+    """Normalize a UUID to the lowercase no-brace form the server stores
+    via ``str(uuid.UUID(payload.*))``. Required before canonicalization so
+    that uppercase or braced caller input produces the same bytes the
+    server's ``_publish_envelope`` / ``_build_*_envelope_bytes`` produce.
+    """
+    return str(uuid.UUID(str(value)))
+
+
+def assemble_live_card_aad(
+    *,
+    sender_id: str,
+    user_id: str,
+    plugin_id: str,
+    card_key: str,
+    sequence_number: int,
+    expires_at: Any,  # datetime; coerced to ISO8601 with Z suffix
+) -> bytes:
+    return canonical_json(
+        {
+            "card_key": card_key,
+            "card_type": "live",
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            "plugin_id": _canon_uuid(plugin_id),
+            "sender_id": _canon_uuid(sender_id),
+            "user_id": _canon_uuid(user_id),
+            "sequence_number": sequence_number,
+        }
+    )
+
+
+def assemble_live_card_upsert_envelope(
+    *,
+    sender_id: str,
+    user_id: str,
+    plugin_id: str,
+    card_key: str,
+    encrypted_payload_b64: str,
+    nonce_b64: str,
+    sequence_number: int,
+    expires_at: Any,
+) -> bytes:
+    return canonical_json(
+        {
+            "card_key": card_key,
+            "card_type": "live",
+            "encrypted_payload": encrypted_payload_b64,
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            "nonce": nonce_b64,
+            "plugin_id": _canon_uuid(plugin_id),
+            "sender_id": _canon_uuid(sender_id),
+            "sequence_number": sequence_number,
+            "user_id": _canon_uuid(user_id),
+        }
+    )
+
+
+def assemble_live_card_delete_envelope(
+    *,
+    sender_id: str,
+    user_id: str,
+    card_key: str,
+) -> bytes:
+    return canonical_json(
+        {
+            "card_key": card_key,
+            "sender_id": _canon_uuid(sender_id),
+            "user_id": _canon_uuid(user_id),
         }
     )
 

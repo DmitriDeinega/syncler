@@ -59,11 +59,11 @@ AAD (additional authenticated data passed to AES-GCM) contains the **protocol co
 
 ```json
 {
-  "sender_id": "...",
-  "user_id": "...",
-  "plugin_id": "...",
+  "expires_at": "<ISO8601 UTC>",
   "min_plugin_version": "...",
-  "expires_at": "<ISO8601 UTC>"
+  "plugin_id": "...",
+  "sender_id": "...",
+  "user_id": "..."
 }
 ```
 
@@ -217,10 +217,73 @@ Never reuse an AES-GCM nonce with the same key. Clients must generate 12-byte no
 
 The V1 server performs a per-sender in-memory LRU replay check for the last 100,000 nonces. This protects the current server process only. A Redis or database-backed replay check is planned for V1.5.
 
+## 8. Live Cards (Phase 3b)
+
+Live cards are persistent, upsertable units identified by `(sender_id, user_id, card_key)`. The encrypted payload uses the same AES-256-GCM primitive as messages, but with a richer AAD that binds the card-specific metadata. Upsert and delete each have their own Ed25519 envelope distinct from the message envelope.
+
+### 8.1 Live Card AAD
+
+Canonical JSON, UTF-8, sorted keys, compact separators (same encoder as §4):
+
+```json
+{
+  "card_key": "...",
+  "card_type": "live",
+  "expires_at": "<ISO8601 UTC with Z suffix>",
+  "plugin_id": "...",
+  "sender_id": "...",
+  "sequence_number": <integer JSON literal>,
+  "user_id": "..."
+}
+```
+
+`card_type` is always the string `"live"` (the field exists so the AAD shape can extend cleanly when future card types land — e.g. ephemeral or scheduled cards). `sequence_number` is emitted as a JSON integer literal (no quotes); senders MUST NOT stringify it. `expires_at` MUST use the `Z` UTC suffix (not `+00:00`) so SDK and server agree on the canonical bytes.
+
+The AAD binds the ciphertext to a specific (sender, user, plugin, card, sequence, expiry) tuple. A replay of an older sequence or a substitution of one card's ciphertext under another's metadata will fail AES-GCM tag verification on decrypt.
+
+### 8.2 Live Card Upsert Envelope (Ed25519 signing input)
+
+Canonical JSON for the sender's `envelope_signature` on `POST /v1/cards/upsert`:
+
+```json
+{
+  "card_key": "...",
+  "card_type": "live",
+  "encrypted_payload": "<base64 ciphertext_with_tag, no nonce prefix>",
+  "expires_at": "<ISO8601 UTC with Z suffix>",
+  "nonce": "<base64 12-byte nonce>",
+  "plugin_id": "...",
+  "sender_id": "...",
+  "sequence_number": <integer JSON literal>,
+  "user_id": "..."
+}
+```
+
+The server constructs the same canonical bytes from the request body (via `assemble_envelope` in `server/app/routers/cards.py`) and verifies against the registered sender's public key. UUIDs MUST be canonicalized to lowercase no-brace form before signing (`str(uuid.UUID(value))`) — the SDK normalizes via `_canon_uuid` to prevent sender-side self-401s on uppercase or braced input.
+
+### 8.3 Live Card Delete Envelope (Ed25519 signing input)
+
+Canonical JSON for `POST /v1/cards/delete`:
+
+```json
+{
+  "card_key": "...",
+  "sender_id": "...",
+  "user_id": "..."
+}
+```
+
+**`user_id` is REQUIRED in the envelope.** Without it, a delete signature valid for one user's card could be replayed against another user's card with a coincidentally matching `(sender_id, card_key)` — the table is uniquely keyed on `(sender_id, user_id, card_key)`, so the lookup would otherwise be ambiguous. (Codex consultation 62 security finding.) The server matches the exact triple before deleting; mismatched triples no-op silently and still publish a `card.delete` SSE event so all of the user's devices clear any stale local copy.
+
+### 8.4 Test Vectors
+
+Live-card vectors live alongside the rest in `server/tests/test_crypto.py` (round-trip) and `android/core/crypto/.../SpecVectorsTest.kt` (Android cross-check). The canonical envelope bytes for upsert/delete are asserted in `server/tests/test_phase3.py` via signature-verification round trips against `app/routers/cards.py:_build_upsert_envelope_bytes` and `_build_delete_envelope_bytes`.
+
 ## Python Reference Snippets
 
 ```python
 import json
+import uuid
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -240,6 +303,84 @@ def decrypt(pairing_key: bytes, wire: bytes, aad: bytes) -> bytes:
     nonce = wire[:12]
     ciphertext_with_tag = wire[12:]
     return AESGCM(pairing_key).decrypt(nonce, ciphertext_with_tag, aad)
+
+# --- Live cards (§8) -----------------------------------------------------
+
+def _canon_uuid(value) -> str:
+    """Normalize a UUID to the lowercase no-brace form the server stores
+    via str(uuid.UUID(payload.*)). Required before signing: uppercase or
+    braced input from a caller would otherwise produce a canonical-bytes
+    mismatch and a self-401 from the server."""
+    return str(uuid.UUID(str(value)))
+
+def assemble_live_card_aad(
+    *,
+    sender_id: str,
+    user_id: str,
+    plugin_id: str,
+    card_key: str,
+    sequence_number: int,
+    expires_at,  # datetime; coerced to ISO8601 with Z suffix
+) -> bytes:
+    return json.dumps(
+        {
+            "card_key": card_key,
+            "card_type": "live",
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            "plugin_id": _canon_uuid(plugin_id),
+            "sender_id": _canon_uuid(sender_id),
+            "user_id": _canon_uuid(user_id),
+            "sequence_number": sequence_number,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+def assemble_live_card_upsert_envelope(
+    *,
+    sender_id: str,
+    user_id: str,
+    plugin_id: str,
+    card_key: str,
+    encrypted_payload_b64: str,
+    nonce_b64: str,
+    sequence_number: int,
+    expires_at,
+) -> bytes:
+    return json.dumps(
+        {
+            "card_key": card_key,
+            "card_type": "live",
+            "encrypted_payload": encrypted_payload_b64,
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            "nonce": nonce_b64,
+            "plugin_id": _canon_uuid(plugin_id),
+            "sender_id": _canon_uuid(sender_id),
+            "sequence_number": sequence_number,
+            "user_id": _canon_uuid(user_id),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+def assemble_live_card_delete_envelope(
+    *,
+    sender_id: str,
+    user_id: str,
+    card_key: str,
+) -> bytes:
+    return json.dumps(
+        {
+            "card_key": card_key,
+            "sender_id": _canon_uuid(sender_id),
+            "user_id": _canon_uuid(user_id),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 ```
 
 ## Equivalents for Android/Kotlin
