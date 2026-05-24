@@ -11,8 +11,9 @@ class NetworkPlugin extends BasePlugin {
     name: 'Network',
     version: '1.0.0',
     senderId: 'com.example.sender',
-    bundleHash: 'abc123',
-    signature: 'def456',
+    // Phase 4.1: SHA-256/Ed25519 length validation.
+    bundleHash: 'a'.repeat(64),
+    signature: 'b'.repeat(128),
     declaredCapabilities: [Capability.NETWORK],
     declaredEndpoints: ['https://api.example.com/v1/item', 'https://api.example.com/v1/*', 'https://*.example.net/feed'],
     dismissBehavior: DismissBehavior.DISMISS_LOCAL_ONLY,

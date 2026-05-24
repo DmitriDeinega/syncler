@@ -123,11 +123,31 @@ export function validatePluginManifest(value: unknown): { valid: true; manifest:
     if (!semverPattern.test(version)) issues.push('version must be semver');
   });
   requireString(value, 'senderId', issues);
+  // bundleHash is SHA-256 of the bundle bytes → 32 bytes → 64 hex chars.
+  // signature is Ed25519 over (canonical manifest || bundleHash) → 64 bytes
+  // → 128 hex chars. The previous "any hex" check let "00" or any other
+  // placeholder through validation, which authors hit constantly: the
+  // server rejects at publish time with a 422, but the SDK should have
+  // caught it locally. (External DX review, lottery-claude, Phase 4.1 #1.)
   requireString(value, 'bundleHash', issues, (hash) => {
-    if (!hexPattern.test(hash)) issues.push('bundleHash must be hex');
+    if (!hexPattern.test(hash)) {
+      issues.push('bundleHash must be hex');
+    } else if (hash.length !== 64) {
+      issues.push(
+        'bundleHash must be 64 hex chars (SHA-256). ' +
+          'Run sign-bundle.ts on your built bundle to populate this field.',
+      );
+    }
   });
   requireString(value, 'signature', issues, (signature) => {
-    if (!hexPattern.test(signature)) issues.push('signature must be hex');
+    if (!hexPattern.test(signature)) {
+      issues.push('signature must be hex');
+    } else if (signature.length !== 128) {
+      issues.push(
+        'signature must be 128 hex chars (Ed25519, 64 bytes). ' +
+          'Run sign-bundle.ts on your built bundle to populate this field.',
+      );
+    }
   });
   requireString(value, 'minPlatformVersion', issues, (version) => {
     if (!semverPattern.test(version)) issues.push('minPlatformVersion must be semver');

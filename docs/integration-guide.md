@@ -174,8 +174,54 @@ registerPlugin(new MyPlugin());
 Render whatever HTML/CSS/JS suits your domain. The WebView is isolated; only `platform.*` APIs cross the boundary.
 
 **V1 card-render bridge:**
-- `platform.network.fetch(url, init)` — works, gated by `declaredEndpoints` glob match
+- `platform.network.fetch(url, init)` — works, gated by `declaredEndpoints` glob match. Contract documented in §3.1 below.
 - `platform.showNotification`, `platform.storage`, `platform.camera`, `platform.gallery`, `platform.file`, `platform.location`, `platform.message.respond` — *reject* with a clear error in V1 inbox mode. For V1 dogfood, stick to `network.fetch`.
+
+### 3.1 `declaredEndpoints` glob syntax
+
+`declaredEndpoints` controls which URLs your plugin may pass to `platform.network.fetch`. The host (both Android `EndpointMatcher.kt` and the TS SDK's `network.ts`) implements the same glob grammar:
+
+- A literal `*` matches **exactly one segment**, never multiple. The boundary changes by position:
+  - In the host portion of the URL (before the first `/` after the scheme), `*` matches `[^./]*` — a single host label. `https://*.example.com/feed` matches `https://api.example.com/feed`, but **not** `https://a.b.example.com/feed`.
+  - In the path portion, `*` matches `[^/]*` — a single path segment. `https://example.com/api/*` matches `https://example.com/api/v1`, but **not** `https://example.com/api/v1/users`.
+- There is no `**` for "any number of segments." You need one entry per depth, or you need to make the path component a single segment (e.g. encode trailing path in a query string).
+- Match is anchored: the full URL must match, including query string. To allow a query, include `*` in the path or query position.
+
+Example: to allow both `/api/v1/ack` and `/api/v2/ack`, declare both: `["https://example.com/api/v1/*", "https://example.com/api/v2/*"]`. Or, if you don't care about path depth, declare `["https://example.com/api/*", "https://example.com/api/*/*"]` and so on.
+
+This is the single most common manifest mistake — a plugin author declares `https://example.com/api/*` and then `fetch`-es `https://example.com/api/v1/users`, which gets rejected with `endpoint_not_declared`. The same pattern controls **template action endpoints** (the publish-time validator uses the same matcher to verify `action.endpoint` is in `endpoints`).
+
+### 3.2 `platform.network.fetch` contract
+
+The host bridge wraps a stock OkHttp client. Behavior:
+
+- **Returns a `Response`** for any HTTP response (2xx, 4xx, 5xx all resolve). The status is on `response.status`. You're responsible for checking it.
+- **Throws** on:
+  - `endpoint_not_declared` — URL doesn't match any `declaredEndpoints` glob (see §3.1).
+  - `cleartext_in_release` — `http://` URL in a release build. Debug builds allow cleartext for LAN dev.
+  - Network failures (DNS, connection refused, timeout) propagate as an `Error` whose message includes the underlying cause; treat them like a generic offline state.
+- **Timeouts**: two layers. The host's OkHttp client uses library defaults (~10s connect / 10s read each). The plugin bridge wraps every call in a hard 30s ceiling — even if the underlying HTTP request is still streaming, the bridge cancels and rejects the JS promise after 30 seconds. Plan UX around the 30s upper bound; if your endpoint is reliably slower, you need a redesign (e.g. async ack endpoint that the plugin polls).
+- **Request shape**: standard `RequestInit` subset. `method`, `headers`, `body` (string), `contentType` are forwarded. No streaming bodies, no `AbortController` in V1.
+- **Cookies are disabled** at the bridge (`CookieJar.NO_COOKIES`). Authenticate via headers or signed bodies.
+
+```ts
+try {
+  const response = await platform.network.fetch('https://example.com/api/ack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ item_id: itemId }),
+  });
+  if (!response.ok) {
+    // 4xx/5xx — your backend rejected the action. Show an error in the card.
+    return;
+  }
+  // 2xx — success.
+} catch (err) {
+  // endpoint not declared, cleartext in release, offline, timeout, etc.
+  // The exception message is human-readable; surface it or fall back to a
+  // generic "couldn't reach server" state.
+}
+```
 
 ## 4. Build + sign the plugin
 
@@ -493,7 +539,9 @@ def action():
 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
 
-## 9. Common errors
+## 9. Common server errors
+
+The server returned a 4xx or 5xx; here's what to change.
 
 - **`401 invalid envelope signature`** — your sender's Ed25519 key doesn't match the one registered. Re-check `private_key_path`.
 - **`410 plugin missing, revoked, or not owned by sender`** — `plugin_id` (the row UUID) is wrong, or you accidentally used `plugin_identifier`. The two are distinct (see §5 vs §6).
@@ -505,12 +553,22 @@ def action():
 - **`400 expires_at exceeds the 48h live-card cap`** (cards upsert) — your supplied `expires_at` is more than 48 hours from now. Live cards are capped server-side to prevent slot squatting. Send shorter and re-upsert to extend.
 - **`400 expires_at is not in the future`** (cards upsert) — you sent an already-expired `expires_at`. Use a future timestamp.
 - **`409 sequence_number not greater than existing`** (cards upsert) — the existing card has a `sequence_number` ≥ what you sent. Sequence must be strictly increasing per `card_key`.
-- **Card shows "render failed: plugin did not install __syncler_internal_dispatch — missing registerPlugin() call?"** — your bundle defined the plugin class but didn't call `registerPlugin(new YourPlugin())` at module scope. See §3.
-- **Card shows "endpoint not declared"** — your `onclick` handler is calling a URL that doesn't match any pattern in your manifest's `declaredEndpoints`. Add the URL pattern (globs allowed: `https://example.com/api/*`) and re-publish.
 - **`HostPreviewValidationError: hostPreview.X is N UTF-8 bytes; max is M`** — caught at `client.send_to` time. Trim the offending field; see §2 for the caps. UTF-8 byte counts, not characters — emoji and accented characters cost more than one byte.
-- **Row shows "New message from {sender}" with fallback text only** — your message was sent without a `hostPreview` block, or the block was malformed (logged + ignored on the device). The detail view still loads the plugin and renders normally; only the row is generic. Add a valid `hostPreview` and re-send.
+- **`422 manifest validation failed`** (cards/plugins publish) — Pydantic rejected the manifest body. The detail field tells you which check failed. Most common: `template required when renderer == 'template'`, `card_key_path required when card_type == 'live'`, `action endpoint not allowed by declared endpoints`. Mirror this validation client-side via `validatePluginManifest` (TS SDK) to catch before the round-trip.
 
 Cross-reference `docs/crypto-spec.md` for the AAD + envelope canonical byte shapes if signatures disagree.
+
+## 9.1 Common pitfalls
+
+These pass server-side validation but bite you at runtime. The SDK validator catches most of them now; check here first when something compiles and publishes but doesn't behave.
+
+- **`UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE` in `bundleHash` / `signature`.** You forgot to run `sign-bundle.ts` on the built bundle. The SDK validator rejects this (post Phase 4.1) — `bundleHash` must be exactly 64 hex chars (SHA-256), `signature` must be exactly 128 hex chars (Ed25519). The signer emits lowercase, but the validator and server tolerate either case. If the SDK lets it through, the server rejects at publish with 422; if both let it through, the device fails the manifest-hash check and shows "Plugin not loaded."
+- **`registerPlugin()` not called.** Card shows *"render failed: plugin did not install __syncler_internal_dispatch — missing registerPlugin() call?"*. Your bundle defined the plugin class but never called `registerPlugin(new YourPlugin())` at module scope. The host's bundle loader looks for the dispatcher hook the SDK installs from `registerPlugin`; without it, there's nothing to dispatch into.
+- **Single-segment wildcard surprise in `declaredEndpoints`.** `https://example.com/api/*` matches `https://example.com/api/v1` but NOT `https://example.com/api/v1/users`. `*` is one segment, never multiple. Card shows *"endpoint not declared"*. See §3.1 for the full glob grammar.
+- **`card_key` doesn't match `card_key_path` resolved on the plaintext.** The manifest declares `card_key_path: "$.order_id"`; the device extracts that on decrypt and uses it as the merge key. You pass `card_key="order-456"` to `upsert_card`. If the plaintext's `$.order_id` doesn't equal `"order-456"`, the device treats each upsert as a separate row — your "live" card behaves like an event card. The server doesn't cross-check; it's your responsibility.
+- **Template/script field mismatches.** Setting `template: {...}` on a `renderer: "script"` manifest, or omitting `template` on `renderer: "template"`. SDK validator catches both. Same with `cardType: "live"` requiring `cardKeyPath` and `cardType: "event"` rejecting it. If the SDK validator misses a case you hit, file a Phase 4.5 doc-bug.
+- **Row shows "New message from {sender}" with fallback text only.** Your message was sent without a `hostPreview` block, or the block was malformed (logged + ignored on the device). The detail view still loads the plugin and renders normally; only the row is generic. Add a valid `hostPreview` and re-send.
+- **Action POST body shape surprise.** Script renderer: your `onclick` builds whatever body you want. Template renderer: the host POSTs the **entire decrypted payload** verbatim, with no Authorization header. If your endpoint expects `{item_id, acted_at}` and you swapped to template renderer, the endpoint now sees the full payload — adjust the receiver, don't fight the host.
 
 ## 10. Versioning + history
 

@@ -23,24 +23,33 @@ This file is the public roadmap. Internal implementation phases (Phase 0 / 1 / 2
 4. **Per-device envelope encryption.** Senders encrypt the payload separately for each of the user's enrolled devices, keyed by per-device public keys instead of the shared user master key. Enables forward secrecy and immediate per-device revocation without rotating user-wide keys.
 5. **Durable nonce-replay protection.** Move the per-sender nonce registry from in-memory to Postgres so a worker restart can't accept a replayed envelope.
 
+## V1.5 — Developer experience
+
+DX track surfaced by external plugin-author review (lottery-claude, consultation 68). Phase 4.1 closed the small doc/validator wins; this section tracks the larger items that need design or app-side UX work.
+
+6. **Automated pairing handshake.** Today the user reads `user_id` + `pairing_key_hex` off the device confirmation screen and types them into the sender's backend. V1.5 wires the bootstrap exchange end-to-end: the device POSTs the `(user_id, pairing_key)` tuple to a sender-supplied broker URL embedded in the QR; the sender's backend polls a `did the user complete this token?` endpoint and unlocks `set_pairing` automatically. Removes the largest first-impressions papercut. See `sdk-python/README.md` Quickstart for the V1 dogfood flow this replaces.
+7. **Full round-trip example plugin.** `sdk-plugin/examples/minimal/` exists today but only exercises the plugin side; `examples/trading-bot/` exists but only exercises the sender side. V1.5 ships a `trading-bot` example with **both** a plugin and a backend in the same directory, sharing a `state.json`, ready to `./build.sh && python bot.py loop` and produce a real card on a paired device. Sets the floor for what plugin authors expect to copy.
+8. **`npm create @syncler/plugin` scaffold.** Generator that produces a starter plugin (manifest, `src/plugin.ts` with sensible defaults, `build.sh`, `manifest.signed.json` placeholder, an example sender) so new authors aren't reading the integration guide line-by-line. Builds on #7.
+9. **Validator polish backlog.** Centralize "things the SDK validator should reject that we currently let through to the server's 422." Examples: cross-renderer field conflicts already caught (`renderer: 'script'` + `template`), but not yet caught — `card_key` not matching `card_key_path`, illegal characters in plugin `id`, malformed semver components. Each addition reduces the server-side surface area and shortens the iteration loop for new authors.
+
 ## V2 — Capability surface
 
-6. **Plugin capability expansion.** Add `camera`, `storage`, `file`, `location`, `gallery` to the bridge with per-grant prompts. Each capability lands with its own audit-log + user-visible permission dialog.
-7. **`message.respond` + `showNotification`.** Promote action callbacks from a fire-and-forget POST to a request/response handshake the plugin can await. Add a `showNotification` bridge so non-inbox-mode flows (background alerts) work.
-8. **Template renderer layouts.** Expand beyond `standard_card` to `compact_row`, `score_card`, and a handful of other layouts driven by data-class types. Each new layout ships with golden render tests.
-9. **Script-fast runtime (Javy/QuickJS).** A lighter, non-WebView execution mode for purely logic-heavy plugins that don't need DOM. Faster cold-start and less memory than the current WebView path.
+10. **Plugin capability expansion.** Add `camera`, `storage`, `file`, `location`, `gallery` to the bridge with per-grant prompts. Each capability lands with its own audit-log + user-visible permission dialog.
+11. **`message.respond` + `showNotification`.** Promote action callbacks from a fire-and-forget POST to a request/response handshake the plugin can await. Add a `showNotification` bridge so non-inbox-mode flows (background alerts) work.
+12. **Template renderer layouts.** Expand beyond `standard_card` to `compact_row`, `score_card`, and a handful of other layouts driven by data-class types. Each new layout ships with golden render tests.
+13. **Script-fast runtime (Javy/QuickJS).** A lighter, non-WebView execution mode for purely logic-heavy plugins that don't need DOM. Faster cold-start and less memory than the current WebView path.
 
 ## V3 — Two-way + scaling
 
-10. **WebSocket two-way channel.** Bidirectional, low-latency channel between plugins and their backends; covers chat, live cursors, presence. Complements but does not replace the SSE hint channel for V1's pull-then-render model.
-11. **`platform.live.subscribe(...)` for script plugins.** API for a script bundle to subscribe to a named feed and receive incremental updates without polling.
-12. **Field-level live subscriptions on templates.** Update specific template fields without re-rendering the whole card — the live-card path today is whole-card upsert; this adds a finer grain.
-13. **Redis pub/sub for SSE scaling.** Move the in-process event bus to a shared backplane so the SSE fanout works across multiple FastAPI workers and pods.
+14. **WebSocket two-way channel.** Bidirectional, low-latency channel between plugins and their backends; covers chat, live cursors, presence. Complements but does not replace the SSE hint channel for V1's pull-then-render model.
+15. **`platform.live.subscribe(...)` for script plugins.** API for a script bundle to subscribe to a named feed and receive incremental updates without polling.
+16. **Field-level live subscriptions on templates.** Update specific template fields without re-rendering the whole card — the live-card path today is whole-card upsert; this adds a finer grain.
+17. **Redis pub/sub for SSE scaling.** Move the in-process event bus to a shared backplane so the SSE fanout works across multiple FastAPI workers and pods.
 
 ## V4 — UX polish
 
-14. **Guided lost-device rotation flow.** Click-through UX for: revoke lost device → re-pair on trusted devices → rotate master key (depends on V1.5 #3). Today the user does steps 1–2 by hand; this automates the sequence.
-15. **Per-plugin user preferences.** Notification cadence, label overrides, delivery-window scheduling, do-not-disturb integration — all surfaced from the host's settings sheet without plugin-side code.
+18. **Guided lost-device rotation flow.** Click-through UX for: revoke lost device → re-pair on trusted devices → rotate master key (depends on V1.5 #3). Today the user does steps 1–2 by hand; this automates the sequence.
+19. **Per-plugin user preferences.** Notification cadence, label overrides, delivery-window scheduling, do-not-disturb integration — all surfaced from the host's settings sheet without plugin-side code.
 
 ---
 

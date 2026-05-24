@@ -29,12 +29,18 @@ client.set_sender_id("the-saved-sender-id")
 # Pair with a user (one-time per user-device).
 qr_path = client.create_pairing_qr(ttl_seconds=300)
 print(f"Show this QR to the user: {qr_path}")
-# Once the user pairs in their Syncler app, they'll get a confirmation
-# screen showing your sender's fingerprint. They confirm. You need their
-# user_id + pairing_key from the device-side exchange (M7 wires this; for
-# now in dev, use client.set_pairing(user_id, pairing_key)).
-
-client.set_pairing(user_id="...", pairing_key=b"...32-bytes-shared-secret...")
+# The user scans the QR in the Syncler app, sees your sender's fingerprint
+# on the confirmation screen, and confirms. The Android app then shows the
+# user's `user_id` and the 32-byte pairing key (hex-encoded). You take
+# those two values out of band — e.g. the user types them into your
+# backend's onboarding form — and feed them into the SDK here:
+client.set_pairing(
+    user_id="<user_id printed by the device after pairing>",
+    pairing_key=bytes.fromhex("<pairing_key_hex printed by the device>"),
+)
+# This is the V1 pairing flow as shipped. Automated bootstrap exchange
+# (no manual copy/paste) is tracked under Developer Experience on the
+# V1.5 roadmap — see docs/ROADMAP.md.
 
 # Send a message.
 result = client.send_to(

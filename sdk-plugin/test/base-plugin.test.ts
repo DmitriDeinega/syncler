@@ -99,8 +99,12 @@ function manifestFor(id: string) {
     name: 'Test',
     version: '1.0.0',
     senderId: 'com.example.sender',
-    bundleHash: 'abc123',
-    signature: 'def456',
+    // Phase 4.1: validator requires SHA-256 length bundleHash (64 hex)
+    // and Ed25519 signature length (128 hex). Use deterministic test
+    // values rather than real signatures since the validator only checks
+    // shape, not cryptographic validity.
+    bundleHash: 'a'.repeat(64),
+    signature: 'b'.repeat(128),
     declaredCapabilities: [Capability.STORAGE],
     declaredEndpoints: [],
     dismissBehavior: DismissBehavior.DISMISS_LOCAL_ONLY,
