@@ -1,0 +1,6 @@
+### 5. New Concerns / Regressions
+*   **`PluginSettingsSheet.kt`**: Ensure the "Revoke" button in the sheet calls `viewModel.revokeSender` (which is the new safe path) rather than a direct store removal. 
+*   **SDK Canonicalization**: Ensure the Python SDK's `delete_card` signature matches the new `(sender_id, user_id, card_key)` envelope exactly.
+
+**Overall: READY AFTER TESTS**
+The implementation is technically sound. Once the validation suite listed in §4 is verified, the branch is ready for a unified Phase 3 merge.

@@ -1,0 +1,588 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e56a3-a61d-7120-a81b-c26091c35777
+--------
+user
+# Consultation 60 — Phase 2 fix-up round 4 (greenlight check)
+
+Round-3 verdicts (consultation 59):
+- **Gemini**: GREEN ("LAND PHASE 2").
+- **Codex**: HOLD with one RED. The retry coroutine's own `Job` stays
+  `isActive == true` while it re-enters the lock and calls
+  `openStreamLocked`, so a synchronous failure of the just-opened
+  stream would hit the `reconnectJob?.isActive == true` gate in
+  `scheduleReconnectLocked` and silently skip the next retry —
+  stranding the user with `wantRunning=true, current=null, no
+  reconnect`.
+
+Round 4 fix landed in commit `a2db9cb`. One line: inside the retry
+coroutine's `synchronized(lifecycleLock)` block, set
+`reconnectJob = null` before calling `openStreamLocked()`. Diff is
+`git diff 9406f5f..a2db9cb`.
+
+## What changed
+
+```kotlin
+reconnectJob = scope.launch {
+    delay(delayMs)
+    synchronized(lifecycleLock) {
+        reconnectJob = null   // <- new
+        if (wantRunning) openStreamLocked()
+    }
+}
+```
+
+The retry coroutine retires itself by clearing the `reconnectJob`
+reference under the lock, *before* opening the new stream. A
+synchronous failure on the just-opened stream now sees
+`reconnectJob == null` and schedules the next retry cleanly.
+
+## What to verify
+
+1. **Does the fix actually close Codex 59's RED?** Walk the same
+   scenario:
+   - retry delay fires
+   - coroutine acquires lock
+   - coroutine sets `reconnectJob = null`
+   - coroutine calls `openStreamLocked()` → installs new source
+   - coroutine releases lock (lambda still running)
+   - new stream fires `onFailure` synchronously (e.g., immediate
+     transport 401)
+   - onFailure acquires lock, identity-check passes, clears
+     `current`, calls `scheduleReconnectLocked()`
+   - `scheduleReconnectLocked` checks `reconnectJob?.isActive == true`
+     → `reconnectJob` is null → condition false → proceeds to
+     schedule
+   - new retry coroutine launched, gate works. ✓
+
+2. **Doesn't break stop() ordering.** `stop()` acquires the lock,
+   reads `reconnectJob`, cancels it, nulls it. If `stop()` runs
+   while the retry coroutine is inside its synchronized block:
+   - stop() blocks waiting for the lock
+   - retry coroutine: `reconnectJob = null` (nulled by us);
+     `openStreamLocked` runs (sees `wantRunning=true` since stop
+     hasn't run yet — but wait, stop is waiting for the lock; so
+     `wantRunning=true` here). Opens stream. Sets `current = source`.
+   - coroutine releases lock
+   - stop() acquires lock, sets `wantRunning=false`,
+     `reconnectJob?.cancel()` (null, no-op), nulls `reconnectJob`,
+     reads `current = source`, sets `current = null`, cancels source.
+   - End state: clean shutdown. ✓
+
+   If `stop()` runs while the retry coroutine is in `delay()`:
+   - stop() acquires lock first, cancels `reconnectJob`, sets it null,
+     wantRunning=false. Releases lock.
+   - coroutine's delay() throws CancellationException → coroutine
+     dies without running the synchronized block. ✓
+
+3. **Doesn't break the case where the retry coroutine succeeds.**
+   The new stream's `onOpen` fires later (not synchronously). By
+   then `reconnectJob` is already null. `onOpen` resets
+   `reconnectAttempt = 0`, emits `streamReady`. No reconnect needed
+   while the stream is healthy. ✓
+
+4. **Any other path that could leak a stranded-live-session state?**
+   E.g., `start()` after a real-401 logout drained the token — does
+   anything restart the stream when the user logs back in? Expected:
+   re-login → new session → UI navigates back to InboxScreen →
+   ON_RESUME → `start()` → opens new stream. Confirm this is the
+   intended teardown/rebuild path.
+
+## Diff to review
+
+```
+git diff 9406f5f..a2db9cb
+  android/core/network/src/main/kotlin/.../EventStreamManager.kt
+    +reconnectJob = null  (inside the retry coroutine's
+                          synchronized block, before openStreamLocked)
+    + 8 lines of comment explaining why
+```
+
+## Output
+
+Per reviewer:
+1. Per-finding green / yellow / red.
+2. New concerns.
+3. Overall: **LAND PHASE 2** / specific blockers / hold.
+
+If both reviewers green, Phase 3a (templates renderer) starts.
+
+codex
+I’ll review the exact diff and surrounding lifecycle code before giving the greenlight. I’m going to focus on the retry job identity, lock ordering, and any state path that could leave `wantRunning` true without a stream or scheduled retry.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff --stat 9406f5f..a2db9cb' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff 9406f5f..a2db9cb -- android/core/network/src/main/kotlin' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "class EventStreamManager|reconnectJob|scheduleReconnectLocked|openStreamLocked|fun start|fun stop|onFailure|onOpen|wantRunning|current" android/core/network/src/main/kotlin' in D:\Projects\syncler
+ succeeded in 241ms:
+android/core/network/src/main/kotlin\app\syncler\core\network\SynclerApi.kt:139:    @Json(name = "current_state_version") val currentStateVersion: Int,
+android/core/network/src/main/kotlin\app\syncler\core\network\SynclerApi.kt:140:    @Json(name = "current_encrypted_blob") val currentEncryptedBlob: String,
+android/core/network/src/main/kotlin\app\syncler\core\network\NetworkModule.kt:43:                val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:3:import java.util.concurrent.TimeUnit
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:33: * or a reconnect is scheduled); [stop] cancels the current stream AND
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:50:class EventStreamManager @Inject constructor(
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:78:     * mutating portions of the SSE listener callbacks (`onOpen`,
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:79:     * `onClosed`, `onFailure`). Closes the Codex consultation 58
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:81:     * could leave `wantRunning == true` with `current == null` and no
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:92:     * The EventSource we currently consider "ours". Mutated only while
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:98:    private var current: EventSource? = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:106:    private var wantRunning: Boolean = false
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:112:    private var reconnectJob: Job? = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:115:     * Current reconnect attempt count. Reset on successful onOpen.
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:126:            .retryOnConnectionFailure(true)
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:137:    fun start() {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:139:            wantRunning = true
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:140:            openStreamLocked()
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:144:    /** Cancel the current stream + any pending reconnect. */
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:145:    fun stop() {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:147:            wantRunning = false
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:148:            reconnectJob?.cancel()
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:149:            reconnectJob = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:151:            val p = current
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:152:            current = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:159:    private fun openStreamLocked() {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:160:        if (!wantRunning) return
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:161:        if (current != null) return
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:162:        val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:164:            Timber.tag(TAG).w("openStreamLocked() called without a session token; ignoring")
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:179:        current = source
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:183:    private fun scheduleReconnectLocked() {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:184:        if (!wantRunning) return
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:185:        if (reconnectJob?.isActive == true) return
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:190:        reconnectJob = scope.launch {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:195:                // openStreamLocked, and if the just-opened stream fails
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:196:                // synchronously its onFailure callback would hit the
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:197:                // `reconnectJob?.isActive == true` guard above and silently
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:199:                // `wantRunning=true, current=null, no reconnect` until a
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:201:                reconnectJob = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:202:                if (wantRunning) openStreamLocked()
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:208:        override fun onOpen(eventSource: EventSource, response: Response) {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:210:                if (current !== eventSource) false
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:227:            if (current !== eventSource) return
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:241:                if (current !== eventSource) return@synchronized
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:242:                current = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:244:                if (wantRunning) scheduleReconnectLocked()
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:248:        override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:251:                if (current !== eventSource) return@synchronized
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:252:                current = null
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:264:                //    token is still current before logging out.
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:269:                //    when AuthScreen takes over) sets wantRunning=false.
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:273:                if (wantRunning) scheduleReconnectLocked()
+android/core/network/src/main/kotlin\app\syncler\core\network\EventStreamManager.kt:296: * implementation MUST verify this still matches the session's current
+android/core/network/src/main/kotlin\app\syncler\core\network\AuthTokenProvider.kt:4:    fun currentToken(): String?
+
+ succeeded in 245ms:
+diff --git a/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt b/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt
+index 86d40d7..21b141f 100644
+--- a/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt
++++ b/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt
+@@ -190,6 +190,15 @@ class EventStreamManager @Inject constructor(
+         reconnectJob = scope.launch {
+             delay(delayMs)
+             synchronized(lifecycleLock) {
++                // Retire ourselves before opening the new stream. Otherwise
++                // the retry coroutine's Job remains isActive while we call
++                // openStreamLocked, and if the just-opened stream fails
++                // synchronously its onFailure callback would hit the
++                // `reconnectJob?.isActive == true` guard above and silently
++                // skip scheduling the next retry — leaving the user with
++                // `wantRunning=true, current=null, no reconnect` until a
++                // lifecycle event. (Codex consultation 59 RED.)
++                reconnectJob = null
+                 if (wantRunning) openStreamLocked()
+             }
+         }
+
+ succeeded in 256ms:
+ .../main/kotlin/app/syncler/core/network/EventStreamManager.kt   | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+codex
+The diff is exactly scoped to the retry handoff. I’m reading the full manager now to check whether clearing `reconnectJob` early interacts with `start()`, `stop()`, stale callbacks, and 401 logout handling outside the highlighted path.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt' in D:\Projects\syncler
+ succeeded in 240ms:
+package app.syncler.core.network
+
+import java.util.concurrent.TimeUnit
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlin.math.min
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
+import okhttp3.sse.EventSources
+import org.json.JSONObject
+import timber.log.Timber
+
+/**
+ * Phase 2: server event stream client.
+ *
+ * Opens a Server-Sent Events stream to `GET /v1/events` while the app
+ * is in the foreground, and translates incoming events into a
+ * [SharedFlow<ServerEvent>] that feature-layer collectors subscribe to.
+ *
+ * Lifecycle: [start] is idempotent (no-op if a stream is already open
+ * or a reconnect is scheduled); [stop] cancels the current stream AND
+ * any pending reconnect cleanly. The Android UI layer binds these to
+ * `Lifecycle.Event.ON_RESUME` / `ON_PAUSE`.
+ *
+ * Reactive freshness model replaces the V1 polling loop:
+ *  - SSE delivers hints (inbox.changed, state.changed, dismiss) while
+ *    the app is in foreground.
+ *  - Transient network failures auto-reconnect with exponential backoff
+ *    (Codex consultation 56 RED #13) so a network flip doesn't strand
+ *    the user until the next lifecycle event.
+ *  - 401 (bootstrap token / device-revoked / other auth failure) is
+ *    treated as terminal: the manager calls `onAuthFailure` so the
+ *    auth layer can clear the session and route to login.
+ *  - FCM remains the background-wakeup path (Doze kills any
+ *    long-lived stream the moment the app backgrounds anyway).
+ */
+@Singleton
+class EventStreamManager @Inject constructor(
+    private val httpClient: OkHttpClient,
+    private val tokenProviders: Set<@JvmSuppressWildcards AuthTokenProvider>,
+    private val authFailureHandler: AuthFailureHandler,
+) {
+    private val _events = MutableSharedFlow<ServerEvent>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+    val events: SharedFlow<ServerEvent> = _events.asSharedFlow()
+
+    /**
+     * Emits Unit once the SSE handshake actually completes (server
+     * acknowledged the subscription). Collectors use this to do a
+     * "catchup" refresh AFTER the stream is open ג€” closes the small
+     * race where `start()` returns before subscription is live and an
+     * event landed during that gap is missed (Codex consultation 56
+     * RED #9).
+     */
+    private val _streamReady = MutableSharedFlow<Unit>(
+        replay = 0,
+        extraBufferCapacity = 4,
+    )
+    val streamReady: SharedFlow<Unit> = _streamReady.asSharedFlow()
+
+    /**
+     * Single monitor that serializes every lifecycle/state transition:
+     * `start`, `stop`, `openStream`, `scheduleReconnect`, and the
+     * mutating portions of the SSE listener callbacks (`onOpen`,
+     * `onClosed`, `onFailure`). Closes the Codex consultation 58
+     * compound-transition race where stop() interleaved with openStream()
+     * could leave `wantRunning == true` with `current == null` and no
+     * reconnect scheduled.
+     *
+     * The lock is uncontended in the common case (one open stream, one
+     * lifecycle thread, occasional okhttp dispatcher callbacks) and
+     * never held across a suspend point ג€” all suspending work (`delay`
+     * in reconnect) happens outside the lock.
+     */
+    private val lifecycleLock = Any()
+
+    /**
+     * The EventSource we currently consider "ours". Mutated only while
+     * holding [lifecycleLock]; reads are also locked except for the
+     * identity check in `onEvent` (the high-frequency hot path), where
+     * volatility is enough ג€” a stale read just drops the event safely.
+     */
+    @Volatile
+    private var current: EventSource? = null
+
+    /**
+     * Tracks whether we've been asked to be running by lifecycle.
+     * Reconnect attempts only fire while this is true so a backgrounded
+     * app doesn't spin up new streams via the retry path.
+     */
+    @Volatile
+    private var wantRunning: Boolean = false
+
+    /**
+     * Active reconnect job. Cancelled on `stop()` so a queued retry
+     * after pause doesn't open a stream the user can't see.
+     */
+    private var reconnectJob: Job? = null
+
+    /**
+     * Current reconnect attempt count. Reset on successful onOpen.
+     * Used to compute exponential backoff (1s, 2s, 4s, 8s, 16s, 30s cap).
+     */
+    @Volatile
+    private var reconnectAttempt: Int = 0
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val sseFactory by lazy {
+        val sseClient = httpClient.newBuilder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+        EventSources.createFactory(sseClient)
+    }
+
+    /**
+     * Open a stream if one isn't already open. Returns immediately;
+     * the stream runs in the background and surfaces events through
+     * the [events] flow. Collectors that need a "stream is now live"
+     * signal observe [streamReady].
+     */
+    fun start() {
+        synchronized(lifecycleLock) {
+            wantRunning = true
+            openStreamLocked()
+        }
+    }
+
+    /** Cancel the current stream + any pending reconnect. */
+    fun stop() {
+        val prev = synchronized(lifecycleLock) {
+            wantRunning = false
+            reconnectJob?.cancel()
+            reconnectJob = null
+            reconnectAttempt = 0
+            val p = current
+            current = null
+            p
+        }
+        prev?.cancel()
+        Timber.tag(TAG).i("event stream closed")
+    }
+
+    private fun openStreamLocked() {
+        if (!wantRunning) return
+        if (current != null) return
+        val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+        if (token.isNullOrBlank()) {
+            Timber.tag(TAG).w("openStreamLocked() called without a session token; ignoring")
+            return
+        }
+        val request = Request.Builder()
+            .url(BuildConfig.SERVER_BASE_URL.trimEnd('/') + "/v1/events")
+            .header("Authorization", "Bearer $token")
+            .header("Accept", "text/event-stream")
+            .build()
+        // Listener is per-stream so it captures the token used for this
+        // handshake; the 401 path passes that token back through
+        // AuthFailureHandler so the auth layer can ignore stale 401s
+        // for tokens the session no longer holds (Codex 57 RED #12).
+        // newEventSource returns immediately; the actual handshake runs
+        // asynchronously on the okhttp dispatcher.
+        val source = sseFactory.newEventSource(request, makeListener(token))
+        current = source
+        Timber.tag(TAG).i("event stream opening (attempt=%d)", reconnectAttempt)
+    }
+
+    private fun scheduleReconnectLocked() {
+        if (!wantRunning) return
+        if (reconnectJob?.isActive == true) return
+        val attempt = ++reconnectAttempt
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
+        val delayMs = min(1_000L * (1L shl (attempt - 1).coerceAtMost(5)), 30_000L)
+        Timber.tag(TAG).i("scheduling SSE reconnect attempt=%d in %dms", attempt, delayMs)
+        reconnectJob = scope.launch {
+            delay(delayMs)
+            synchronized(lifecycleLock) {
+                // Retire ourselves before opening the new stream. Otherwise
+                // the retry coroutine's Job remains isActive while we call
+                // openStreamLocked, and if the just-opened stream fails
+                // synchronously its onFailure callback would hit the
+                // `reconnectJob?.isActive == true` guard above and silently
+                // skip scheduling the next retry ג€” leaving the user with
+                // `wantRunning=true, current=null, no reconnect` until a
+                // lifecycle event. (Codex consultation 59 RED.)
+                reconnectJob = null
+                if (wantRunning) openStreamLocked()
+            }
+        }
+    }
+
+    private fun makeListener(token: String) = object : EventSourceListener() {
+        override fun onOpen(eventSource: EventSource, response: Response) {
+            val accepted = synchronized(lifecycleLock) {
+                if (current !== eventSource) false
+                else {
+                    reconnectAttempt = 0
+                    true
+                }
+            }
+            if (!accepted) return
+            Timber.tag(TAG).d("SSE open (status=%d)", response.code)
+            // Emit outside the lock ג€” collectors may do work in their
+            // tryEmit handler; no need to hold the lifecycle lock across.
+            _streamReady.tryEmit(Unit)
+        }
+
+        override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+            // Hot path: lock-free identity check. A stale read drops the
+            // event safely; correctness is preserved by the mutating
+            // callbacks which take the lock.
+            if (current !== eventSource) return
+            val parsed = ServerEvent.parse(type, data)
+            if (parsed == null) {
+                Timber.tag(TAG).w("ignoring SSE event with unknown/bad payload: type=%s", type)
+                return
+            }
+            val accepted = _events.tryEmit(parsed)
+            if (!accepted) {
+                Timber.tag(TAG).w("SSE event dropped ג€” buffer full: %s", type)
+            }
+        }
+
+        override fun onClosed(eventSource: EventSource) {
+            synchronized(lifecycleLock) {
+                if (current !== eventSource) return@synchronized
+                current = null
+                Timber.tag(TAG).i("SSE closed by server")
+                if (wantRunning) scheduleReconnectLocked()
+            }
+        }
+
+        override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+            var terminal401 = false
+            synchronized(lifecycleLock) {
+                if (current !== eventSource) return@synchronized
+                current = null
+                val code = response?.code
+                terminal401 = (code == 401)
+                if (terminal401) {
+                    Timber.tag(TAG).w("SSE rejected with 401; signalling auth failure")
+                } else {
+                    Timber.tag(TAG).w(t, "SSE failure (status=%s); will retry", code)
+                }
+                // Do NOT short-circuit reconnect on 401. Two cases:
+                //  - Stale 401 (session token rolled by a fast re-login):
+                //    the next reconnect picks up the new token and
+                //    succeeds. AuthRepository.onAuthFailure verifies the
+                //    token is still current before logging out.
+                //  - Real terminal 401: AuthRepository.onAuthFailure
+                //    triggers session.logout(), which clears the token.
+                //    The next reconnect attempt sees a null token and
+                //    no-ops; lifecycle teardown (InboxScreen ON_PAUSE
+                //    when AuthScreen takes over) sets wantRunning=false.
+                // Closes Codex consultation 58 concern: a stale 401 must
+                // not strand SSE in a stopped state for an unrelated
+                // session that's still alive.
+                if (wantRunning) scheduleReconnectLocked()
+            }
+            // Auth handler call happens outside the lock ג€” it does
+            // scope.launch internally and we don't want any handler
+            // ordering effects to hold the lifecycle lock.
+            if (terminal401) {
+                authFailureHandler.onAuthFailure(token)
+            }
+        }
+    }
+
+    private companion object {
+        const val TAG = "EventStream"
+    }
+}
+
+/**
+ * Implemented by the auth layer (`AuthRepository` is the production
+ * binding). EventStreamManager calls [onAuthFailure] when the server
+ * rejects the SSE handshake with 401 ג€” the auth layer is responsible
+ * for clearing the session and surfacing the login UI.
+ *
+ * [failedToken] is the bearer token that triggered the 401. The
+ * implementation MUST verify this still matches the session's current
+ * token before logging out ג€” otherwise a stale 401 from a stream that
+ * was already replaced (e.g., after a fast re-login) could wipe the
+ * newer session (Codex consultation 57 RED #12).
+ *
+ * Defined as an interface in `:core:network` so this module doesn't
+ * depend back on `:core:auth`.
+ */
+interface AuthFailureHandler {
+    fun onAuthFailure(failedToken: String)
+}
+
+/**
+ * A decoded SSE event from `/v1/events`. The server publishes hints
+ * (not authoritative data) ג€” collectors react by calling the existing
+ * REST endpoints to fetch the actual content.
+ */
+sealed class ServerEvent {
+    /** A new inbox message landed for this user. Pull the inbox. */
+    data class InboxChanged(val messageId: String?, val sentAt: String?) : ServerEvent()
+
+    /** The encrypted user-state blob changed. Pull /v1/state. */
+    data class StateChanged(val version: Int) : ServerEvent()
+
+    /** Another device dismissed a message. Update local state. */
+    data class Dismiss(val messageId: String, val sourceDeviceId: String?) : ServerEvent()
+
+    companion object {
+        fun parse(type: String?, data: String): ServerEvent? = runCatching {
+            val obj = JSONObject(data)
+            when (type) {
+                "inbox.changed" -> InboxChanged(
+                    messageId = obj.optString("message_id").takeIf { it.isNotEmpty() },
+                    sentAt = obj.optString("sent_at").takeIf { it.isNotEmpty() },
+                )
+                "state.changed" -> StateChanged(version = obj.getInt("version"))
+                "dismiss" -> Dismiss(
+                    messageId = obj.getString("message_id"),
+                    sourceDeviceId = obj.optString("source_device_id").takeIf { it.isNotEmpty() },
+                )
+                else -> null
+            }
+        }.getOrNull()
+    }
+}
+
+codex
+Codex: **GREEN**
+
+1. **Closes Codex 59 RED: green.** Clearing `reconnectJob` under `lifecycleLock` before `openStreamLocked()` fixes the exact self-active-job race. If the newly opened stream fails immediately, `onFailure` now sees `reconnectJob == null`, clears `current`, and schedules the next retry instead of being blocked by the retry coroutine’s own active `Job`.
+
+2. **Doesn’t break `stop()` ordering: green.** The lock serialization still gives clean outcomes:
+   - If `stop()` waits behind the retry coroutine, it cancels the newly opened `current` afterward.
+   - If `stop()` wins before or during the retry’s lock wait, `wantRunning=false` prevents the retry block from reopening.
+   - `reconnectJob?.cancel()` becoming a no-op after the retry retires itself is fine because the stream is represented by `current` at that point.
+
+3. **Successful retry path: green.** `reconnectJob = null` before a healthy stream opens is the correct steady state. `onOpen` still identity-checks `current`, resets `reconnectAttempt`, and emits `streamReady`.
+
+4. **Other stranded-live-session paths: green with existing caveat accepted.** The real-401 path can still intentionally end at `wantRunning=true, current=null, reconnectJob=null` if logout clears the token before lifecycle pause, because `openStreamLocked()` no-ops on missing token. That is already documented as relying on auth navigation/lifecycle teardown, and re-login rebuilds via screen resume/start. This change does not worsen that path.
+
+New concerns: none from this diff.
+
+Overall: **LAND PHASE 2**.
+tokens used
+10,547
+Codex: **GREEN**
+
+1. **Closes Codex 59 RED: green.** Clearing `reconnectJob` under `lifecycleLock` before `openStreamLocked()` fixes the exact self-active-job race. If the newly opened stream fails immediately, `onFailure` now sees `reconnectJob == null`, clears `current`, and schedules the next retry instead of being blocked by the retry coroutine’s own active `Job`.
+
+2. **Doesn’t break `stop()` ordering: green.** The lock serialization still gives clean outcomes:
+   - If `stop()` waits behind the retry coroutine, it cancels the newly opened `current` afterward.
+   - If `stop()` wins before or during the retry’s lock wait, `wantRunning=false` prevents the retry block from reopening.
+   - `reconnectJob?.cancel()` becoming a no-op after the retry retires itself is fine because the stream is represented by `current` at that point.
+
+3. **Successful retry path: green.** `reconnectJob = null` before a healthy stream opens is the correct steady state. `onOpen` still identity-checks `current`, resets `reconnectAttempt`, and emits `streamReady`.
+
+4. **Other stranded-live-session paths: green with existing caveat accepted.** The real-401 path can still intentionally end at `wantRunning=true, current=null, reconnectJob=null` if logout clears the token before lifecycle pause, because `openStreamLocked()` no-ops on missing token. That is already documented as relying on auth navigation/lifecycle teardown, and re-login rebuilds via screen resume/start. This change does not worsen that path.
+
+New concerns: none from this diff.
+
+Overall: **LAND PHASE 2**.

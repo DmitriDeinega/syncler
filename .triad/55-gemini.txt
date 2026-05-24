@@ -1,0 +1,29 @@
+The Phase 1 fix-up (round 2) implementation in commit `20326df` successfully addresses the legacy migration ownership issues identified in consultation 54. By moving the migration trigger from a passive `init` block to an explicit, authenticated ownership-proof call in `AuthRepository.login`, the multi-user race condition (RED #2) is effectively closed.
+
+### Threat Scenario Evaluation
+
+1.  **Multi-user shared device — base case: [GREEN]**
+    The ownership check in `AuthRepository.login` ensures that only pairings recognized by the server for the *currently logged-in user* are imported from the device-scoped legacy storage. User A's legacy entries will not match User B's server-side list and will thus be ignored.
+
+2.  **Single-user warm start: [GREEN]**
+    `migratePhase1Owned` is invoked on every login. The `phase1MigrationDoneAt` flag (synced per-user) ensures that once a user has successfully migrated on any of their devices, subsequent logins on the same or other devices will short-circuit.
+
+3.  **Pre-Phase-1 device with no pairings: [GREEN]**
+    The logic handles empty legacy storage gracefully. It still sets `phase1MigrationDoneAt` in the synced state, ensuring we don't repeatedly scan empty legacy prefs on every login.
+
+4.  **Network failure during listPairings: [GREEN]**
+    The `runCatching` block in `AuthRepository` silently swallows network failures during the ownership-list fetch. Since the flag is only set inside `migratePhase1Owned` (which wouldn't be called or wouldn't finish), the migration remains pending and will retry on the next successful login.
+
+5.  **Concurrent re-merge race: [GREEN]**
+    `SyncedPairedSenderStore` performs a double-check on `phase1MigrationDoneAt`: once outside the lock for efficiency, and again *inside* the `mutateAndPush` transform. This correctly absorbs concurrent updates from other devices. Additionally, filtering against the actual snapshot (`existingIds` and `activeSenders`) inside the transform prevents stale legacy data from overwriting more recent changes.
+
+6.  **Cross-user legacy entry ownership: [GREEN]**
+    Since `api.listPairings()` is scoped to the authenticated session, it is impossible for User B to "prove" ownership of User A's revoked or active pairings. The `revokedAt == null` filter further ensures only currently valid pairings can trigger a migration.
+
+### New Concerns
+None identified. The use of `Timber` for deferred migration logging is appropriate, and the addition of the `migratePhase1Owned` interface method provides a clean, testable contract.
+
+### Overall Status: GREEN-LIGHT
+The ownership-proof model is robust and preserves data integrity across multi-user and multi-device scenarios. Phase 1 is verified closed.
+
+**Proceed to Phase 2 (SSE event stream + remove polling).**

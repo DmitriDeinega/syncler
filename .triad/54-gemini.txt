@@ -1,0 +1,34 @@
+I have reviewed the fix-up diff (`c5ba03e..274557f`) against the findings from Consultation 53. The implementation effectively closes both RED-level architectural risks and all YELLOW-level logic refinements.
+
+### 1. Per-Finding Review (1-6)
+
+| # | Sev | Finding | Status | Evaluation |
+|---|-----|---------|--------|------------|
+| 1 | **RED** | Cold-start `lastSince` jump | **GREEN** | **(a)** `activeFlow` now initializes synchronously from `mutator.state.value`, eliminating the async gap where `InboxRepository` could see an empty pairing list. **(b)** `sawMissingPairing` logic in `InboxRepository` correctly holds the cursor when pairings are pending sync. |
+| 2 | **RED** | Multi-user migration leak | **GREEN** | The combination of `isUnlocked` gating and the per-user `phase1MigrationDoneAt` flag in the synced state provides strong isolation. Since `EncryptedUserState` is user-scoped and encrypted with the user's master key, migration is now strictly per-session and per-user. |
+| 3 | YELLOW | Lexical ISO sorting | **GREEN** | `compareIsoTimestamps` helper correctly handles variable-length ISO strings by parsing them to `Instant`. Applied consistently across `StateMerger`, `SyncedPairedSenderStore`, and `InboxRepository`. |
+| 4 | YELLOW | Migration sender filter | **GREEN** | `migrateLegacyEntriesIfNeeded` now excludes legacy entries if an active (non-tombstoned) synced pairing for the same `senderId` already exists, preventing stale legacy data from clobbering newer manual pairings. |
+| 5 | YELLOW | Tombstone drop in `add()` | **GREEN** | Filter updated to `it.pairingId == new.id && it.removedAt == null`. This preserves tombstones while maintaining idempotency for active pairings. The `StateMerger` "tombstone wins" rule ensures that even if an active duplicate is temporarily added, the tombstone survives the next merge. |
+| 6 | YELLOW | Store direct testing | **GREEN** | Acknowledged. Logic is verified via `SyncedPairedSenderStoreTest` (including the new `isUnlocked` flow in the fake mutator). Full instrumented coverage is appropriately deferred to the infra pass. |
+
+### 2. Pressure-Test Analysis
+
+*   **`isUnlocked` propagation:** The use of `SharingStarted.Eagerly` and explicitly passing `session.sessionState.value.isUnlocked` as the initial value to `stateIn` ensures that the `StateFlow` is ready with the correct value immediately upon repository construction. This prevents a race where `SyncedPairedSenderStore` might miss the "true" state on a warm start.
+*   **`phase1MigrationDoneAt` merge semantics:** The merge logic (`earlier non-null wins`) is idempotent and monotone. Once set, it can never revert to `null`. Using `compareIsoTimestamps` for the tie-breaker ensures deterministic behavior across devices.
+*   **`sawMissingPairing` cursor hold:** This is a safe "fail-closed" approach. While it could theoretically stall on a permanent unknown sender (spam), in the Syncler architecture, messages are typically only delivered if a pairing exists on the server. The safety benefit for cold-start/migration significantly outweighs the risk of a stalled cursor.
+*   **Tombstone fix in `add()`:** The logic correctly separates the "rotation" of old pairings for the same sender from the "deduplication" of the specific pairing ID being added. Preserving the tombstone even on a retry is correct for CRDT-like consistency.
+
+### 3. Overall Recommendation
+
+**GREEN-LIGHT: Phase 1 fix-ups are verified and complete.**
+
+The architectural gaps around multi-user safety and cold-start synchronization are resolved. The codebase is now in a stable state to begin **Phase 2 (SSE event stream + removal of polling)**.
+
+```mermaid
+graph LR
+    P1[Phase 1 Fix-ups] --> |Verified| P2[Phase 2: SSE Stream]
+```
+
+**Topic Update:**
+- **Status:** Phase 1 Verified.
+- **Next:** Implementing SSE event stream for real-time inbox updates.

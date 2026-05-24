@@ -1,0 +1,68 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+Unable to determine encoding for windows code page 862.
+C:\Users\Dima\AppData\Roaming\npm\node_modules\@google\gemini-cli\node_modules\@lydell\node-pty\conpty_console_list_agent.js:11
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\Dima\AppData\Roaming\npm\node_modules\@google\gemini-cli\node_modules\@lydell\node-pty\conpty_console_list_agent.js:11:26)
+    at Module._compile (node:internal/modules/cjs/loader:1812:14)
+    at Object..js (node:internal/modules/cjs/loader:1943:10)
+    at Module.load (node:internal/modules/cjs/loader:1533:32)
+    at Module._load (node:internal/modules/cjs/loader:1335:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47
+
+Node.js v24.14.1
+C:\Users\Dima\AppData\Roaming\npm\node_modules\@google\gemini-cli\node_modules\@lydell\node-pty\conpty_console_list_agent.js:11
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\Dima\AppData\Roaming\npm\node_modules\@google\gemini-cli\node_modules\@lydell\node-pty\conpty_console_list_agent.js:11:26)
+    at Module._compile (node:internal/modules/cjs/loader:1812:14)
+    at Object..js (node:internal/modules/cjs/loader:1943:10)
+    at Module.load (node:internal/modules/cjs/loader:1533:32)
+    at Module._load (node:internal/modules/cjs/loader:1335:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47
+
+Node.js v24.14.1
+The round-2 fix-up in `1f76df3` addresses all high-severity findings from Codex consultation 57. The transition to atomic state management in `EventStreamManager` and token-scoped auth failure handling in `AuthRepository` provides the necessary robustness against the concurrency issues identified in the SSE implementation.
+
+### 1. #13 Stale Callback Ownership
+*   **Fix**: Rewrote `EventStreamManager` to use `AtomicReference<EventSource?>` (`currentRef`) instead of a volatile property. 
+*   **Verification**:
+    *   **Identity Guard**: `onOpen` and `onEvent` now use `currentRef.get() !== eventSource` to immediately discard callbacks from replaced or canceled streams.
+    *   **Terminal CAS**: `onClosed` and `onFailure` use `currentRef.compareAndSet(eventSource, null)`. This ensures that only the callback from the *currently active* stream can null out the reference or trigger a reconnect.
+    *   **Safe Lifecycle**: `stop()` uses `getAndSet(null)` and then cancels the returned source, ensuring the manager is logically detached before the physical cancellation. `openStream()` uses a double-gated approach (pre-check `wantRunning`, CAS install, post-CAS recheck `wantRunning`) that effectively handles the race between `start()` and `stop()`.
+*   **Verdict**: **GREEN**. The race windows are closed or self-healing.
+
+### 2. #12 Token-Scoped Auth Failure
+*   **Fix**: Modified `AuthFailureHandler.onAuthFailure(failedToken: String)` and updated `AuthRepository` to gate `logout()` on token equality.
+*   **Verification**:
+    *   The `EventStreamManager` per-stream listener now captures the specific token used for the handshake and passes it back on 401.
+    *   `AuthRepository` compares `failedToken` with `session.currentToken()`. Stale 401s from old streams (e.g., after a quick re-login) are correctly ignored.
+    *   The use of `scope.launch` in `AuthRepository` ensures that the comparison happens on the IO thread with the latest session state.
+*   **Verdict**: **GREEN**.
+
+### 3. Per-stream Listener and GC
+*   **Analysis**: `makeListener(token)` creates a fresh listener for each stream. Since the listener is an anonymous object, it captures the `token` string. When the `EventSource` is canceled and cleared from `currentRef`, both the listener and the captured token are eligible for garbage collection. There is no evidence of a leak or excessive allocation.
+*   **Verdict**: **GREEN**.
+
+### 4. Phase 3a Dismiss-Filtering Tracking
+*   **Analysis**: The addition to `.triad/50-agreement-and-plan.md` clearly defines the current limitation (server inbox query doesn't filter `dismissed_at`) and the planned fix for Phase 3a. This satisfies the requirement for explicit tracking.
+*   **Verdict**: **GREEN**.
+
+### 5. New concerns
+*   **Threading**: `reconnectJob` is not volatile, but its usage is shielded by the volatile `wantRunning` check in both `scheduleReconnect` and `openStream`. Any "lost" cancellation of a `reconnectJob` results in a no-op coroutine execution that dies immediately on the `wantRunning` check. This is acceptable.
+*   **Identity vs Equality**: The use of `!==` (identity) for the `EventSource` check is correct as it specifically guards against the exact object instance.
+
+### Overall Verdict: **LAND PHASE 2**
+
+Phase 2 is now verified and ready for completion. Phase 3a (Templates Renderer) can proceed as planned.

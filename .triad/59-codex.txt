@@ -1,0 +1,34 @@
+**Codex Verdict: HOLD**
+
+1. **RED: retry coroutine can suppress the next reconnect via its own active `reconnectJob`.**  
+   [EventStreamManager.kt](D:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt:190)
+   `scheduleReconnectLocked()` gates on `reconnectJob?.isActive == true`. The retry coroutine keeps that same `Job` active while it re-enters the lock and calls `openStreamLocked()`:
+   ```kotlin
+   reconnectJob = scope.launch {
+       delay(delayMs)
+       synchronized(lifecycleLock) {
+           if (wantRunning) openStreamLocked()
+       }
+   }
+   ```
+   Race:
+   1. reconnect delay fires;
+   2. coroutine enters lock and opens a new EventSource;
+   3. coroutine releases the lock but its `Job` has not yet fully completed;
+   4. the new stream immediately `onFailure`/`onClosed`;
+   5. callback takes the lock, clears `current`, calls `scheduleReconnectLocked()`;
+   6. `reconnectJob?.isActive == true`, so scheduling is skipped;
+   7. coroutine completes, leaving `wantRunning=true / current=null / no reconnect`.
+   This is the same class of stranded-live-session failure, now through the retry job active gate rather than CAS undo. Fix is straightforward: clear the consumed reconnect job before calling `openStreamLocked()` from the retry coroutine, or make `scheduleReconnectLocked()` ignore the currently firing job.
+2. **GREEN: lock discipline otherwise looks sound.**  
+   I do not see the monitor held across suspend points. `delay()` is outside the lock, `authFailureHandler.onAuthFailure(token)` is outside the lock, and `prev.cancel()` in `stop()` is outside the lock.
+3. **GREEN: stale listener callbacks are identity-guarded correctly.**  
+   `onOpen`, `onClosed`, and `onFailure` re-check `current !== eventSource` under the monitor. `stop()` nulls `current` under the same monitor before cancelling, so stale queued callbacks no-op.
+4. **YELLOW: 401 fallthrough behavior is conceptually correct, but inherits the reconnect-job race.**  
+   The stale-token and real-token auth behavior is better than round 2. The “one or two extra 401s before logout completes” cost is acceptable. But a fast repeated 401 from the reconnect-opened stream can hit the active-job suppression above and strand the stream until lifecycle restarts it.
+5. **GREEN: lock-free `onEvent` identity check is acceptable.**  
+   With `current` volatile, stale stream events are either dropped or delivered only while that source is still current. I do not see a cross-stream delivery bug.
+**Overall: HOLD**
+Specific blocker: clear or retire `reconnectJob` before the retry coroutine calls `openStreamLocked()`, so a failure/close of the just-opened retry stream can always schedule the next retry.
+tokens used
+19,963

@@ -1,0 +1,42 @@
+I would not start Phase 3a yet. Both reviewers land on **specific fix-ups**, not a design hold.
+
+**Per-Task Verdicts**
+| # | Reviewer A | Reviewer B |
+|---|---|---|
+| 1 | yellow | yellow |
+| 2 | yellow | yellow |
+| 3 | green | green |
+| 4 | green | green |
+| 5 | yellow | yellow |
+| 6 | red | yellow |
+| 7 | red | yellow |
+| 8 | green | green |
+| 9 | red | red |
+| 10 | green | green |
+| 11 | yellow | yellow |
+| 12 | red | red |
+| 13 | red | red |
+| 14 | yellow | yellow |
+| 15 | yellow | green |
+
+**Line-Level Concerns**
+- [server/app/services/events.py](D:/Projects/syncler/server/app/services/events.py:128): event IDs are assigned under the lock, but enqueue happens after releasing it. Two concurrent publishers can assign `id=1`, `id=2`, then enqueue `2` before `1`. If IDs imply delivery order, fix by enqueueing under the same lock; `put_nowait` is non-blocking.
+
+- [android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:171) + [EventStreamManager.kt](D:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt:84): `onForeground()` calls `start()` then immediately refreshes, but `start()` returns before the server has subscribed the stream. Events after the refresh snapshot and before SSE open are missed. Do a second catchup refresh from `onOpen`, or expose an “opened” event and refresh after that.
+
+- [EventStreamManager.kt](D:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt:68): the comment says reconnects are handled by OkHttp, but this manager does not schedule a new `EventSource` after `onFailure`. After a transient foreground failure, freshness depends on lifecycle/manual/FCM only.
+
+- [EventStreamManager.kt](D:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/EventStreamManager.kt:125): 401 only logs. Nothing clears the session or routes to login, so Phase 2’s “401 triggers re-login” behavior is not implemented.
+
+- [InboxScreen.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:432): the top bar only has search; no manual refresh is wired. With polling removed, this is now an important recovery path.
+
+- [server/app/routers/events.py](D:/Projects/syncler/server/app/routers/events.py:65): stream auth is only checked at handshake. Device revocation closes streams, but JWT expiry does not. If the 24h expiry is a real cap, add max stream age / periodic token revalidation.
+
+- [server/tests/test_events.py](D:/Projects/syncler/server/tests/test_events.py:223) and [server/tests/test_events.py](D:/Projects/syncler/server/tests/test_events.py:261): these test bus subscription directly, not the actual `StreamingResponse`. Missing coverage: real SSE event delivery, heartbeat bytes over HTTP, queue overflow behavior, and actual stream closure on revoke.
+
+**Overall**
+Reviewer A: **specific fix-ups before landing**. The main blockers are the refresh/SSE-open race, no foreground reconnect, no 401 re-login path, no manual refresh, and the bus ordering race.
+
+Reviewer B: **specific fix-ups before Phase 3a**, not a redesign. The in-process bus and heartbeat choices are acceptable for this phase if single-worker deployment is explicitly enforced, but removing polling makes the client recovery paths too thin as-is.
+
+Verification note: I tried `pytest server/tests/test_events.py -q`, but this environment is missing `httpx`. I also tried Android compile; Gradle failed on wrapper/user-home lock/unzip issues before Kotlin compilation.

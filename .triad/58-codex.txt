@@ -1,0 +1,21 @@
+**Codex Review Verdict: HOLD**
+
+Per-finding status:
+- **#13 stale callback ownership: YELLOW/RED residual.**  
+  The stale callback guards are correct: `onOpen`/`onEvent` use identity checks, and `onClosed`/`onFailure` use `compareAndSet(eventSource, null)`. That closes the original stale-callback logout/retry/nulling issue.
+  Residual race remains in `openStream()` post-CAS undo at `EventStreamManager.kt:171`:  
+  `stop()` can run before the new source is installed, then `openStream()` installs it, reads `wantRunning == false`, and before its CAS-undo a new `start()` can set `wantRunning = true`, see `currentRef != null`, and return. The old `openStream()` then CAS-removes/cancels the source. End state: `wantRunning == true`, `currentRef == null`, no reconnect scheduled. So the “self-heals” claim is not always true.
+- **#12 token-scoped auth failure: GREEN for session safety.**  
+  `onAuthFailure(failedToken)` reads `session.currentToken()` inside the launched coroutine and only logs out on equality. That closes the stale-401-clears-new-session bug. JWT equality collision across logins is acceptable to treat as effectively impossible.
+- **#9 stale `streamReady`: GREEN.**  
+  Old streams can no longer emit `streamReady` after replacement/cancel because `onOpen` checks `currentRef.get() !== eventSource`.
+- **Per-stream listener closure: GREEN.**  
+  Fresh listener per `openStream(token)` is fine. Capturing the token is the right shape; allocation and GC cost are negligible.
+- **Phase 3a dismiss tracking: GREEN.**  
+  The new section is explicit and actionable: it names the current defect, server-side filter, and client verification expectation.
+New concerns:
+- A stale/current 401 can still set `wantRunning = false` in `EventStreamManager` before `AuthRepository` decides the token is stale and skips logout. That no longer wipes auth, but it can leave SSE stopped after a re-login unless a later lifecycle event restarts it. This is less severe than #12, but it is another sign the manager should either serialize lifecycle/open transitions or token-check before treating 401 as terminal.
+Verification: attempted Gradle compile, but it could not complete in this sandbox due Gradle wrapper/cache file access issues.
+Overall: **HOLD**, with the specific blocker being the remaining lifecycle race around post-CAS undo/start. A small serialization strategy around `start`/`stop`/`openStream`, or a post-undo restart check that cannot be beaten by `start()`, should close it.
+tokens used
+97,037

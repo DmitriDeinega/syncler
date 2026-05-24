@@ -1,0 +1,28 @@
+**Commit Strategy**
+Split into 3 commits after blockers are fixed. The phases are logically separable: 3a does not need `card_type`, 3b does not need mute UI, and split commits will make future bisects much cleaner.
+
+**Verdicts**
+3a: **red**. Template rendering is structurally OK, but action POST leaks auth.
+3b: **red**. Live-card path has several server-side protocol/security gaps.
+3c: **red/yellow**. Mute merge is acceptable for V1 with the stated tradeoff, but sheet revoke and filtering semantics need fixes.
+**Blockers**
+- `android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/TemplateCard.kt:191`: `TemplateActionRunner` uses the app singleton `OkHttpClient`; `android/core/network/src/main/kotlin/app/syncler/core/network/NetworkModule.kt:66` injects the Syncler bearer token into any request. A plugin-controlled action endpoint can receive the user’s Syncler auth token. Use an unauthenticated client for template actions.
+- `server/app/services/cards.py:44`: live-card plugin lookup does not filter `Plugin.revoked_at.is_(None)`, so revoked plugins can still upsert.
+- `server/app/services/cards.py:42`: live-card upsert does not verify an active `(sender_id, user_id)` pairing, unlike messages at `server/app/services/messages.py:60` and `server/app/services/messages.py:111`.
+- `server/app/schemas.py:213` / `server/app/routers/cards.py:94`: `expires_at` is caller-controlled and has no 48h cap/server-set enforcement. If the contract is “server-set 48h TTL,” this is a hard mismatch.
+- `server/app/routers/cards.py:146`: delete signs only `sender_id:card_key`, then `server/app/routers/cards.py:157` picks a card by sender/card key without `user_id`; because uniqueness is `(sender_id, user_id, card_key)`, duplicate card keys across users can delete the wrong row.
+- `android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxScreen.kt:425` and `:431`: Archive and Sender views filter from `items`, not `nonMuted`, so muted senders can still appear there.
+- `android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:162`: settings-sheet revoke only tombstones local/synced paired state. It does not call the server revoke path used by `PairingRepository.revoke()` at `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt:102`.
+**Confirmed OK**
+- `card_type` / `card_key_path` persistence is fixed: `server/app/services/plugins.py:151`.
+- `/v1/messages/inbox` shape is reconciled: server returns `items` at `server/app/routers/messages.py:217`, Android expects `items` at `SynclerApi.kt:284`.
+- Dismiss filtering is correct: LEFT JOIN plus `dismissed_at IS NULL` keeps rows with no delivery-status row at `server/app/services/messages.py:195`.
+- Live-card AAD includes sender/user/plugin/card key/sequence/expires/card type on Android at `Aad.kt:62`; client merge keeps max sequence at `InboxRepository.kt:132` and `:194`.
+- SSE upsert/delete events are published in `server/app/routers/cards.py:124` and `:170`, and Android parses them at `EventStreamManager.kt:342`.
+**Tests To Add**
+Server: template publish goldens, malformed manifests, inbox dismiss filter, live-card upsert/delete, revoked-plugin upsert rejection, no-active-pairing upsert rejection, TTL cap/server-set behavior, duplicate-card-key delete targeting.
+Android: `resolveJsonPath`, `TemplateCard` action callback, template action must not send Authorization, dismiss SSE refresh, live-card max-sequence merge, mute filtering across All/Unread/Live/Archive/Sender.
+Storage: V0-V5 `EncryptedUserState` round trip, `StateMerger` muted union, `MuteStore` effective set including local unmute override.
+Overall: **not ready to commit**. Fix the blockers, rerun `./gradlew assembleDebug`, then run server pytest locally with Postgres available.
+tokens used
+87,570

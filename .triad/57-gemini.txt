@@ -1,0 +1,59 @@
+All fix-ups from commit `2d5e21b` successfully address the risks identified in Consultation 56. The implementation is robust and follows the requested architectural patterns.
+
+### 1. #7 Bus Ordering Race: **GREEN**
+*   **Analysis:** Moving `put_nowait` inside the `async with self._lock` block ensures that both the global ID assignment and the per-subscriber enqueuing are atomic relative to other publishers.
+*   **Safety:** Since `put_nowait` is non-blocking and never awaits, there is no risk of deadlock or long-held locks even under high concurrency or full queues. The use of `asyncio.QueueFull` catch-and-log is the correct strategy for a "hint-only" channel.
+
+### 2. #9 Catchup Race: **GREEN**
+*   **Analysis:** The introduction of `streamReady: SharedFlow<Unit>` correctly bridges the gap between `EventStreamManager.start()` and the actual SSE handshake. 
+*   **Reconnection:** Because `_streamReady.tryEmit(Unit)` fires inside `onOpen`, it will correctly trigger a catchup refresh every time a connection is established, including after transient failures and automatic reconnections. This ensures no events are missed during any downtime.
+
+### 3. #12 Auth Failure: **GREEN**
+*   **Analysis:** The `AuthFailureHandler` interface prevents circular dependencies while allowing the network layer to signal the auth layer.
+*   **Racing/Safety:** Calling `logout()` on 401 is terminal and safe. Since the `EventStreamManager` is lifecycle-bound to the `InboxScreen`, it won't be competing with an active login process on the `AuthScreen`. If a background stream hits a 401 while the user is foregrounded, clearing the session is the correct "fail-safe" response.
+
+### 4. #13 Reconnect: **GREEN**
+*   **Analysis:** Exponential backoff (1s to 30s) is correctly implemented. 
+*   **Ordering:** The `@Volatile` `wantRunning` flag combined with `reconnectJob?.cancel()` in `stop()` prevents "zombie" reconnections from starting after the app has been backgrounded. The logic correctly handles the race between a failing connection scheduling a retry and a lifecycle event cancelling it.
+
+### 5. #6 Max-Age: **YELLOW** (Residual Gap)
+*   **Analysis:** The fixed `_MAX_STREAM_AGE_SECONDS` (24h - 1m) bounds the stream life, which is a major improvement.
+*   **Residual Gap:** Because it uses a fixed duration from the *start* of the stream rather than the `exp` claim of the token used, a stream could technically outlive its token if the token was already old when the connection was opened.
+*   **Acceptability:** For Phase 2, this is acceptable. The 25s extra delay from the heartbeat loop is negligible. I recommend hardening this in a future phase by extracting the `exp` claim from the JWT during the handshake and passing that deadline to the stream loop.
+
+### 6. Manual Refresh: **GREEN**
+*   **Analysis:** The refresh button provides a clear recovery path for users if the reactive transport (SSE/FCM) fails. It correctly calls the existing `viewModel.refresh()`.
+
+### 7. Dismiss Handler: **DEFERRED**
+*   **Status:** Deferring server-side dismissal filtering to Phase 3a is acceptable. The current SSE transport is ready to carry the `dismiss` event; the business logic for filtering the "snapshot" pull can land with the template renderer.
+
+---
+
+### Overall Recommendation: **LAND PHASE 2**
+
+The fix-ups have closed all "RED" findings. The remaining "YELLOW" (Max-Age precision) is a minor hardening task that does not block the landing of the core transport. 
+
+**Next Step:** Proceed to **Phase 3a (Templates Renderer & Selection UI)**.
+
+I have completed the review of the Phase 2 fix-ups in commit `2d5e21b`.
+
+### Per-Finding Review
+
+*   **#7 Bus Ordering Race: GREEN**
+    Enqueuing under the same lock as ID assignment ensures strict per-subscriber ordering. Since `put_nowait` is non-blocking, this is safe and deadlock-free.
+*   **#9 Catchup Race: GREEN**
+    The `streamReady` signal correctly triggers a post-handshake refresh, covering the gap between the initial foreground check and the live subscription. It correctly fires on both initial connection and reconnections.
+*   **#12 Auth Failure: GREEN**
+    The 401 handler correctly triggers a session logout, stopping the stream and routing the user to login. The interface separation between `:core:network` and `:core:auth` is well-maintained.
+*   **#13 Reconnect: GREEN**
+    Exponential backoff (1s-30s) is correctly implemented. The `wantRunning` guard and job cancellation in `stop()` ensure the stream does not spin up in the background.
+*   **#6 Max-Age: YELLOW**
+    Bounding the stream to ~24h prevents indefinite leakage. While it doesn't currently sync with the exact `exp` claim of the token, this is an acceptable proactive measure for Phase 2.
+*   **Manual Refresh: GREEN**
+    The refresh button is correctly surfaced in the TopAppBar, providing a necessary UX recovery path.
+*   **Dismiss Handler: DEFERRED**
+    Deferring server-side filtering logic to Phase 3a is acceptable.
+
+### Overall Status: **LAND PHASE 2**
+
+The fix-up commit successfully addresses all high-severity findings. The project is clear to move to **Phase 3a (Templates Renderer)**.

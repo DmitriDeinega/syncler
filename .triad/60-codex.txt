@@ -1,0 +1,13 @@
+Codex: **GREEN**
+
+1. **Closes Codex 59 RED: green.** Clearing `reconnectJob` under `lifecycleLock` before `openStreamLocked()` fixes the exact self-active-job race. If the newly opened stream fails immediately, `onFailure` now sees `reconnectJob == null`, clears `current`, and schedules the next retry instead of being blocked by the retry coroutine’s own active `Job`.
+2. **Doesn’t break `stop()` ordering: green.** The lock serialization still gives clean outcomes:
+   - If `stop()` waits behind the retry coroutine, it cancels the newly opened `current` afterward.
+   - If `stop()` wins before or during the retry’s lock wait, `wantRunning=false` prevents the retry block from reopening.
+   - `reconnectJob?.cancel()` becoming a no-op after the retry retires itself is fine because the stream is represented by `current` at that point.
+3. **Successful retry path: green.** `reconnectJob = null` before a healthy stream opens is the correct steady state. `onOpen` still identity-checks `current`, resets `reconnectAttempt`, and emits `streamReady`.
+4. **Other stranded-live-session paths: green with existing caveat accepted.** The real-401 path can still intentionally end at `wantRunning=true, current=null, reconnectJob=null` if logout clears the token before lifecycle pause, because `openStreamLocked()` no-ops on missing token. That is already documented as relying on auth navigation/lifecycle teardown, and re-login rebuilds via screen resume/start. This change does not worsen that path.
+New concerns: none from this diff.
+Overall: **LAND PHASE 2**.
+tokens used
+10,547

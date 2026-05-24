@@ -1,0 +1,29 @@
+**Codex Review**
+
+#1: **Green, with a cursor caveat.** Synchronous `activeFlow` init closes the empty-projection cold-start gap, and holding `lastSince` on missing pairings prevents skipping decryptable-after-sync messages. Caveat below: the hold is broader than migration cases.
+
+#2: **Red. Blocker.** Session-gating is not enough to prove the legacy prefs belong to the unlocked user. `migrateLegacyEntriesIfNeeded()` still reads device-scoped legacy records and imports them whenever the current synced state has `phase1MigrationDoneAt == null` ([PairedSenderStore.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/PairedSenderStore.kt:234)). On a shared device, user A’s legacy prefs can still be imported into user B after B logs in, especially before the first `userState.pull()` wins the race. The fix needs an ownership proof, likely by checking legacy `pairingId`s against server pairings for the current user before importing.
+
+#3: **Green.** `compareIsoTimestamps()` is used in the production sites called out: active projection, `bySenderId`, inbox decrypt ordering, and `StateMerger`.
+
+#4: **Yellow.** The active-`senderId` exclusion is correct for the local snapshot, but `toAdd` is computed before `mutateAndPush` and then applied to `current` without recomputing against `current` ([PairedSenderStore.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/PairedSenderStore.kt:248)). A concurrent pull/merge can make the filter stale. This is secondary to #2 but should be fixed by moving the filtering inside the mutation transform.
+
+#5: **Green in production.** The active-only duplicate filter preserves same-`pairingId` tombstones while keeping retry-add idempotent ([PairedSenderStore.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/PairedSenderStore.kt:179)).
+
+#6: **Yellow.** Production-store coverage remains absent. Also, the JVM duplicate test is now stale: it still drops any same-`pairingId` entry and still uses lexical `maxByOrNull` ([SyncedPairedSenderStoreTest.kt](D:/Projects/syncler/android/core/storage/src/test/kotlin/app/syncler/core/storage/SyncedPairedSenderStoreTest.kt:171), [line 195](D:/Projects/syncler/android/core/storage/src/test/kotlin/app/syncler/core/storage/SyncedPairedSenderStoreTest.kt:195)). So it does not currently exercise every production semantic.
+
+**Pressure Tests**
+
+`isUnlocked` propagation looks consistent: `stateIn(..., initialValue = session.sessionState.value.isUnlocked)` matches the current session value, and StateFlow replay means downstream collectors get the latest value. Warm start with only stored token is still locked because `masterKey == null`; after `authenticate`, true is visible.
+
+`phase1MigrationDoneAt` merge semantics are green: once either side is non-null, merge never returns null; earlier timestamp wins deterministically.
+
+`sawMissingPairing` unknown-spam concern: server send does require an active pairing before storing messages, so true unknown-sender spam should not land. New yellow: messages sent before a later pairing revoke can still be returned by inbox, while the client has tombstoned the pairing and filters it out, so cursor hold can stall until expiry.
+
+First-launch timing is not green because migration can run immediately on `isUnlocked == true` before the initial `pull()` has loaded the current user’s remote state.
+
+**Overall**
+
+Do **not** green-light Phase 1 yet. Blocker is #2: migration still lacks a reliable current-user ownership check for legacy records. I would fix that before Phase 2.
+
+Verification note: targeted Gradle tests could not run. Global Gradle wrapper cache hit `Access is denied`; retrying with repo-local `GRADLE_USER_HOME` failed while unzipping the wrapper distribution.

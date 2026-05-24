@@ -1,0 +1,46 @@
+**Findings**
+
+1. **RED, Reviewer B:** Cold-start / first-upgrade refresh can skip decryptable messages and still advance `lastSince`.
+`PairedSenderStore.kt:116,124,136` starts with an empty async projection and async legacy migration. `InboxRepository.kt:85,89-102,130` snapshots that possibly-empty list, skips messages, then advances the cursor. This can lose messages for the process session. Fix before Phase 2.
+
+2. **RED, Reviewer A:** Legacy migration is not session/user gated.
+`PairedSenderStore.kt:201` migrates legacy local pairings from singleton init, with no current-user ownership check. On reused/shared app data, old local pairings can be written into whichever user state is loaded next. This should be gated or otherwise made explicitly single-user-safe before landing.
+
+3. **YELLOW:** Timestamp ordering regressed outside `StateMerger`.
+`PairedSenderStore.kt:129,186` and `InboxRepository.kt:233` compare ISO strings lexically. The merger already learned this lesson and parses `Instant`; same issue can choose the wrong “newest” pairing.
+
+4. **YELLOW:** Migration can reintroduce an old same-sender pairing as active.
+`PairedSenderStore.kt:209-214` dedupes only by `pairingId`. If current state already has a newer manual pairing for the same `senderId`, a legacy different-`pairingId` entry is appended active.
+
+5. **YELLOW:** Defensive tombstone resurrection exists in `add()`.
+`PairedSenderStore.kt:158-159` filters out an existing same-`pairingId` entry, including a tombstone, then appends an active new entry. UUID reuse is “impossible in practice”, but this violates tombstone monotonicity defensively.
+
+6. **YELLOW:** Production store is not directly tested.
+`SyncedPairedSenderStoreTest.kt:146-153` duplicates production logic instead of constructing `SyncedPairedSenderStore`, so tests miss async projection, Android Base64, encrypted prefs migration, and flag behavior.
+
+**Per-Task Status**
+
+| Task | Reviewer A | Reviewer B |
+|---|---|---|
+| 1. `source` / migration discriminator | GREEN | GREEN |
+| 2. V3 -> V4 coverage | GREEN | GREEN |
+| 3. Tombstone GC deferred | GREEN | GREEN |
+| 4. Re-pair atomic transform | GREEN | GREEN |
+| 5. First-launch migration race | RED: user/session and async race | RED: can skip messages before migration/projection |
+| 6. Migration flag location | GREEN: local flag is the right scope | GREEN |
+| 7. Multi-key ordering | YELLOW: tries all keys, but old-key transient after tombstone not covered | YELLOW: string timestamp ordering |
+| 8. `activePairingsForSender` callers | YELLOW: callers mostly tolerate, but `bySenderId` hides multiplicity | YELLOW |
+| 9. Tombstone resurrection integration | YELLOW: same `pairingId` `add()` resurrects | YELLOW |
+| 10. Legacy local store wipe | YELLOW: leave is operationally okay, but retains stale secrets | YELLOW |
+| 11. Test coverage | YELLOW: add Robolectric or refactor for real production test | YELLOW |
+| 12. Latent bugs / `confirm` | YELLOW: local-first push failure is acceptable if intended, but startup/migration bugs block | YELLOW |
+
+**Overall**
+
+Reviewer A: **hold for fix-ups before landing**, mainly migration ownership/session gating plus async projection risk.
+
+Reviewer B: **specific fix-ups before landing**, mainly cold-start/upgrade skip and timestamp ordering.
+
+My combined recommendation: **do not start Phase 2 yet**. Fix the cold-start/upgrade cursor loss and migration safety first; then add at least one production-level store test or refactor the store logic so tests exercise the real projection/migration path.
+
+Verification: targeted Gradle tests could not run. The wrapper failed before compilation with `Access is denied` on the Gradle wrapper lock under `C:\Users\Dima\.gradle\wrapper\...gradle-8.11.1-bin.zip.lck`.
