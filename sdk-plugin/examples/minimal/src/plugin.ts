@@ -2,21 +2,16 @@ import { BasePlugin, DismissBehavior, Capability, registerPlugin } from '@syncle
 
 // Reference plugin demonstrating the script renderer path end-to-end.
 //
-// `bundleHash` and `signature` below are placeholders meant to be filled
-// in by `tools/sign-bundle.ts` after `build.sh` produces `dist/plugin.bundle.js`.
-// The two-step flow is intentional: you can't compute `bundleHash` until
-// the bundle exists, and you can't sign without the bundle hash. See
-// `sdk-plugin/README.md` and `docs/integration-guide.md §4` for the full
-// build → sign → publish cycle.
-//
-// The SDK's `validatePluginManifest` rejects this manifest as-written
-// (post Phase 4.1) because both fields fail the 64/128 hex length check —
-// that's the whole point of validation: the unsigned manifest cannot be
-// published. `sign-bundle.ts` reads this file, computes SHA-256 over the
-// built bundle, signs `(canonical manifest || bundleHash)` with Ed25519,
-// and writes a NEW file `manifest.signed.json` with `bundleHash` and
-// `signature` populated. The signed file is what you ship to the server.
-// `manifest.json` stays as the human-edited source-of-truth.
+// `bundleHash` and `signature` below are placeholders. The in-bundle
+// source manifest can't know its own bundle hash or signature: those are
+// produced by `tools/sign-bundle.ts` post-build and written to
+// `manifest.signed.json` on disk (NOT back into this JS source). The
+// runtime `registerPlugin` call accepts placeholders because the host
+// already validated the bundle against the authoritative server-stored
+// signed manifest at publish time. Publish-side tooling
+// (sign-bundle.ts, server, SDK `publish_plugin`) keeps the strict
+// 64/128-hex check. See `sdk-plugin/README.md` and
+// `docs/integration-guide.md §4`.
 export class MinimalPlugin extends BasePlugin {
   static manifest = {
     id: 'com.example.minimal',

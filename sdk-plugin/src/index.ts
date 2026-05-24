@@ -29,6 +29,7 @@ export {
   isPluginManifest,
   validatePluginManifest,
   type PluginManifest,
+  type ValidatePluginManifestOptions,
 } from './manifest';
 export { EndpointNotDeclaredError, assertEndpointDeclared, isEndpointDeclared, network } from './network';
 export { notifications, showNotification } from './notifications';

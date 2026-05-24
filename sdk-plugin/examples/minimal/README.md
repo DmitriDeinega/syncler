@@ -35,4 +35,8 @@ This is a script-renderer example with no backend round-trip. A full plugin + ba
 
 ## Why the placeholders look weird
 
-`bundleHash: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE'` (and the same for `signature`) is deliberate: the SDK's `validatePluginManifest` rejects this as-written (requires 64-hex `bundleHash` + 128-hex `signature`). That's by design — an unsigned manifest can't be published. The placeholder is loud rather than `'00'` so the failure mode is obvious if you forget step 2.
+`bundleHash: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE'` (and the same for `signature`) is deliberate: the in-bundle source manifest can't know its own bundle hash or signature (those are produced by `tools/sign-bundle.ts` post-build and stored in `manifest.signed.json` on disk, never written back into the JS source). The placeholder is loud rather than `'00'` so an unsigned manifest is obviously a "still-needs-signing" intermediate.
+
+`validatePluginManifest` has two modes:
+- **Publish-time** (default): strict — `bundleHash` must be 64 hex, `signature` must be 128 hex. The server, sign-bundle, and SDK `publish_plugin` helpers use this.
+- **Runtime** (`{ allowUnsignedPlaceholders: true }`): lenient — placeholders pass. `registerPlugin` uses this because the host has the authoritative server-side signed values from publish; the bundle's own copy is informational.

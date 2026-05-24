@@ -91,6 +91,32 @@ describe('BasePlugin', () => {
     await expect(dispatchPluginHook('onAction', ['open', {}])).rejects.toThrow('action boom');
     await expect(dispatchPluginHook('onDismiss', ['device-1'])).rejects.toThrow('dismiss boom');
   });
+
+  it('registerPlugin accepts the unsigned placeholder hash/signature (Phase 5b)', () => {
+    class PlaceholderPlugin extends BasePlugin {
+      static manifest = {
+        id: 'com.example.placeholder',
+        name: 'Placeholder',
+        version: '1.0.0',
+        senderId: 'com.example.sender',
+        // The in-bundle source manifest can't know the bundle's own hash /
+        // signature. sign-bundle.ts produces them post-build into
+        // manifest.signed.json on disk; the JS source keeps the placeholders.
+        bundleHash: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE',
+        signature: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE',
+        declaredCapabilities: [Capability.STORAGE],
+        declaredEndpoints: [],
+        dismissBehavior: DismissBehavior.DISMISS_LOCAL_ONLY,
+        minPlatformVersion: '1.0.0',
+      };
+
+      render(): string {
+        return '<div>placeholder</div>';
+      }
+    }
+
+    expect(() => registerPlugin(new PlaceholderPlugin())).not.toThrow();
+  });
 });
 
 function manifestFor(id: string) {

@@ -14,10 +14,17 @@ let registeredPlugin: BasePlugin | undefined;
 
 /**
  * Registers the plugin instance that should receive native bridge dispatches.
+ *
+ * The in-bundle source manifest cannot know its own bundleHash/signature
+ * (those are produced by `tools/sign-bundle.ts` post-build and stored in
+ * `manifest.signed.json`, not back into the JS source). The host has the
+ * authoritative signed values from the server, so the runtime check here
+ * accepts placeholder values. Publish-side validation (server, sign tool,
+ * SDK helpers) keeps the strict 64/128-hex check.
  */
 export function registerPlugin(plugin: BasePlugin): void {
   const manifest = (plugin.constructor as typeof BasePlugin).manifest;
-  assertPluginManifest(manifest);
+  assertPluginManifest(manifest, { allowUnsignedPlaceholders: true });
   registeredPlugin = plugin;
   setRegisteredManifest(manifest);
 }

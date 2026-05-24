@@ -33,11 +33,11 @@ export class MinimalPlugin extends BasePlugin {
     name: 'Minimal',
     version: '1.0.0',
     senderId: 'com.example.sender',
-    // Placeholders until you run sign-bundle.ts (see §"Signing" below).
-    // The SDK validator REJECTS these — that's the point: an unsigned
-    // manifest cannot be published. Build the bundle, then run the
-    // signer, which rewrites this file with the real 64-hex bundleHash
-    // and 128-hex Ed25519 signature.
+    // The in-bundle source manifest can't know its own bundle hash or
+    // signature — those are produced by sign-bundle.ts post-build into
+    // manifest.signed.json, not back into this JS source. registerPlugin
+    // accepts placeholders at runtime; the publish-side validator (server,
+    // sign-bundle, client.publish_plugin) enforces 64/128-hex strict mode.
     bundleHash: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE',
     signature: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE',
     declaredCapabilities: [],
@@ -65,7 +65,7 @@ npx tsx tools/sign-bundle.ts \
   examples/minimal/manifest.signed.json
 ```
 
-The signer reads the unsigned `manifest.json`, computes SHA-256 over the bundle, signs `(canonical manifest || bundleHash)` with Ed25519, and writes a NEW file `manifest.signed.json` with `bundleHash` + `signature` populated. The original `manifest.json` is the human-edited source-of-truth and is left unchanged. `manifest.signed.json` is what passes `validatePluginManifest` and what your backend ships to `client.publish_plugin(...)`.
+The signer reads the unsigned `manifest.json`, computes SHA-256 over the bundle, signs `(canonical manifest || bundleHash)` with Ed25519, and writes a NEW file `manifest.signed.json` with `bundleHash` + `signature` populated. The original `manifest.json` is the human-edited source-of-truth and is left unchanged. `manifest.signed.json` is what passes strict `validatePluginManifest` and what your backend ships to `client.publish_plugin(...)`. The runtime `registerPlugin` path uses lenient `validatePluginManifest(..., { allowUnsignedPlaceholders: true })`, since the host validates the loaded bundle against the server-stored signed values rather than the bundle's own embedded copy.
 
 The native host calls `__syncler_internal_dispatch(hook, args)` after loading the plugin bundle. Plugin bundles should register exactly one plugin instance with `registerPlugin`.
 

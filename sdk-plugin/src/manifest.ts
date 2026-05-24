@@ -99,6 +99,24 @@ const allDismissBehaviors = new Set<string>(Object.values(DismissBehavior));
 let activeManifest: PluginManifest | undefined;
 
 /**
+ * Options for [validatePluginManifest] and [assertPluginManifest].
+ */
+export interface ValidatePluginManifestOptions {
+  /**
+   * When true, accepts any non-empty string for `bundleHash` and `signature`
+   * (skipping the hex format + 64/128-length checks). The runtime path —
+   * `registerPlugin` inside a loaded bundle — uses this because:
+   *  - the in-bundle source manifest can't know its own bundle hash or
+   *    signature (those are produced by `tools/sign-bundle.ts` and written
+   *    to `manifest.signed.json` on disk, not back into the JS source);
+   *  - the host doesn't trust these fields from the loaded bundle anyway —
+   *    it has the authoritative signed values from the server side.
+   * Publish-time tooling and server validators keep the default (false).
+   */
+  allowUnsignedPlaceholders?: boolean;
+}
+
+/**
  * Returns true when `value` is a valid plugin manifest.
  */
 export function isPluginManifest(value: unknown): value is PluginManifest {
@@ -108,8 +126,12 @@ export function isPluginManifest(value: unknown): value is PluginManifest {
 /**
  * Validates unknown JSON-like data as a `PluginManifest`.
  */
-export function validatePluginManifest(value: unknown): { valid: true; manifest: PluginManifest } | { valid: false; issues: string[] } {
+export function validatePluginManifest(
+  value: unknown,
+  options: ValidatePluginManifestOptions = {},
+): { valid: true; manifest: PluginManifest } | { valid: false; issues: string[] } {
   const issues: string[] = [];
+  const allowUnsignedPlaceholders = options.allowUnsignedPlaceholders === true;
 
   if (!isRecord(value)) {
     return { valid: false, issues: ['manifest must be an object'] };
@@ -130,6 +152,7 @@ export function validatePluginManifest(value: unknown): { valid: true; manifest:
   // server rejects at publish time with a 422, but the SDK should have
   // caught it locally. (External DX review, lottery-claude, Phase 4.1 #1.)
   requireString(value, 'bundleHash', issues, (hash) => {
+    if (allowUnsignedPlaceholders) return;
     if (!hexPattern.test(hash)) {
       issues.push('bundleHash must be hex');
     } else if (hash.length !== 64) {
@@ -140,6 +163,7 @@ export function validatePluginManifest(value: unknown): { valid: true; manifest:
     }
   });
   requireString(value, 'signature', issues, (signature) => {
+    if (allowUnsignedPlaceholders) return;
     if (!hexPattern.test(signature)) {
       issues.push('signature must be hex');
     } else if (signature.length !== 128) {
@@ -226,8 +250,11 @@ export function validatePluginManifest(value: unknown): { valid: true; manifest:
 /**
  * Validates a manifest and throws `ManifestValidationError` when invalid.
  */
-export function assertPluginManifest(value: unknown): asserts value is PluginManifest {
-  const result = validatePluginManifest(value);
+export function assertPluginManifest(
+  value: unknown,
+  options?: ValidatePluginManifestOptions,
+): asserts value is PluginManifest {
+  const result = validatePluginManifest(value, options);
   if (!result.valid) {
     throw new ManifestValidationError(result.issues);
   }

@@ -67,4 +67,38 @@ describe('validatePluginManifest', () => {
     });
     expect(result.valid).toBe(false);
   });
+
+  it('accepts placeholder bundleHash/signature when allowUnsignedPlaceholders is true (Phase 5b: runtime path)', () => {
+    const result = validatePluginManifest(
+      {
+        ...validManifest,
+        bundleHash: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE',
+        signature: 'UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE',
+      },
+      { allowUnsignedPlaceholders: true },
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it('still rejects empty bundleHash when allowUnsignedPlaceholders is true', () => {
+    const result = validatePluginManifest(
+      { ...validManifest, bundleHash: '' },
+      { allowUnsignedPlaceholders: true },
+    );
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.issues).toContain('bundleHash must be a non-empty string');
+    }
+  });
+
+  it('still rejects unknown capabilities when allowUnsignedPlaceholders is true', () => {
+    const result = validatePluginManifest(
+      { ...validManifest, declaredCapabilities: ['telepathy'] },
+      { allowUnsignedPlaceholders: true },
+    );
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.issues).toContain('unknown capability: telepathy');
+    }
+  });
 });
