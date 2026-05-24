@@ -27,6 +27,11 @@ RATE_LIMITS: dict[str, RateLimitConfig] = {
     # Phase 3b: live cards. 1 per second per card (60/min).
     "card_upsert_ip": RateLimitConfig(name="card_upsert_ip", max_count=120, window_seconds=60),
     "card_upsert": RateLimitConfig(name="card_upsert", max_count=60, window_seconds=60),
+    # V1.5 Phase 5a-2: bootstrap key registration / rotation. Per
+    # sender, 5 per 5min — key rotation is rare. Applied AFTER signature
+    # verification (see senders.register_bootstrap_key) so a spoofer
+    # can't inflate another sender's bucket.
+    "bootstrap_key_register": RateLimitConfig(name="bootstrap_key_register", max_count=5, window_seconds=300),
 }
 
 # TODO: Wire these dependencies as the pairing, message, manifest, and callback routes are authored.

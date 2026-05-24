@@ -62,13 +62,91 @@ def _b64url_decode(value: str) -> bytes:
 
 
 def _initiate_envelope_bytes(payload: PairingInitiateRequest) -> bytes:
-    """Canonical bytes the sender signs to authenticate the initiate call."""
-    envelope = {
+    """Canonical bytes the sender signs to authenticate the initiate call.
+
+    `sender_broker_url` is conditionally included: when None (V1 manual
+    flow), the envelope keeps the V1 3-field shape so existing senders
+    that don't supply a broker keep verifying. When non-None (V1.5
+    automated flow), it's bound into the signature so the syncler
+    server can't silently substitute its own URL.
+    """
+    envelope: dict = {
         "sender_id": str(payload.sender_id),
         "ttl_seconds": int(payload.ttl_seconds),
         "metadata": payload.metadata or {},
     }
+    if payload.sender_broker_url is not None:
+        envelope["sender_broker_url"] = payload.sender_broker_url
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+# V1.5 automated pairing: validation for the sender-supplied broker URL.
+# Spec: docs/crypto-spec.md §9. Plan: .triad/70-phase5-agreement.md.
+
+
+def _is_private_lan_host(host: str) -> bool:
+    """True if `host` is a private-range IP literal or the exact literal
+    `localhost`. Codex consultation 75 RED #1: do NOT prefix-match DNS
+    names — `127.evil.test` and `localhost.evil.test` would pass a
+    naive `startswith` check. Use `ipaddress.ip_address(...)` for IPs
+    and exact-string match for `localhost`.
+    """
+    import ipaddress
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback
+
+
+def _validate_sender_broker_url(url: str, *, debug_allow_http: bool) -> None:
+    """Raises HTTPException(400) if the URL fails the V1.5 shape check.
+    Release: HTTPS only. Debug: http allowed for private LAN IP literals
+    or exact `localhost` only (DNS names like `127.evil.test` are
+    rejected). No credentials in URL, no fragment, length ≤ 2048 chars,
+    parsable.
+    """
+    from urllib.parse import urlparse
+
+    if len(url) > 2048:
+        raise HTTPException(status_code=400, detail="sender_broker_url exceeds 2048 chars")
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="sender_broker_url is not a valid URL") from exc
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="sender_broker_url scheme must be http(s)")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="sender_broker_url must not contain credentials")
+    if parsed.fragment:
+        raise HTTPException(status_code=400, detail="sender_broker_url must not contain a fragment")
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="sender_broker_url is missing a host")
+    if parsed.scheme == "http":
+        if not debug_allow_http:
+            raise HTTPException(status_code=400, detail="sender_broker_url must use HTTPS in release")
+        if not _is_private_lan_host(parsed.hostname):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "sender_broker_url http only allowed for private-LAN IP "
+                    "literals (10/8, 172.16/12, 192.168/16, 127/8) or exact 'localhost' in debug"
+                ),
+            )
+
+
+def _bootstrap_register_envelope_bytes(payload) -> bytes:
+    """Canonical signing input for the bootstrap-key registration endpoint.
+
+    Signs over the literal ASCII bytes `"syncler-v1-bootstrap-key:"` (24
+    bytes) followed by the raw 32-byte X25519 public key, per
+    `docs/crypto-spec.md §9.1`. NOT the base64 representation.
+    """
+    return b"syncler-v1-bootstrap-key:" + decode_base64(
+        payload.bootstrap_key, field_name="bootstrap_key", exact=32,
+    )
 
 
 @router.post("/initiate", response_model=PairingInitiateResponse, status_code=status.HTTP_201_CREATED)
@@ -93,11 +171,31 @@ async def initiate(
     request.state.sender_id = str(sender.id)
     await check_rate_limit(db, request, RATE_LIMITS["pairing_initiate"])
 
+    # V1.5 automated pairing (Phase 5a-2): if the sender supplied a
+    # broker URL, validate shape + require the sender to have already
+    # registered a bootstrap key (otherwise preview can't surface the
+    # crypto material the device needs).
+    if payload.sender_broker_url is not None:
+        from app.config import get_settings  # local import keeps module import cheap
+        _validate_sender_broker_url(
+            payload.sender_broker_url,
+            debug_allow_http=(get_settings().environment == "development"),
+        )
+        if sender.bootstrap_key is None or sender.bootstrap_key_signature is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "sender_broker_url requires a registered bootstrap key; "
+                    "call POST /v1/senders/me/bootstrap-key first"
+                ),
+            )
+
     pending = await initiate_pairing(
         db,
         sender_id=sender.id,
         ttl_seconds=payload.ttl_seconds,
         metadata=payload.metadata,
+        sender_broker_url=payload.sender_broker_url,
     )
 
     base_url = str(request.base_url).rstrip("/")
@@ -108,6 +206,8 @@ async def initiate(
         pairing_token=_b64url(pending.pairing_token),
         broker_url=broker_url,
         expires_at=pending.expires_at,
+        sender_broker_url=payload.sender_broker_url,
+        bootstrap_protocol_version=(1 if payload.sender_broker_url is not None else None),
     )
 
 
@@ -139,6 +239,21 @@ async def preview(
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
 
     meta = sender_metadata_for_response(sender)
+    # V1.5: surface the bootstrap crypto material to the device when the
+    # sender opted into automated pairing. The device verifies
+    # `bootstrap_key_signature` against `sender_public_key` before
+    # encrypting anything (defense against syncler-side substitution).
+    bootstrap_protocol_version: int | None = None
+    bootstrap_key_b64: str | None = None
+    bootstrap_sig_b64: str | None = None
+    if (
+        pending.sender_broker_url is not None
+        and sender.bootstrap_key is not None
+        and sender.bootstrap_key_signature is not None
+    ):
+        bootstrap_protocol_version = 1
+        bootstrap_key_b64 = _b64(sender.bootstrap_key)
+        bootstrap_sig_b64 = _b64(sender.bootstrap_key_signature)
     return PairingPreviewResponse(
         sender_id=sender.id,
         sender_name=sender.name,
@@ -146,6 +261,10 @@ async def preview(
         sender_public_key_fingerprint=meta["fingerprint"] or "",
         sender_name_hash=meta["name_hash"] or "",
         expires_at=pending.expires_at,
+        sender_broker_url=pending.sender_broker_url,
+        bootstrap_key=bootstrap_key_b64,
+        bootstrap_key_signature=bootstrap_sig_b64,
+        bootstrap_protocol_version=bootstrap_protocol_version,
     )
 
 

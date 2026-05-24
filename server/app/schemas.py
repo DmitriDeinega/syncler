@@ -298,6 +298,15 @@ class PairingInitiateRequest(BaseModel):
     sender_id: UUID
     ttl_seconds: Annotated[int, Field(ge=1, le=900)] = 300
     metadata: dict | None = None
+    # V1.5 automated pairing (Phase 5a-2): sender's broker URL for the
+    # encrypted bootstrap POST. Optional; when None, falls back to V1
+    # manual flow (user types user_id+pairing_key_hex into sender's
+    # backend by hand). The URL is bound to the sender-signed canonical
+    # envelope; the server validates shape (HTTPS in release, private
+    # LAN http only in debug). Named `sender_broker_url` to avoid
+    # collision with `PairingInitiateResponse.broker_url` which means
+    # the Syncler-side broker URL the QR encodes.
+    sender_broker_url: str | None = None
     signature: str  # Ed25519 over canonical body (sender authentication)
 
     @field_validator("signature")
@@ -312,6 +321,11 @@ class PairingInitiateResponse(BaseModel):
     pairing_token: str  # base64
     broker_url: str
     expires_at: datetime
+    # V1.5 automated pairing — echoed from the request, null if the
+    # sender opted out. `bootstrap_protocol_version` is set to 1
+    # whenever `sender_broker_url` is set, absent otherwise.
+    sender_broker_url: str | None = None
+    bootstrap_protocol_version: int | None = None
 
 
 class PairingPreviewResponse(BaseModel):
@@ -321,6 +335,45 @@ class PairingPreviewResponse(BaseModel):
     sender_public_key_fingerprint: str
     sender_name_hash: str
     expires_at: datetime
+    # V1.5 automated pairing — all four fields are present together or
+    # all absent. The device verifies `bootstrap_key_signature` against
+    # the sender's Ed25519 `sender_public_key` BEFORE building the
+    # encrypted envelope (defense against syncler-side key
+    # substitution).
+    sender_broker_url: str | None = None
+    bootstrap_key: str | None = None              # base64 X25519 pub (32 bytes)
+    bootstrap_key_signature: str | None = None    # base64 Ed25519 sig (64 bytes)
+    bootstrap_protocol_version: int | None = None
+
+
+class BootstrapKeyRegisterRequest(BaseModel):
+    """V1.5 (Phase 5a-2): sender registers its X25519 bootstrap public
+    key. Signed by the existing Ed25519 sender key over the literal
+    ASCII bytes `"syncler-v1-bootstrap-key:"` followed by the raw 32-
+    byte X25519 public key. Re-registering rotates the bootstrap key.
+    """
+    sender_id: UUID
+    bootstrap_key: str             # base64 X25519 pub (32 bytes raw)
+    bootstrap_key_signature: str   # base64 Ed25519 sig (64 bytes)
+
+    @field_validator("bootstrap_key")
+    @classmethod
+    def validate_bootstrap_key(cls, value: str) -> str:
+        decode_base64(value, field_name="bootstrap_key", exact=32)
+        return value
+
+    @field_validator("bootstrap_key_signature")
+    @classmethod
+    def validate_bootstrap_key_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="bootstrap_key_signature", exact=64)
+        return value
+
+
+class BootstrapKeyRegisterResponse(BaseModel):
+    """Returns the deterministic `bootstrap_key_id` (first 16 bytes of
+    SHA-256 over the raw X25519 pub key) so the sender can use it for
+    AAD reconstruction without re-hashing client-side."""
+    bootstrap_key_id: str  # base64 16 bytes
 
 
 class PairingCompleteRequest(BaseModel):

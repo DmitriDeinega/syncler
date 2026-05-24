@@ -88,10 +88,14 @@ BOOTSTRAP_EPH_PUB_HEX = "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec8
 BOOTSTRAP_SHARED_SECRET_HEX = "04c304fb1ca83cee75e206344231f33797e07d9929db670994b7c6fbeb1dc255"
 BOOTSTRAP_AEAD_KEY_HEX = "09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31"
 
+# V1.5 bootstrap AAD — `sender_broker_url` named that way to avoid
+# collision with `PairingInitiateResponse.broker_url` (which means the
+# Syncler-side broker URL the QR encodes, an unrelated concept).
 BOOTSTRAP_AAD_JSON = (
-    b'{"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","broker_url":"https://broker.example.com/api/v1",'
+    b'{"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==",'
     b'"exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444",'
-    b'"protocol_version":1,"sender_id":"55555555-6666-7777-8888-999999999999"}'
+    b'"protocol_version":1,"sender_broker_url":"https://broker.example.com/api/v1",'
+    b'"sender_id":"55555555-6666-7777-8888-999999999999"}'
 )
 BOOTSTRAP_NONCE = bytes.fromhex("a0a1a2a3a4a5a6a7a8a9aaab")
 BOOTSTRAP_PLAINTEXT = (
@@ -102,7 +106,7 @@ BOOTSTRAP_CIPHERTEXT_HEX = (
     "e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe31375"
     "7d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee"
     "327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1"
-    "cff20fb71dd2701ee8daad6a9e7276bc04c9f2621575f7f4ec513fd78e252e"
+    "cff20fb71dd2701ee8daad6a9e7276f381ecd54c2bd928e836c28fe6e6dd68"
 )
 
 
@@ -236,7 +240,7 @@ def test_bootstrap_v1_5_vectors() -> None:
     boot_pub_raw = bytes.fromhex(BOOTSTRAP_X25519_PUB_HEX)
     sig_input = b"syncler-v1-bootstrap-key:" + boot_pub_raw
 
-    assert ed_pub.hex() == BOSTRAP_ED25519_PUB_HEX if "BOSTRAP" in locals() else ed_pub.hex() == BOOTSTRAP_ED25519_PUB_HEX
+    assert ed_pub.hex() == BOOTSTRAP_ED25519_PUB_HEX
     assert ed_priv.sign(sig_input).hex() == BOOTSTRAP_SIG_HEX
 
     # 2. HPKE derivation

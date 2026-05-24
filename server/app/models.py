@@ -54,6 +54,12 @@ class Sender(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     contact: Mapped[str | None] = mapped_column(Text)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # V1.5 automated pairing (Phase 5a-2): sender's X25519 bootstrap public
+    # key + Ed25519 signature over `"syncler-v1-bootstrap-key:" || raw_pub`.
+    # Both nullable until the sender opts into the automated pairing flow.
+    # Spec: docs/crypto-spec.md §9.
+    bootstrap_key: Mapped[bytes | None] = mapped_column(LargeBinary)
+    bootstrap_key_signature: Mapped[bytes | None] = mapped_column(LargeBinary)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -253,6 +259,15 @@ class PendingPairing(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict | None] = mapped_column(JSONB_TYPE)
+    # V1.5 automated pairing (Phase 5a-2): sender-operated broker URL that
+    # the device POSTs the encrypted bootstrap envelope to after confirm.
+    # NULL when the sender opted out of automated pairing (V1 manual flow).
+    # Stored on PendingPairing (not Pairing) because the URL is only
+    # consumed during the initiate → preview → bootstrap-POST cycle; the
+    # final Pairing row doesn't need it for ongoing operation. The signed
+    # initiate envelope binds this value so the syncler server can't
+    # substitute it.
+    sender_broker_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

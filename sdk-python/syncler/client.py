@@ -24,6 +24,7 @@ def _canon_uuid(value: str) -> str:
     return str(uuid.UUID(str(value)))
 
 from syncler.preview import HOST_PREVIEW_KEY, validate_host_preview
+from syncler.broker_storage import BrokerStorage
 from syncler.crypto import (
     assemble_envelope,
     b64,
@@ -91,6 +92,7 @@ class Client:
         private_key_path: str,
         base_url: str = DEFAULT_BASE_URL,
         session: requests.Session | None = None,
+        broker_storage: "BrokerStorage | None" = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.sender_name = sender_name
@@ -101,11 +103,16 @@ class Client:
         # State that gets set after register / pairing.
         self.sender_id: str | None = None
         self._pending_pairing_token: str | None = None
+        self._pending_pairing_id: str | None = None
         self._latest_pairing: Pairing | None = None
-        # In V1 the per-pairing AES-GCM key needs to be exchanged with the
-        # user's device during the pairing handshake. Until M7's bootstrap
-        # is fully wired, callers can set this directly for dev.
+        # V1 per-pairing AES-GCM key. Set automatically by
+        # ``wait_for_pairing(...)`` on the V1.5 automated flow; can be
+        # set manually via ``set_pairing(...)`` for the V1 manual flow.
         self.pairing_key: bytes | None = None
+        # V1.5 Phase 5a-2: broker storage the sender's broker handler
+        # writes to AND ``wait_for_pairing(...)`` polls from. None for
+        # senders sticking with the V1 manual flow.
+        self._broker_storage: "BrokerStorage | None" = broker_storage
 
     # ---------------------------- Sender lifecycle -------------------------
 
@@ -147,50 +154,120 @@ class Client:
         ttl_seconds: int = 300,
         metadata: dict[str, Any] | None = None,
         out_path: str | None = None,
+        sender_broker_url: str | None = None,
     ) -> str:
         """Initiate a pairing and write a QR-code PNG of the broker URL.
 
         Returns the path to the generated PNG. Caller is responsible for
         showing the QR to the user.
+
+        V1.5 (Phase 5a-2): pass ``sender_broker_url`` to enable the
+        automated pairing flow. The Android app will POST the encrypted
+        bootstrap envelope to that URL after the user confirms; pair
+        ``Client.wait_for_pairing(...)`` against the same broker storage
+        you mounted the broker handler on. Pre-requisite: register the
+        sender's X25519 bootstrap key via
+        ``Client.register_bootstrap_key(...)`` before calling this with
+        ``sender_broker_url`` set — the server rejects otherwise.
         """
         self._require_sender_id()
-        body = {
+        body: dict[str, Any] = {
             "sender_id": self._canonical_sender_id(),
             "ttl_seconds": ttl_seconds,
             "metadata": metadata or {},
         }
+        if sender_broker_url is not None:
+            body["sender_broker_url"] = sender_broker_url
         body["signature"] = b64(self.private_key.sign(canonical_json(body)))
         resp = self.session.post(f"{self.base_url}/v1/pairing/initiate", json=body, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         self._pending_pairing_token = data["pairing_token"]
+        self._pending_pairing_id = data["pairing_id"]
+        # Reserve broker storage slot when running the automated flow.
+        if sender_broker_url is not None and self._broker_storage is not None:
+            self._broker_storage.reserve(self._pending_pairing_id)
 
         broker_url = data["broker_url"]
         out_path = out_path or f"syncler-pairing-{int(time.time())}.png"
         _render_qr(broker_url, out_path)
         return out_path
 
+    def register_bootstrap_key(
+        self,
+        *,
+        bootstrap_public_key_raw: bytes,
+    ) -> str:
+        """V1.5 Phase 5a-2: register (or rotate) the sender's X25519
+        bootstrap public key. Required before calling
+        ``create_pairing_qr(sender_broker_url=...)``.
+
+        Signs the literal ASCII bytes ``"syncler-v1-bootstrap-key:"``
+        (24 bytes) concatenated with the raw 32-byte X25519 public key,
+        per `docs/crypto-spec.md §9.1`. Returns the base64
+        ``bootstrap_key_id`` (server-computed SHA-256(pub)[:16]).
+        """
+        self._require_sender_id()
+        if len(bootstrap_public_key_raw) != 32:
+            raise ValueError("bootstrap_public_key_raw must be 32 bytes")
+        sig_input = b"syncler-v1-bootstrap-key:" + bootstrap_public_key_raw
+        signature = self.private_key.sign(sig_input)
+        body = {
+            "sender_id": self._canonical_sender_id(),
+            "bootstrap_key": b64(bootstrap_public_key_raw),
+            "bootstrap_key_signature": b64(signature),
+        }
+        resp = self.session.post(
+            f"{self.base_url}/v1/senders/me/bootstrap-key", json=body, timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["bootstrap_key_id"]
+
     def wait_for_pairing(
         self,
         *,
-        timeout_seconds: int = 300,
-        poll_interval_seconds: int = 2,
+        timeout_seconds: int = 120,
+        poll_interval_seconds: float = 1.0,
     ) -> Pairing:
-        """Poll until the user completes pairing (server holds pending row
-        until POST /pairing/complete is called by the user device).
+        """V1.5 Phase 5a-2: poll the broker storage until the device's
+        bootstrap POST lands, then automatically set the pairing on
+        this client.
 
-        V1 implementation: poll /v1/senders/{sender_id}/pairings (TODO: this
-        list endpoint needs to be added server-side). For now this is a
-        placeholder that requires the user_id to be supplied out-of-band
-        once pairing completes (e.g. the user copies it from the device
-        UI). Replace with proper polling once the server endpoint lands.
+        Defaults: 120s timeout, 1s poll with ±20% jitter (jitter avoids
+        synchronized polling when multiple pairings are in flight).
+        Raises ``TimeoutError`` on deadline. Caller must have wired a
+        broker storage via ``Client(...)``'s constructor — otherwise
+        there's nothing to poll.
         """
-        # TODO(M11): once a public "did this token complete?" endpoint exists,
-        # poll it here. For V1 dev the caller passes user_id manually.
-        raise NotImplementedError(
-            "wait_for_pairing requires a server endpoint that's part of M11 polish — "
-            "for dev use, ask the user for the user_id printed on the device after pairing."
-        )
+        import random
+        if self._broker_storage is None:
+            raise SynclerError(
+                "wait_for_pairing requires a broker storage. Pass one to "
+                "Client(broker_storage=InMemoryBrokerStorage()) at construction time.",
+            )
+        if self._pending_pairing_id is None:
+            raise SynclerError(
+                "no pending pairing — call create_pairing_qr(sender_broker_url=...) first",
+            )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            entry = self._broker_storage.fetch(self._pending_pairing_id)
+            if entry is not None:
+                pairing = Pairing(
+                    pairing_id=self._pending_pairing_id,
+                    user_id=entry.user_id,
+                )
+                self._latest_pairing = pairing
+                self.pairing_key = entry.pairing_key
+                return pairing
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"wait_for_pairing exceeded {timeout_seconds}s timeout",
+                )
+            jitter = poll_interval_seconds * 0.2 * (random.random() * 2 - 1)
+            sleep_for = min(remaining, max(0.05, poll_interval_seconds + jitter))
+            time.sleep(sleep_for)
 
     def set_pairing(self, user_id: str, pairing_key: bytes) -> None:
         """Dev-mode shortcut: set the paired user_id and per-pairing AES key.

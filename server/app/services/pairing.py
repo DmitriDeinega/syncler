@@ -60,7 +60,17 @@ async def initiate_pairing(
     sender_id: uuid.UUID,
     ttl_seconds: int,
     metadata: dict[str, Any] | None,
+    sender_broker_url: str | None = None,
 ) -> PendingPairing:
+    """Persist a new pending pairing row.
+
+    `sender_broker_url` is the V1.5 automated-pairing field — when set,
+    the device POSTs the encrypted bootstrap envelope to this URL after
+    the user confirms. NULL when the sender opted out of automated
+    pairing (V1 manual flow). Shape validation and the
+    `bootstrap_key`-must-be-registered check happen in the route layer
+    before this service runs.
+    """
     sender = await get_active_sender(db, sender_id)  # may raise
     ttl = timedelta(seconds=max(1, min(ttl_seconds, int(MAX_TTL.total_seconds()))))
 
@@ -70,6 +80,7 @@ async def initiate_pairing(
         pairing_token=generate_pairing_token(),
         expires_at=datetime.now(UTC) + ttl,
         metadata_json=metadata,
+        sender_broker_url=sender_broker_url,
     )
     db.add(pending)
     await db.commit()

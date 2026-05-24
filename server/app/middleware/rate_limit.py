@@ -141,7 +141,7 @@ def _identify_actor(name: str, request: Request) -> tuple[str, str]:
     if name in {"login", "signup", "message_send_ip", "card_upsert_ip"}:
         return "ip", _client_ip(request)
 
-    if name in {"pairing_initiate", "message_send", "plugin_publish"}:
+    if name in {"pairing_initiate", "message_send", "plugin_publish", "bootstrap_key_register"}:
         return "sender", _required_actor_value(request, "sender_id", "X-Sender-ID")
 
     if name == "message_send_user_hour":

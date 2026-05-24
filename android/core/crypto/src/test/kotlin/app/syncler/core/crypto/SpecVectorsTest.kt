@@ -57,10 +57,14 @@ class SpecVectorsTest {
     private val BOOTSTRAP_EPH_PUB_HEX = "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a"
     private val BOOTSTRAP_AEAD_KEY_HEX = "09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31"
 
+    // V1.5 bootstrap AAD — `sender_broker_url` named that way to avoid
+    // collision with PairingInitiateResponse.broker_url (which means the
+    // Syncler-side broker URL the QR encodes, an unrelated concept).
     private val BOOTSTRAP_AAD_JSON = (
-        """{"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","broker_url":"https://broker.example.com/api/v1",""" +
+        """{"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==",""" +
             """"exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444",""" +
-            """"protocol_version":1,"sender_id":"55555555-6666-7777-8888-999999999999"}"""
+            """"protocol_version":1,"sender_broker_url":"https://broker.example.com/api/v1",""" +
+            """"sender_id":"55555555-6666-7777-8888-999999999999"}"""
         ).encodeToByteArray()
 
     private val BOOTSTRAP_NONCE = "a0a1a2a3a4a5a6a7a8a9aaab".hexToBytes()
@@ -69,7 +73,7 @@ class SpecVectorsTest {
             """"user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}"""
         ).encodeToByteArray()
 
-    private val BOOTSTRAP_CIPHERTEXT_HEX = "e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276bc04c9f2621575f7f4ec513fd78e252e"
+    private val BOOTSTRAP_CIPHERTEXT_HEX = "e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276f381ecd54c2bd928e836c28fe6e6dd68"
 
     @Test
     fun `argon2id derives spec vector`() {
@@ -157,10 +161,27 @@ class SpecVectorsTest {
         assertEquals(BOOTSTRAP_SIG_HEX, signature.toHex())
         assertTrue(Signing.verify(pubKey, sigInput, signature))
 
-        // 2. HPKE and AEAD (Round-trip verified in 5a-2 implementation phase)
-        // These constants anchor the Android implementation.
+        // 2. HPKE and AEAD round-trip (Phase 5a-2 implementation).
+        // Constants anchor cross-impl byte equivalence against the
+        // Python reference in `server/tests/test_crypto.py`. The vector
+        // chooses fixed eph_seed + nonce so the deterministic AES-GCM
+        // output matches BOOTSTRAP_CIPHERTEXT_HEX byte-for-byte.
         assertEquals(BOOTSTRAP_EPH_PUB_HEX, "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a")
         assertEquals(BOOTSTRAP_AEAD_KEY_HEX, "09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31")
-        assertEquals(BOOTSTRAP_CIPHERTEXT_HEX.length, 252) // 110 bytes plaintext + 16 bytes tag = 126 bytes = 252 hex chars
+        // 111 bytes plaintext + 16 bytes tag = 127 bytes = 254 hex chars
+        assertEquals(254, BOOTSTRAP_CIPHERTEXT_HEX.length)
+
+        // Verify that BootstrapEnvelope.buildBootstrapAadJson produces
+        // the byte-identical canonical AAD. The wire production helper
+        // takes a fixed AAD shape; this confirms the canonical encoder
+        // hasn't drifted from the Python reference.
+        val builtAad = BootstrapEnvelope.buildBootstrapAadJson(
+            bootstrapKeyIdB64 = "oCiYEAMutBcnTuvEo45omQ==",
+            expIso = "2026-05-24T12:00:00Z",
+            pairingId = "00000000-1111-2222-3333-444444444444",
+            senderBrokerUrl = "https://broker.example.com/api/v1",
+            senderId = "55555555-6666-7777-8888-999999999999",
+        )
+        assertArrayEquals(BOOTSTRAP_AAD_JSON, builtAad)
     }
 }

@@ -416,15 +416,17 @@ Canonical JSON binds the envelope to the specific pairing and broker.
 ```json
 {
   "bootstrap_key_id": "<base64 16 bytes>",
-  "broker_url": "<string>",
   "exp": "<ISO8601 UTC with Z suffix>",
   "pairing_id": "<uuid>",
   "protocol_version": 1,
+  "sender_broker_url": "<string>",
   "sender_id": "<uuid>"
 }
 ```
 
-**Security Rule:** The broker MUST NOT reconstruct `broker_url` from the envelope. It MUST use the `broker_url` stored in its own pairing state (indexed by `pairing_id`) created when the sender called `pairing/initiate`.
+`sender_broker_url` is named that way (not just `broker_url`) because `PairingInitiateResponse.broker_url` already exists in the V1 wire contract and means "the Syncler-side broker URL the QR encodes" — a different concept. `sender_broker_url` is the URL the sender's backend operates for the encrypted bootstrap POST. Renaming avoids silent semantic overload.
+
+**Security Rule:** The broker MUST NOT reconstruct `sender_broker_url` from the envelope. It MUST use the `sender_broker_url` stored in its own pairing state (indexed by `pairing_id`) created when the sender called `pairing/initiate`.
 
 ### 9.4 Test Vectors
 
@@ -454,10 +456,10 @@ aead_key: 09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31
 #### Bootstrap AAD and AEAD Round-trip
 
 ```text
-aad_json: {"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","broker_url":"https://broker.example.com/api/v1","exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444","protocol_version":1,"sender_id":"55555555-6666-7777-8888-999999999999"}
+aad_json: {"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444","protocol_version":1,"sender_broker_url":"https://broker.example.com/api/v1","sender_id":"55555555-6666-7777-8888-999999999999"}
 nonce: a0a1a2a3a4a5a6a7a8a9aaab
 plaintext: {"pairing_key":"8PHy8/T19vf4+fr7/P3+/wARIjNEVWZ3iJmqu8zd7v8=","user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
-ciphertext_with_tag: e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276bc04c9f2621575f7f4ec513fd78e252e
+ciphertext_with_tag: e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276f381ecd54c2bd928e836c28fe6e6dd68
 ```
 
 ## Equivalents for Android/Kotlin
