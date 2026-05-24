@@ -204,8 +204,10 @@ The broker MUST reject if the stored `broker_url` for that
 `pairing_id` does not match byte-for-byte what the broker expects
 to be in AAD. This is what stops a syncler-server substitution
 attack: a hostile server could rewrite the AAD's `broker_url` in
-the envelope plaintext to a value that matches the wrong broker;
-sourcing from sender-trusted state defeats that.
+the client-constructed AAD input to a value that matches the
+wrong broker (note: `broker_url` is bound into AAD but never
+emitted in the wire envelope); sourcing from sender-trusted
+state on the broker side defeats that.
 
 Canonicalization rules (binding to the spec):
 - UUID fields (`pairing_id`, `sender_id`) are lowercase no-brace
