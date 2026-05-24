@@ -138,7 +138,7 @@ async def _increment_and_read_sqlite(
 
 
 def _identify_actor(name: str, request: Request) -> tuple[str, str]:
-    if name in {"login", "signup", "message_send_ip"}:
+    if name in {"login", "signup", "message_send_ip", "card_upsert_ip"}:
         return "ip", _client_ip(request)
 
     if name in {"pairing_initiate", "message_send", "plugin_publish"}:
@@ -150,6 +150,12 @@ def _identify_actor(name: str, request: Request) -> tuple[str, str]:
         if user_id is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing rate limit actor")
         return "sender_user", f"{sender_id}:{user_id}"
+
+    if name == "card_upsert":
+        sender_id = _required_actor_value(request, "sender_id", "X-Sender-ID")
+        user_id = _required_actor_value(request, "user_id", "X-User-ID")
+        card_key = _required_actor_value(request, "card_key", "X-Card-Key")
+        return "card", f"{sender_id}:{user_id}:{card_key}"
 
     if name == "manifest_fetch":
         # `/v1/plugins/{sender_id}/{plugin_identifier}/latest` is unauthenticated

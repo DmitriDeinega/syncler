@@ -22,6 +22,7 @@ Once a card is in a user's inbox, the host handles all of the following without 
 - **Left navigation drawer** with selectable views: **Unread** (only items the user hasn't opened), **All** (the default), **Archive** (items the user moved out of the main flow), and **Groups** — an expandable list of every paired sender that lets the user filter the inbox down to one sender at a time. The top-bar title reflects the active view.
 - **Inbox search** (case-insensitive substring) over title, subtitle, summary, sender name, AND any tokens you supplied in `hostPreview.searchText`.
 - **Archive** + **Delete** + **Multi-select** with bulk Archive / Delete. Archive/delete state is local and synced across devices; deleted messages are hidden from inbox AND archive. The server retains messages until their normal expiry.
+- **Mute sync** — the user can mute your plugin globally (all devices) or locally (this device only) from the host-owned settings sheet. Muted plugins are hidden from the active inbox but remain accessible in the Senders tab for unmuting.
 - **Bottom navigation** (Inbox / Senders / Settings) — the user is always one tap away from your card.
 - **Revocation UX** — if you revoke a plugin version with a `compromised` reason, the host refuses to execute the bundle on the device and shows a security banner instead. See §5.5.
 
@@ -29,7 +30,7 @@ You don't need to opt into any of these. Populate `hostPreview` and they all wor
 
 ## 2. Protocol
 
-### Payload (your backend → user device)
+### Payload (your backend -> user device)
 
 Two parts: a reserved **`hostPreview`** block the platform renders natively as the inbox row, and the rest of the payload that your plugin's `render()` consumes for the detail view.
 
@@ -56,13 +57,13 @@ That JSON is your `payload` argument to `client.send_to(...)`. The plugin's `ren
 | `title` | yes | string | 80 UTF-8 bytes |
 | `subtitle` | no | string | 120 UTF-8 bytes |
 | `summary` | no | string | 240 UTF-8 bytes |
-| `searchText` | no | string[] | 16 entries × 64 UTF-8 bytes each |
+| `searchText` | no | string[] | 16 entries x 64 UTF-8 bytes each |
 
-Total serialized `hostPreview` ≤ 2048 UTF-8 bytes. Missing block → the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
+Total serialized `hostPreview` <= 2048 UTF-8 bytes. Missing block -> the row falls back to *"New message from {sender_name}"*. Senders **should** include it.
 
 `searchText` is folded into the host's inbox search alongside title, subtitle, summary, and sender name. The host does a case-insensitive substring match — populate this with the terms a user would type into the search box but that aren't part of the visible row (ticker symbols, ticket numbers, account references). Plugin-scoped *content* search (a search bar that runs against your backend) is V1.5.
 
-### Action callback (user → your backend)
+### Action callback (user -> your backend)
 
 When the user taps an action button in your plugin, the plugin POSTs to your declared endpoint with whatever body your `onclick` handler builds:
 
@@ -111,6 +112,10 @@ class MyPlugin extends BasePlugin {
     signature: '<set by sign-bundle.ts>',
     declaredCapabilities: ['network'],
     declaredEndpoints: ['https://your-app.example.com/api/*'],
+    renderer: 'script',              // or 'template' for native Compose UI
+    template: undefined,             // required if renderer is 'template'
+    cardType: 'event',               // or 'live' for persistent cards
+    cardKeyPath: undefined,          // required if cardType is 'live'
     dismissBehavior: DismissBehavior.DISMISS_ALL,
     minPlatformVersion: '1.0.0',
   };
@@ -213,12 +218,75 @@ response = client.publish_plugin(
     bundle_hash=hashlib.sha256(bundle).digest(),
     bundle_signature=bytes.fromhex(manifest["signature"]),
     signed_bundle_url="https://your-app.example.com/syncler-plugin.bundle.js",
+    renderer="script",
+    template=None,
+    card_type="event",
+    card_key_path=None,
     capabilities=["network"],
     endpoints=["https://your-app.example.com/api/*"],
 )
 
 print("Published row:", response["plugin_row_id"])
 # Save this — you'll need it in `send_to(plugin_id=...)`.
+
+### 5.1 Native Template Renderer
+
+If you set `renderer="template"`, the host uses a native Material 3 Compose renderer instead of a WebView. This is faster and uses less battery. You must supply a `template` object:
+
+```json
+{
+  "layout": "standard_card",
+  "fields": {
+    "title":    { "path": "$.title" },
+    "subtitle": { "path": "$.subtitle" },
+    "body":     { "path": "$.body" }
+  },
+  "actions": [
+    { "id": "ack", "label": "Acknowledge", "endpoint": "https://example.com/api/ack" }
+  ]
+}
+```
+
+- **JSONPath mapping**: Fields are extracted from your decrypted payload using simple `$.path` syntax.
+- **Standard Layout**: `standard_card` supports `title` (required), `subtitle`, and `body`.
+- **Native Actions**: Buttons in the card POST your payload to the specified `endpoint`. Endpoints must be in your `declaredEndpoints`.
+
+### 5.2 Live Cards
+
+If you set `card_type="live"`, the host treats the card as a persistent, upsertable unit rather than a one-off event. You must provide `card_key_path` (JSONPath into your payload yielding a stable ID for the card).
+
+#### Upserting a live card
+
+Use `upsert_card` to create or update a card. The host performs a sequence number check to prevent stale updates.
+
+```python
+client.upsert_card(
+    user_id=user_id,
+    plugin_id=plugin_row_id,
+    card_key="order-456",
+    encrypted_payload=client.encrypt_payload({
+        "title": "Pizza Delivery",
+        "body": "Out for delivery! ETA: 8 mins"
+    }),
+    nonce=os.urandom(12),
+    sequence_number=2,
+    expires_at=datetime.now(UTC) + timedelta(hours=48),
+)
+```
+
+- **Sequence Number**: Must be strictly increasing. The server and client both reject updates with `sequence_number <= current`.
+- **Rate Limit**: 1 upsert per second per card (60/min). Exceeding this returns 429.
+- **TTL**: Live cards expire automatically after `expires_at`. Maximum allowed TTL is 48 hours.
+
+#### AAD binding
+
+For security, live card upserts bind metadata to the encrypted payload using AES-GCM Additional Authenticated Data (AAD). Your SDK handles this, but for reference, the following fields are bound:
+`card_key`, `card_type: "live"`, `sender_id`, `user_id`, `plugin_id`, `expires_at`, `sequence_number`.
+
+#### Deleting a live card
+
+```python
+client.delete_card(card_key="order-456")
 ```
 
 ### 5.5 Revoking a plugin version
@@ -305,7 +373,7 @@ def action():
 1. Install the Syncler Android app (`./gradlew :app:installDebug`).
 2. Sign up + log in. The app auto-enrolls this device with the server.
 3. From your backend, run a script that registers your sender and prints a pairing QR (see SDK README).
-4. Tap **Pair sender** → **Scan QR** in the Syncler app. Confirm the fingerprint matches what your script prints.
+4. Tap **Pair sender** -> **Scan QR** in the Syncler app. Confirm the fingerprint matches what your script prints.
 5. After confirming, the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you.
 6. Publish your plugin (`client.publish_plugin(...)`) — save the `plugin_row_id`.
 7. Run `client.send_to(...)` with a test payload.
@@ -338,6 +406,14 @@ When you send a card, pass the exact `plugin_row_id` that matches the payload sc
 The device verifies the downloaded bundle against the row's SHA-256 `bundle_hash` and caches verified bundle bytes by hash for the process lifetime. On app restart, the cache is empty and the device re-fetches the same historical row's `signed_bundle_url`. Keep old bundle URLs available for as long as you want old inbox messages to remain renderable.
 
 Archive/delete are user-organization states synced through the encrypted user-state blob. They do not remove the server copy, and archive does not store a local message body beyond the server's retention window.
+
+## 11. Lost or compromised devices
+
+If a user loses a device, they should follow this three-step procedure to protect their data:
+
+1. **Revoke the device**: Go to **Settings -> Devices** on a trusted device and revoke the lost one. This immediately kills its network access and SSE stream.
+2. **Rotate keys**: For any sender that handled sensitive data, the user should **re-pair** on a trusted device. This generates a new 32-byte AES key for that sender, ensuring that any future messages from them cannot be decrypted by the lost device (even if it were to come back online).
+3. **Data Loss**: Past cached data on the lost device remains encrypted under the user's master key, but if the device itself is compromised and the master key extracted, that historical data is unrecoverable. Syncler does not support remote wipe.
 
 ---
 

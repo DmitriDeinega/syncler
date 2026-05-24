@@ -320,6 +320,12 @@ sealed class ServerEvent {
     /** Another device dismissed a message. Update local state. */
     data class Dismiss(val messageId: String, val sourceDeviceId: String?) : ServerEvent()
 
+    /** A live card was created or updated. */
+    data class CardUpsert(val data: String) : ServerEvent()
+
+    /** A live card was deleted. */
+    data class CardDelete(val senderId: String, val cardKey: String) : ServerEvent()
+
     companion object {
         fun parse(type: String?, data: String): ServerEvent? = runCatching {
             val obj = JSONObject(data)
@@ -332,6 +338,11 @@ sealed class ServerEvent {
                 "dismiss" -> Dismiss(
                     messageId = obj.getString("message_id"),
                     sourceDeviceId = obj.optString("source_device_id").takeIf { it.isNotEmpty() },
+                )
+                "card.upsert" -> CardUpsert(data = data)
+                "card.delete" -> CardDelete(
+                    senderId = obj.getString("sender_id"),
+                    cardKey = obj.getString("card_key"),
                 )
                 else -> null
             }

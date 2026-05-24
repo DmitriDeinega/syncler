@@ -24,6 +24,9 @@ RATE_LIMITS: dict[str, RateLimitConfig] = {
     "message_send_user_hour": RateLimitConfig(name="message_send_user_hour", max_count=600, window_seconds=3600),
     "manifest_fetch": RateLimitConfig(name="manifest_fetch", max_count=30, window_seconds=60),
     "action_callback": RateLimitConfig(name="action_callback", max_count=120, window_seconds=60),
+    # Phase 3b: live cards. 1 per second per card (60/min).
+    "card_upsert_ip": RateLimitConfig(name="card_upsert_ip", max_count=120, window_seconds=60),
+    "card_upsert": RateLimitConfig(name="card_upsert", max_count=60, window_seconds=60),
 }
 
 # TODO: Wire these dependencies as the pairing, message, manifest, and callback routes are authored.

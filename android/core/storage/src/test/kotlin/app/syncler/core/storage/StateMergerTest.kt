@@ -241,9 +241,19 @@ class StateMergerTest {
     }
 
     @Test
+    fun `muted senders take union`() {
+        val local = EncryptedUserState(mutedSenders = listOf("s1"))
+        val remote = EncryptedUserState(mutedSenders = listOf("s1", "s2"))
+        val merged = StateMerger.merge(local, remote)
+        assertEquals(2, merged.mutedSenders.size)
+        assertTrue(merged.mutedSenders.contains("s1"))
+        assertTrue(merged.mutedSenders.contains("s2"))
+    }
+
+    @Test
     fun `paired senders survive schema V3 to V4 forward migration`() {
         // A V3 blob (pre-pairedSenders) parsed by a V4 client must yield
-        // an empty pairedSenders list and the SCHEMA_CURRENT (V4) tag.
+        // an empty pairedSenders list and the SCHEMA_CURRENT (V5) tag.
         val v3Json = """{
             "schema_version": 3,
             "installed_plugins": [],
@@ -256,8 +266,26 @@ class StateMergerTest {
         }""".trimIndent()
         val parsed = EncryptedUserState.fromJson(v3Json)
         assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
-        assertEquals(EncryptedUserState.SCHEMA_V4, parsed.schemaVersion)
         assertEquals(emptyList<PairedSenderEntry>(), parsed.pairedSenders)
+    }
+
+    @Test
+    fun `V4 blob without muted senders parses as empty list and forward-migrates to V5`() {
+        val v4Json = """{
+            "schema_version": 4,
+            "installed_plugins": [],
+            "dismissed_messages": [],
+            "plugin_settings": {},
+            "user_scoped_storage": {},
+            "read_messages": [],
+            "archived_messages": [],
+            "deleted_messages": [],
+            "paired_senders": []
+        }""".trimIndent()
+        val parsed = EncryptedUserState.fromJson(v4Json)
+        assertEquals(5, parsed.schemaVersion)
+        assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
+        assertEquals(emptyList<String>(), parsed.mutedSenders)
     }
 
     @Test

@@ -11,13 +11,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -31,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -57,11 +62,13 @@ class PairingViewModel @Inject constructor(
     private val repository: PairingRepository,
     private val session: Session,
     pairedSenderStore: PairedSenderStore,
+    private val muteStore: app.syncler.core.storage.MuteStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<PairingState>(PairingState.Idle)
     val state: StateFlow<PairingState> = _state.asStateFlow()
     val pairedSenders: StateFlow<List<PairedSender>> = pairedSenderStore.pairedSenders
+    val mutedSenderIds: StateFlow<Set<String>> = muteStore.mutedSenderIds
 
     fun currentUserId(): String? = session.currentUserId()
 
@@ -84,13 +91,7 @@ class PairingViewModel @Inject constructor(
         val current = _state.value as? PairingState.PreviewReady ?: return
         _state.value = PairingState.Confirming(current.preview)
         viewModelScope.launch {
-            // Generate a fresh 32-byte AES-256 key. The user copies the hex
-            // form to the sender's CLI in V1 dev mode; future incoming
-            // messages from this sender will be decrypted with this key.
             val pairingKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
-            // For V1 the initial state is an opaque placeholder; the server
-            // doesn't read it and the bootstrap exchange that would carry the
-            // key inside this blob is M11+ work.
             val placeholder = "syncler-pairing-bootstrap-v1".toByteArray()
             repository.confirm(current.candidate, current.preview, pairingKey, placeholder).fold(
                 onSuccess = { _state.value = PairingState.Success(it) },
@@ -103,13 +104,11 @@ class PairingViewModel @Inject constructor(
         viewModelScope.launch { repository.revoke(pairingId) }
     }
 
-    fun cancel() {
-        // Local-only cancel: the server token is left un-consumed and will
-        // expire on its TTL. No PairedSender was written locally yet.
+    fun reset() {
         _state.value = PairingState.Idle
     }
 
-    fun reset() {
+    fun cancel() {
         _state.value = PairingState.Idle
     }
 }
@@ -135,6 +134,7 @@ fun PairingScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val pairedSenders by viewModel.pairedSenders.collectAsState()
+    val mutedSenderIds by viewModel.mutedSenderIds.collectAsState()
     val context = LocalContext.current
     var url by remember { mutableStateOf("") }
 
@@ -205,7 +205,11 @@ fun PairingScreen(
                 HorizontalDivider()
                 Text("Paired senders", style = MaterialTheme.typography.titleMedium)
                 pairedSenders.forEach { sender ->
-                    PairedSenderRow(sender = sender, onRevoke = { viewModel.revoke(sender.pairingId) })
+                    PairedSenderRow(
+                        sender = sender,
+                        isMuted = sender.senderId in mutedSenderIds,
+                        onRevoke = { viewModel.revoke(sender.pairingId) }
+                    )
                 }
             }
         }
@@ -286,11 +290,39 @@ private fun CopyableField(
 }
 
 @Composable
-private fun PairedSenderRow(sender: PairedSender, onRevoke: () -> Unit) {
+private fun PairedSenderRow(
+    sender: PairedSender,
+    isMuted: Boolean,
+    onRevoke: () -> Unit
+) {
     var confirming by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(sender.senderName, style = MaterialTheme.typography.titleSmall)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(sender.senderName, style = MaterialTheme.typography.titleSmall)
+                if (isMuted) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.NotificationsOff,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Muted",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
             Text(sender.fingerprint, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 TextButton(onClick = { confirming = true }) { Text("Revoke") }

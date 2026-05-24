@@ -46,7 +46,7 @@ def _b64(value: bytes) -> str:
 
 
 def _publish_envelope(payload: PluginPublishRequest) -> bytes:
-    envelope = {
+    envelope: dict[str, object] = {
         "sender_id": str(payload.sender_id),
         "plugin_identifier": payload.plugin_identifier,
         "version": payload.version,
@@ -57,6 +57,21 @@ def _publish_envelope(payload: PluginPublishRequest) -> bytes:
         "capabilities": payload.capabilities,
         "endpoints": payload.endpoints,
     }
+    # Phase 3a: renderer/template are conditionally included so a pre-Phase-3a
+    # sender (which doesn't know about these fields and signs an envelope
+    # without them) still verifies. Senders shipping a template must include
+    # both in their canonical signing envelope; senders defaulting to script
+    # must omit them. The sender-side SDK (`sdk-python/syncler/client.py`)
+    # mirrors this rule.
+    if payload.renderer != "script":
+        envelope["renderer"] = payload.renderer
+    if payload.template is not None:
+        envelope["template"] = payload.template.model_dump(mode="json")
+    # Phase 3b: card_type/card_key_path are conditionally included.
+    if payload.card_type != "event":
+        envelope["card_type"] = payload.card_type
+    if payload.card_key_path is not None:
+        envelope["card_key_path"] = payload.card_key_path
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -112,6 +127,10 @@ async def publish(
             signed_bundle_url=payload.signed_bundle_url,
             capabilities=payload.capabilities,
             endpoints=payload.endpoints,
+            renderer=payload.renderer,
+            template=(payload.template.model_dump(mode="json") if payload.template else None),
+            card_type=payload.card_type,
+            card_key_path=payload.card_key_path,
         )
     except InvalidVersionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -159,6 +178,8 @@ async def latest(
         # different code paths.
         revoked_at=plugin.revoked_at,
         revocation_reason=plugin.revocation_reason,
+        renderer=plugin.renderer,
+        template=plugin.template,
     )
 
 
@@ -203,6 +224,8 @@ async def by_id(
         created_at=plugin.created_at,
         revoked_at=plugin.revoked_at,
         revocation_reason=plugin.revocation_reason,
+        renderer=plugin.renderer,
+        template=plugin.template,
     )
 
 

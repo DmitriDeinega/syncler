@@ -56,12 +56,38 @@ fun MessageEnvelope.toCanonicalJsonBytes(): ByteArray =
         ),
     )
 
+/**
+ * AAD for persistent live cards (Phase 3b).
+ */
+data class LiveCardAad(
+    val senderId: String,
+    val userId: String,
+    val pluginId: String,
+    val cardKey: String,
+    val sequenceNumber: Long,
+    val expiresAt: String,
+)
+
+fun LiveCardAad.toCanonicalJsonBytes(): ByteArray =
+    canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to "live",
+            "expires_at" to expiresAt,
+            "plugin_id" to pluginId,
+            "sequence_number" to sequenceNumber,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
 internal fun canonicalJsonBytes(fields: Map<String, Any>): ByteArray =
     fields.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
         val encodedValue = when (value) {
             is Int -> value.toString()
+            is Long -> value.toString()
             is String -> "\"${value.jsonEscape()}\""
-            else -> error("unsupported AAD value")
+            else -> error("unsupported AAD value type: ${value::class.simpleName}")
         }
         "\"$key\":$encodedValue"
     }.encodeToByteArray()

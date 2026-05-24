@@ -25,11 +25,14 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
@@ -86,13 +89,16 @@ class InboxViewModel @Inject constructor(
     private val userState: UserStateRepository,
     private val session: app.syncler.core.auth.Session,
     private val eventStream: app.syncler.core.network.EventStreamManager,
+    private val templateActionRunner: TemplateActionRunner,
+    val muteStore: app.syncler.core.storage.MuteStore,
+    private val pairedSenderStore: app.syncler.core.storage.PairedSenderStore,
 ) : ViewModel() {
 
     val items: StateFlow<List<InboxItem>> = repository.items
 
+    val mutedSenderIds: StateFlow<Set<String>> = muteStore.mutedSenderIds
+
     // Derived: set of message IDs already read on any of the user's devices.
-    // Collected from UserStateRepository.state and exposed as a snapshot the
-    // UI can pick from directly.
     val readMessageIds: StateFlow<Set<String>> = userState.state
         .map { st -> st.readMessages.map { it.messageId }.toSet() }
         .stateIn(
@@ -104,12 +110,6 @@ class InboxViewModel @Inject constructor(
     private val _selectedId = MutableStateFlow<String?>(null)
     val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
 
-    /**
-     * Host-side metadata search (M11.5). Substring match against
-     * hostPreview.{title,subtitle,summary,searchText} + sender name. Lives
-     * entirely client-side — the server is content-blind. Plugin-scoped
-     * content search is V1.5 (per the consultation 35 federated-search plan).
-     */
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
     fun setSearch(q: String) { _searchQuery.value = q }
@@ -122,21 +122,11 @@ class InboxViewModel @Inject constructor(
     }
 
     init {
-        // Pull cross-device state, then retry any push that failed previously
-        // (network blip, 409 conflict that couldn't resolve in one retry,
-        // session was locked when the mark was issued, etc.). No-ops if
-        // currently locked or if no dirty changes are pending.
         viewModelScope.launch {
             userState.pull()
             userState.flushPendingPush()
         }
 
-        // M11.7 fix-up (review 44, Codex BLOCKER): InboxViewModel is
-        // activity-scoped, so selection / collapsed-senders / group mode /
-        // search / archive-open state survives the AuthScreen <-> InboxScreen
-        // switch when the user logs out and a different user logs in. Mirror
-        // the UserStateRepository observer pattern: collect sessionState,
-        // drop the initial emission, clear UI state on transition to locked.
         session.sessionState
             .map { it.isUnlocked }
             .distinctUntilChanged()
@@ -144,12 +134,6 @@ class InboxViewModel @Inject constructor(
             .onEach { unlocked -> if (!unlocked) clearUiState() }
             .launchIn(viewModelScope)
 
-        // Phase 2: react to server-pushed SSE events. inbox.changed → re-pull
-        // inbox. state.changed → re-pull user state. dismiss → reflect cross-
-        // device dismiss locally (V1: just trigger an inbox refresh since
-        // dismiss state is recomputed from the server's delivery rows on
-        // every refresh). The actual data still comes through the existing
-        // REST endpoints under the device-bound JWT — SSE is a hint channel.
         eventStream.events
             .onEach { event ->
                 when (event) {
@@ -159,17 +143,14 @@ class InboxViewModel @Inject constructor(
                         userState.pull()
                     is app.syncler.core.network.ServerEvent.Dismiss ->
                         repository.refresh()
+                    is app.syncler.core.network.ServerEvent.CardUpsert ->
+                        repository.upsertCard(event.data)
+                    is app.syncler.core.network.ServerEvent.CardDelete ->
+                        repository.deleteCard(event.senderId, event.cardKey)
                 }
             }
             .launchIn(viewModelScope)
 
-        // Phase 2 fix-up (Codex consultation 56 RED #9): close the
-        // race where the onForeground() refresh runs BEFORE the SSE
-        // handshake completes. If a server event arrived in that
-        // window, it wouldn't be in our snapshot. When the stream
-        // signals "ready" (onOpen fired), do a second catchup refresh
-        // so we never miss an event because the subscription wasn't
-        // live yet.
         eventStream.streamReady
             .onEach {
                 repository.refresh()
@@ -178,24 +159,19 @@ class InboxViewModel @Inject constructor(
             .launchIn(viewModelScope)
     }
 
-    /**
-     * Lifecycle hook from InboxScreen. Open the SSE event stream and do a
-     * one-shot catchup refresh+pull. Replaces the V1 every-15s polling
-     * loop with reactive freshness.
-     */
     fun onForeground() {
         eventStream.start()
         refresh()
     }
 
-    /**
-     * Lifecycle hook from InboxScreen. Close the SSE stream cleanly when
-     * the app backgrounds — Doze / app standby would tear it down anyway,
-     * but we close ahead of time so the server's `close_device_subscribers`
-     * doesn't accumulate dead queues.
-     */
     fun onBackground() {
         eventStream.stop()
+    }
+
+    fun runTemplateAction(actionId: String, endpoint: String, payloadJson: String) {
+        viewModelScope.launch {
+            templateActionRunner.post(endpoint = endpoint, payloadJson = payloadJson)
+        }
     }
 
     private fun clearUiState() {
@@ -208,9 +184,6 @@ class InboxViewModel @Inject constructor(
     }
 
     fun refresh() {
-        // Periodic poll: no visible spinner. The previous CircularProgressIndicator
-        // in the top bar redrew on every poll and read as noisy. State changes
-        // (new rows, read-mark sync) surface implicitly through the list.
         viewModelScope.launch {
             repository.refresh()
             userState.pull()
@@ -220,9 +193,6 @@ class InboxViewModel @Inject constructor(
 
     fun open(itemId: String) {
         _selectedId.value = itemId
-        // Mark-read trigger: opening the detail view (the conservative trigger
-        // both Codex and Gemini argued for in review 35 — scanning the list
-        // alone should not punish unread state).
         viewModelScope.launch { userState.markRead(itemId) }
     }
     fun closeDetail() { _selectedId.value = null }
@@ -255,14 +225,16 @@ class InboxViewModel @Inject constructor(
         viewModelScope.launch { userState.markDeleted(itemId) }
     }
 
-    // ---------- Drawer-driven filter ----------
-    /**
-     * The Inbox tab now lives behind a left navigation drawer with four
-     * "views" the user can pick: Unread (read-state filter), All (everything
-     * except archive/delete), Archive (archived only), or Sender (one
-     * specific paired sender). The top-bar title and the row list both
-     * reflect the active view.
-     */
+    fun revokeSender(senderId: String) {
+        viewModelScope.launch {
+            repository.revokeSender(senderId)
+            closeDetail()
+        }
+    }
+
+    suspend fun getPairedSender(senderId: String): app.syncler.core.storage.PairedSender? =
+        pairedSenderStore.bySenderId(senderId)
+
     private val _viewMode = MutableStateFlow(InboxView.All)
     val viewMode: StateFlow<InboxView> = _viewMode.asStateFlow()
 
@@ -279,11 +251,6 @@ class InboxViewModel @Inject constructor(
         _viewMode.value = InboxView.Sender
     }
 
-    /**
-     * Distinct (senderId, senderName) pairs derived from the current item
-     * set, used to populate the "Groups" expandable section of the drawer.
-     * Sorted by sender name for a stable list.
-     */
     val sendersInInbox: StateFlow<List<Pair<String, String>>> = repository.items
         .map { items ->
             items.asSequence()
@@ -294,13 +261,6 @@ class InboxViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    // ---------- M11.7: multi-select ----------
-    /**
-     * Selection mode is entered by long-pressing a row. While active, rows
-     * toggle on tap (instead of opening detail), the top-app-bar swaps to
-     * a selection bar with bulk actions, and back exits selection without
-     * navigating away.
-     */
     private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
     val selectedIds: StateFlow<Set<String>> = _selectedIds.asStateFlow()
     val selectionMode: StateFlow<Boolean> = _selectedIds
@@ -328,15 +288,9 @@ class InboxViewModel @Inject constructor(
         viewModelScope.launch { userState.markManyDeleted(ids) }
         clearSelection()
     }
-
 }
 
-/**
- * Drawer-selectable inbox view. Replaces the previous group-mode toggle +
- * standalone archive screen — those are now just two of the views the user
- * can pick from the left nav.
- */
-enum class InboxView { Unread, All, Archive, Sender }
+enum class InboxView { Unread, All, Archive, Sender, Live }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -357,10 +311,6 @@ fun InboxScreen(
     val selectedSenderId by viewModel.selectedSenderId.collectAsState()
     val sendersInInbox by viewModel.sendersInInbox.collectAsState()
 
-    // Phase 2: replace the 15-second polling loop with lifecycle-driven SSE.
-    // ON_RESUME opens the event stream + does a one-shot catchup refresh;
-    // ON_PAUSE closes the stream cleanly. Server events nudge the
-    // ViewModel to re-fetch on demand (see InboxViewModel.init).
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -383,14 +333,15 @@ fun InboxScreen(
             onArchive = { viewModel.archive(selectedItem.id) },
             onUnarchive = { viewModel.unarchive(selectedItem.id) },
             onDelete = { viewModel.delete(selectedItem.id) },
+            onRevoke = { viewModel.revokeSender(selectedItem.senderId) },
+            onAction = { aid, endpoint -> viewModel.runTemplateAction(aid, endpoint, selectedItem.payloadJson) },
+            onGetPairedSender = viewModel::getPairedSender,
+            muteStore = viewModel.muteStore,
             modifier = modifier,
         )
         return
     }
 
-    // Android back exits selection mode before any other navigation. This is
-    // the standard "Gmail / Apple Mail" expectation — back from a selection
-    // should clear the selection, not leave the screen.
     BackHandler(enabled = selectionMode, onBack = { viewModel.clearSelection() })
 
     val drawerState = androidx.compose.material3.rememberDrawerState(androidx.compose.material3.DrawerValue.Closed)
@@ -400,6 +351,7 @@ fun InboxScreen(
             InboxView.Unread -> "Unread"
             InboxView.All -> "Inbox"
             InboxView.Archive -> "Archive"
+            InboxView.Live -> "Live"
             InboxView.Sender -> sendersInInbox.firstOrNull { it.first == selectedSenderId }?.second ?: "Sender"
         }
     }
@@ -422,102 +374,106 @@ fun InboxScreen(
             )
         },
     ) {
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            when {
-                selectionMode -> SelectionTopBar(
-                    count = selectedIds.size,
-                    onClose = viewModel::clearSelection,
-                    onArchive = viewModel::archiveSelected,
-                    onDelete = viewModel::deleteSelected,
-                )
-                searchActive -> InboxSearchAppBar(
-                    query = searchQuery,
-                    onQueryChange = viewModel::setSearch,
-                    onClose = { viewModel.setSearchActive(false) },
-                )
-                else -> TopAppBar(
-                    title = { Text(currentTitle) },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Filled.Menu, contentDescription = "Open navigation drawer")
+        Scaffold(
+            modifier = modifier,
+            topBar = {
+                when {
+                    selectionMode -> SelectionTopBar(
+                        count = selectedIds.size,
+                        onClose = viewModel::clearSelection,
+                        onArchive = viewModel::archiveSelected,
+                        onDelete = viewModel::deleteSelected,
+                    )
+                    searchActive -> InboxSearchAppBar(
+                        query = searchQuery,
+                        onQueryChange = viewModel::setSearch,
+                        onClose = { viewModel.setSearchActive(false) },
+                    )
+                    else -> TopAppBar(
+                        title = { Text(currentTitle) },
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Filled.Menu, contentDescription = "Open navigation drawer")
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { viewModel.refresh() }) {
+                                Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                            }
+                            IconButton(onClick = { viewModel.setSearchActive(true) }) {
+                                Icon(Icons.Filled.Search, contentDescription = "Search")
+                            }
+                        },
+                    )
+                }
+            },
+        ) { padding ->
+            val mutedSenderIds by viewModel.mutedSenderIds.collectAsState()
+            Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+                val baseItems = remember(items, viewMode, selectedSenderId, archivedMessageIds, deletedMessageIds, readMessageIds, mutedSenderIds) {
+                    val nonMuted = items.filter { it.senderId !in mutedSenderIds }
+                    when (viewMode) {
+                        InboxView.All -> nonMuted.filter {
+                            it.id !in archivedMessageIds && it.id !in deletedMessageIds
                         }
-                    },
-                    actions = {
-                        // Phase 2 fix-up (Codex consultation 56): with the
-                        // 15s polling loop removed, freshness depends on
-                        // SSE + lifecycle + FCM. A manual refresh is the
-                        // user's recovery path if the SSE stream stalls
-                        // (broken proxy, intermittent connectivity) or
-                        // if FCM didn't fire.
-                        IconButton(onClick = { viewModel.refresh() }) {
-                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        InboxView.Unread -> nonMuted.filter {
+                            it.id !in archivedMessageIds && it.id !in deletedMessageIds && it.id !in readMessageIds
                         }
-                        IconButton(onClick = { viewModel.setSearchActive(true) }) {
-                            Icon(Icons.Filled.Search, contentDescription = "Search")
+                        InboxView.Live -> nonMuted.filter {
+                            it.type == "live" && it.id !in archivedMessageIds && it.id !in deletedMessageIds
                         }
-                    },
-                )
-            }
-        },
-    ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
-            // Compute the view's base item set, then optionally apply search.
-            val baseItems = remember(items, viewMode, selectedSenderId, archivedMessageIds, deletedMessageIds, readMessageIds) {
-                when (viewMode) {
-                    InboxView.All -> items.filter {
-                        it.id !in archivedMessageIds && it.id !in deletedMessageIds
-                    }
-                    InboxView.Unread -> items.filter {
-                        it.id !in archivedMessageIds && it.id !in deletedMessageIds && it.id !in readMessageIds
-                    }
-                    InboxView.Archive -> items.filter {
-                        it.id in archivedMessageIds && it.id !in deletedMessageIds
-                    }
-                    InboxView.Sender -> {
-                        val target = selectedSenderId
-                        if (target == null) emptyList()
-                        else items.filter {
-                            it.senderId == target && it.id !in archivedMessageIds && it.id !in deletedMessageIds
+                        // Archive + Sender views filter from `nonMuted` (not the raw
+                        // `items` list) so muted senders are hidden everywhere, not
+                        // just from the active inbox. Closes Codex consultation 62
+                        // RED #6 — a user who muted a sender should not see their
+                        // cards re-surface in Archive or in a Sender-scoped view.
+                        InboxView.Archive -> nonMuted.filter {
+                            it.id in archivedMessageIds && it.id !in deletedMessageIds
+                        }
+                        InboxView.Sender -> {
+                            val target = selectedSenderId
+                            if (target == null) emptyList()
+                            else nonMuted.filter {
+                                it.senderId == target && it.id !in archivedMessageIds && it.id !in deletedMessageIds
+                            }
                         }
                     }
                 }
-            }
-            val filtered = remember(baseItems, searchQuery) {
-                if (searchQuery.isBlank()) baseItems else baseItems.filter { matchesQuery(it, searchQuery) }
-            }
-            val onRowClick: (String) -> Unit = { id ->
-                if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
-            }
-            val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
-            when {
-                baseItems.isEmpty() -> Text(
-                    emptyMessage(viewMode),
-                    modifier = Modifier.padding(top = 24.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
-                    "No cards match \"$searchQuery\".",
-                    modifier = Modifier.padding(top = 24.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                else -> FlatInboxList(
-                    items = filtered,
-                    readMessageIds = readMessageIds,
-                    selectedIds = selectedIds,
-                    onItemClick = onRowClick,
-                    onItemLongClick = onRowLongClick,
-                )
+                val filtered = remember(baseItems, searchQuery) {
+                    if (searchQuery.isBlank()) baseItems else baseItems.filter { matchesQuery(it, searchQuery) }
+                }
+                val onRowClick: (String) -> Unit = { id ->
+                    if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
+                }
+                val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
+                when {
+                    baseItems.isEmpty() -> Text(
+                        emptyMessage(viewMode),
+                        modifier = Modifier.padding(top = 24.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    searchQuery.isNotBlank() && filtered.isEmpty() -> Text(
+                        "No cards match \"$searchQuery\".",
+                        modifier = Modifier.padding(top = 24.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    else -> FlatInboxList(
+                        items = filtered,
+                        readMessageIds = readMessageIds,
+                        selectedIds = selectedIds,
+                        onItemClick = onRowClick,
+                        onItemLongClick = onRowLongClick,
+                    )
+                }
             }
         }
-    }
     }
 }
 
 private fun emptyMessage(view: InboxView): String = when (view) {
     InboxView.All -> "No cards yet. Pair a sender from the Senders tab and they can push to you."
     InboxView.Unread -> "No unread cards."
+    InboxView.Live -> "No active live cards."
     InboxView.Archive -> "No archived cards."
     InboxView.Sender -> "Nothing from this sender."
 }
@@ -550,6 +506,13 @@ private fun InboxDrawer(
             icon = { Icon(Icons.Filled.Inbox, contentDescription = null) },
             selected = currentView == InboxView.All,
             onClick = { onPick(InboxView.All) },
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        androidx.compose.material3.NavigationDrawerItem(
+            label = { Text("Live") },
+            icon = { Icon(Icons.Filled.FlashOn, contentDescription = null) },
+            selected = currentView == InboxView.Live,
+            onClick = { onPick(InboxView.Live) },
             modifier = Modifier.padding(horizontal = 12.dp),
         )
         androidx.compose.material3.NavigationDrawerItem(
@@ -602,14 +565,25 @@ private fun FlatInboxList(
     onItemLongClick: (String) -> Unit,
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(items, key = { it.id }) { item ->
-            InboxRow(
-                item = item,
-                isRead = item.id in readMessageIds,
-                isSelected = item.id in selectedIds,
-                onClick = { onItemClick(item.id) },
-                onLongClick = { onItemLongClick(item.id) },
-            )
+        items.forEachIndexed { index, item ->
+            if (index > 0 && items[index - 1].type == "live" && item.type == "event") {
+                item {
+                    androidx.compose.material3.HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        thickness = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+                }
+            }
+            item(key = item.id) {
+                InboxRow(
+                    item = item,
+                    isRead = item.id in readMessageIds,
+                    isSelected = item.id in selectedIds,
+                    onClick = { onItemClick(item.id) },
+                    onLongClick = { onItemLongClick(item.id) },
+                )
+            }
         }
     }
 }
@@ -668,9 +642,6 @@ private fun InboxSearchAppBar(
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
-    // Android system back closes search consistently with the top-bar back
-    // arrow — Codex review 41 flagged the asymmetry where back used to fall
-    // through to the previous tab while only the arrow exited search.
     BackHandler(onBack = onClose)
 
     TopAppBar(
@@ -702,12 +673,6 @@ private fun InboxSearchAppBar(
     )
 }
 
-/**
- * Case-insensitive substring match across visible row fields plus the
- * `hostPreview.searchText` tokens the sender pre-indexed. Plugin author
- * promised in §2 of the integration guide that searchText would be
- * folded into host search — this is where that promise gets paid.
- */
 internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
     val q = rawQuery.trim().lowercase(Locale.ROOT)
     if (q.isEmpty()) return true
@@ -721,17 +686,6 @@ internal fun matchesQuery(item: InboxItem, rawQuery: String): Boolean {
     return false
 }
 
-/**
- * Native Compose row — no WebView. The plugin's `render()` runs only in
- * [DetailScreen] when the user taps a row. Senders fill in `hostPreview` via
- * the sdk-python / sdk-plugin contract; rows without it use the generic
- * fallback.
- *
- * Unread state (M11.2): a small dot + bold title until the user opens the
- * detail view. Read state syncs across devices via the M7 CAS user-state
- * blob — opening on one phone marks the row read on every device on the
- * next pull.
- */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun InboxRow(
@@ -768,11 +722,6 @@ private fun InboxRow(
             verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Leading affordance: selection check OR unread dot. Reserves
-            // a 24dp slot so the row geometry stays stable across read /
-            // unread / selected transitions, and the check icon renders at
-            // a real Material icon size instead of being crammed into the
-            // 8dp dot footprint (review 44, Codex).
             Box(
                 modifier = Modifier
                     .padding(top = 4.dp)
@@ -804,15 +753,25 @@ private fun InboxRow(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            item.senderName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        if (item.type == "live") {
+                            Icon(
+                                Icons.Filled.FlashOn,
+                                contentDescription = "Live",
+                                modifier = Modifier.size(14.dp).padding(start = 4.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
                     Text(
-                        item.senderName,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
+                        TimestampFormat.arrival(if (item.type == "live") item.updatedAt ?: "" else item.sentAt),
+                        style = MaterialTheme.typography.labelSmall,
                     )
-                    Text(
-                    TimestampFormat.arrival(item.sentAt),
-                    style = MaterialTheme.typography.labelSmall,
-                )
                 }
                 if (preview != null) {
                     Text(
@@ -866,10 +825,34 @@ private fun DetailScreen(
     onArchive: () -> Unit,
     onUnarchive: () -> Unit,
     onDelete: () -> Unit,
+    onRevoke: () -> Unit,
+    onAction: (id: String, endpoint: String) -> Unit,
+    onGetPairedSender: suspend (String) -> app.syncler.core.storage.PairedSender?,
+    muteStore: app.syncler.core.storage.MuteStore,
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onBack)
     var confirmDelete by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var pairedSender by remember { mutableStateOf<app.syncler.core.storage.PairedSender?>(null) }
+
+    LaunchedEffect(item.senderId) {
+        pairedSender = onGetPairedSender(item.senderId)
+    }
+
+    if (showSettings) {
+        PluginSettingsSheet(
+            item = item,
+            pairedSender = pairedSender,
+            muteStore = muteStore,
+            onDismiss = { showSettings = false },
+            onRevoke = {
+                showSettings = false
+                onRevoke()
+            }
+        )
+    }
+
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
@@ -917,6 +900,9 @@ private fun DetailScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Settings")
+                    }
                     if (isArchived) {
                         IconButton(onClick = {
                             onUnarchive()
@@ -927,7 +913,7 @@ private fun DetailScreen(
                     } else {
                         IconButton(onClick = {
                             onArchive()
-                            onBack()  // pop back to inbox so the archive transition feels active
+                            onBack()
                         }) {
                             Icon(Icons.Filled.Archive, contentDescription = "Archive")
                         }
@@ -940,18 +926,9 @@ private fun DetailScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // Revocation banner — non-null reason rendered above the plugin
-            // (or in place of it for compromised). M11.4 introduced the
-            // classified reasons; UI uses them to drive differentiated
-            // affordances per Codex review 38.
             item.revocationReason?.let { reason -> RevocationBanner(reason) }
             when {
                 item.revocationReason == "compromised" -> {
-                    // Refuse to execute. The InboxRepository's fetchPluginByRow
-                    // path already null'd out bundleJs for compromised rows,
-                    // but we also block here as a belt-and-braces defense in
-                    // case bundleJs was populated by an earlier (pre-revoke)
-                    // cache hit.
                     Column(
                         modifier = Modifier.fillMaxSize().padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -969,6 +946,13 @@ private fun DetailScreen(
                         PayloadFallbackView(item.payloadJson)
                     }
                 }
+                item.renderer == "template" && item.template != null -> TemplateCard(
+                    template = item.template,
+                    payloadJson = item.payloadJson,
+                    declaredEndpoints = item.declaredEndpoints,
+                    onAction = onAction,
+                    modifier = Modifier.fillMaxSize(),
+                )
                 item.bundleJs != null -> PluginRenderView(
                     bundleJs = item.bundleJs,
                     payloadJson = item.payloadJson,
@@ -978,10 +962,7 @@ private fun DetailScreen(
                     modifier = Modifier.fillMaxSize().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        "Plugin not loaded",
-                        style = MaterialTheme.typography.titleMedium,
-                    )
+                    Text("Plugin not loaded", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "Couldn't fetch or verify the sender's plugin bundle. " +
                             "Raw decrypted payload shown below for diagnostics.",
@@ -1006,7 +987,7 @@ private fun RevocationBanner(reason: String) {
         else -> "This plugin was revoked by its sender." to
             MaterialTheme.colorScheme.surfaceVariant
     }
-    androidx.compose.foundation.layout.Box(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .background(color)

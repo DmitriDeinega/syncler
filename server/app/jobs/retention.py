@@ -6,13 +6,14 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import dispose_engine, get_db, init_engine
-from app.models import Message, Pairing, RateLimitEvent
+from app.models import LiveCard, Message, Pairing, RateLimitEvent
 
 
 async def prune_expired(session: AsyncSession) -> dict[str, int]:
     now = datetime.now(UTC)
 
     messages = await session.execute(delete(Message).where(Message.expires_at < now))
+    live_cards = await session.execute(delete(LiveCard).where(LiveCard.expires_at < now))
     pairings = await session.execute(
         delete(Pairing).where(
             Pairing.revoked_at.is_not(None),
@@ -26,6 +27,7 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
 
     return {
         "messages": messages.rowcount or 0,
+        "live_cards": live_cards.rowcount or 0,
         "pairings": pairings.rowcount or 0,
         "rate_limit_events": rate_limit_events.rowcount or 0,
     }

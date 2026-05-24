@@ -302,12 +302,23 @@ class Client:
         signed_bundle_url: str,
         capabilities: list[str],
         endpoints: list[str],
+        renderer: str = "script",
+        template: dict[str, Any] | None = None,
+        card_type: str = "event",
+        card_key_path: str | None = None,
     ) -> dict[str, Any]:
         """Publish a new plugin version. Returns the server response (with
         ``plugin_row_id`` which the sender then uses in messages).
+
+        Phase 3a: pass ``renderer="template"`` plus a ``template`` block to
+        ship a native Compose-rendered card instead of a WebView bundle.
+
+        Phase 3b: pass ``card_type="live"`` plus a ``card_key_path`` (JSONPath
+        yielding the stable key for the card) to enable persistent,
+        upsertable live cards.
         """
         self._require_sender_id()
-        body = {
+        body: dict[str, Any] = {
             "sender_id": self._canonical_sender_id(),
             "plugin_identifier": plugin_identifier,
             "version": version,
@@ -318,10 +329,95 @@ class Client:
             "capabilities": capabilities,
             "endpoints": endpoints,
         }
+        # Mirror the server's `_publish_envelope` conditional inclusion.
+        if renderer != "script":
+            body["renderer"] = renderer
+        if template is not None:
+            body["template"] = template
+        if card_type != "event":
+            body["card_type"] = card_type
+        if card_key_path is not None:
+            body["card_key_path"] = card_key_path
+
         body["sender_signature"] = b64(self.private_key.sign(canonical_json(body)))
         resp = self.session.post(f"{self.base_url}/v1/plugins/publish", json=body, timeout=10)
         resp.raise_for_status()
         return resp.json()
+
+    def upsert_card(
+        self,
+        *,
+        user_id: str,
+        plugin_id: str,
+        card_key: str,
+        encrypted_payload: bytes,
+        nonce: bytes,
+        sequence_number: int,
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        """Upsert a persistent live card for a user. Fires card.upsert SSE.
+
+        UUIDs are normalized via [_canon_uuid] before signing so an uppercase
+        or braced caller input produces the same canonical bytes as the
+        server-side `str(uuid.UUID(...))` form. Without this, a sender-side
+        self-401 can sneak in on UUIDs that look fine to the eye but
+        differ in case (Codex consultation 63 YELLOW follow-up).
+        """
+        self._require_sender_id()
+        body: dict[str, Any] = {
+            "sender_id": self._canonical_sender_id(),
+            "user_id": _canon_uuid(user_id),
+            "plugin_id": _canon_uuid(plugin_id),
+            "card_key": card_key,
+            "encrypted_payload": b64(encrypted_payload),
+            "nonce": b64(nonce),
+            "sequence_number": sequence_number,
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        }
+
+        # Envelope for upsert includes card_type: live. `sequence_number`
+        # stays as int here to match the server's canonical envelope
+        # (see routers/cards.py:_build_upsert_envelope_bytes).
+        envelope = dict(body)
+        envelope["card_type"] = "live"
+        body["envelope_signature"] = b64(self.private_key.sign(canonical_json(envelope)))
+
+        resp = self.session.post(f"{self.base_url}/v1/cards/upsert", json=body, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete_card(
+        self,
+        *,
+        user_id: str,
+        card_key: str,
+    ) -> None:
+        """Delete a persistent live card for a specific user. Fires card.delete SSE.
+
+        Phase 3b: `user_id` is REQUIRED in the canonical signed envelope so a
+        delete signature for one user's card cannot be replayed against
+        another user's card with the same (sender, card_key). Mirrors the
+        server's `_build_delete_envelope_bytes`. Closes Codex consultation
+        62 RED #5.
+        """
+        self._require_sender_id()
+        sender_id = self._canonical_sender_id()
+        user_id_canonical = _canon_uuid(user_id)
+        envelope = canonical_json(
+            {
+                "sender_id": sender_id,
+                "user_id": user_id_canonical,
+                "card_key": card_key,
+            }
+        )
+        body = {
+            "sender_id": sender_id,
+            "user_id": user_id_canonical,
+            "card_key": card_key,
+            "envelope_signature": b64(self.private_key.sign(envelope)),
+        }
+        resp = self.session.post(f"{self.base_url}/v1/cards/delete", json=body, timeout=10)
+        resp.raise_for_status()
 
     # Accepted classifications for the optional ``reason`` field on revoke.
     # The host renders different UX per reason: silent for ``superseded``,

@@ -49,7 +49,7 @@ interface SynclerApi {
     @GET("/v1/messages/inbox")
     suspend fun inbox(
         @retrofit2.http.Query("since") since: String? = null,
-    ): MessageInboxResponseDto
+    ): InboxFeedResponseDto
 
     @POST("/v1/messages/{id}/dismiss")
     suspend fun dismissMessage(
@@ -114,6 +114,45 @@ data class PluginLatestDto(
      * banner, etc.). Null on active rows or pre-M11.4 revoked rows.
      */
     @Json(name = "revocation_reason") val revocationReason: String? = null,
+    /**
+     * Phase 3a. "script" (legacy WebView bundle) or "template" (native
+     * Compose renderer). Defaults to "script" when the server returns
+     * null (pre-Phase-3a clients hitting an upgraded server keep using
+     * the script path).
+     */
+    val renderer: String = "script",
+    /**
+     * Phase 3a. The template manifest block when renderer == "template".
+     * Null otherwise — the publish-time server validator enforces the
+     * pairing so the client doesn't need to defend against malformed
+     * combinations here.
+     */
+    val template: TemplateBlockDto? = null,
+    /**
+     * Phase 3b: card_type ("event" or "live") and optional card_key_path.
+     */
+    @Json(name = "card_type") val cardType: String = "event",
+    @Json(name = "card_key_path") val cardKeyPath: String? = null,
+)
+
+/** Phase 3a: native-renderer manifest. Mirrors `TemplateObject` in `server/app/schemas.py`. */
+@JsonClass(generateAdapter = true)
+data class TemplateBlockDto(
+    val layout: String,
+    val fields: Map<String, TemplateFieldDto>,
+    val actions: List<TemplateActionDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class TemplateFieldDto(
+    val path: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class TemplateActionDto(
+    val id: String,
+    val label: String,
+    val endpoint: String,
 )
 
 @JsonClass(generateAdapter = true)
@@ -202,6 +241,48 @@ data class MessageInboxItemDto(
 @JsonClass(generateAdapter = true)
 data class MessageInboxResponseDto(
     val messages: List<MessageInboxItemDto>,
+    @Json(name = "next_since") val nextSince: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class LiveCardItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "card_key") val cardKey: String,
+    @Json(name = "encrypted_payload") val encryptedPayload: String,
+    val nonce: String,
+    @Json(name = "sequence_number") val sequenceNumber: Long,
+    @Json(name = "updated_at") val updatedAt: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class InboxFeedItemDto(
+    val type: String, // "event" or "live"
+    // Message fields
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String? = null,
+    @Json(name = "encrypted_body") val encryptedBody: String? = null,
+    @Json(name = "envelope_signature") val envelopeSignature: String? = null,
+    @Json(name = "sent_at") val sentAt: String? = null,
+    // Live card fields
+    @Json(name = "card_key") val cardKey: String? = null,
+    @Json(name = "encrypted_payload") val encryptedPayload: String? = null,
+    @Json(name = "sequence_number") val sequenceNumber: Long? = null,
+    @Json(name = "updated_at") val updatedAt: String? = null,
+    // Shared
+    val nonce: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class InboxFeedResponseDto(
+    val items: List<InboxFeedItemDto>,
     @Json(name = "next_since") val nextSince: String?,
 )
 

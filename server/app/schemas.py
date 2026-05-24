@@ -1,11 +1,12 @@
 import base64
 import binascii
 import importlib.util
+import re
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_serializer, field_validator, model_validator
 
 EmailField = (
     EmailStr
@@ -209,6 +210,86 @@ class MessageInboxResponse(BaseModel):
     next_since: datetime | None
 
 
+class LiveCardUpsertRequest(BaseModel):
+    sender_id: UUID
+    user_id: UUID
+    plugin_id: UUID
+    card_key: str
+    encrypted_payload: str  # base64
+    nonce: str  # base64 12 bytes
+    sequence_number: int
+    expires_at: datetime
+    envelope_signature: str  # base64 64 bytes Ed25519 over canonical upsert body
+
+    @field_validator("encrypted_payload")
+    @classmethod
+    def validate_payload(cls, value: str) -> str:
+        decode_base64(value, field_name="encrypted_payload", minimum=16)
+        return value
+
+    @field_validator("nonce")
+    @classmethod
+    def validate_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="nonce", exact=12)
+        return value
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+
+class LiveCardDeleteRequest(BaseModel):
+    sender_id: UUID
+    # Phase 3b: user_id is REQUIRED on delete (Codex consultation 62 RED #5).
+    # The earlier shape signed only `(sender_id, card_key)` and looked the
+    # card up without user scoping, which made cross-user deletion possible
+    # when two users happened to share the same card_key from the same
+    # sender — collision is rare in practice but a hard security boundary
+    # cannot rely on rarity.
+    user_id: UUID
+    card_key: str
+    # base64 64 bytes Ed25519 over canonical (sender_id || user_id || card_key).
+    envelope_signature: str
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+
+class LiveCardItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    sender_id: UUID
+    plugin_id: UUID
+    plugin_identifier: str
+    card_key: str
+    encrypted_payload: str
+    nonce: str
+    sequence_number: int
+    updated_at: datetime
+    expires_at: datetime
+
+
+class MessageInboxItemExtended(MessageInboxItem):
+    """Inbox item with optional discriminator for live cards."""
+    type: Literal["event"] = "event"
+
+
+class LiveCardInboxItem(LiveCardItem):
+    """Live card projected into the inbox feed."""
+    type: Literal["live"] = "live"
+
+
+class InboxFeedResponse(BaseModel):
+    items: list[MessageInboxItemExtended | LiveCardInboxItem]
+    next_since: datetime | None
+
+
 class MessageDetailResponse(MessageInboxItem):
     pass
 
@@ -313,6 +394,116 @@ class StateConflictBody(BaseModel):
     current_encrypted_blob: str
 
 
+# Phase 3a — template renderer.
+#
+# Layouts and per-layout required fields. Senders publish a `template` object
+# alongside `renderer: "template"` to declare a native Compose rendering
+# instead of a WebView bundle. The publish-time validator enforces the
+# schema constraints below so the client never has to render a malformed
+# template at message time (Phase 3a in `.triad/50-agreement-and-plan.md`).
+_TEMPLATE_LAYOUTS: frozenset[str] = frozenset({"standard_card"})
+_LAYOUT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
+    "standard_card": frozenset({"title"}),
+}
+_LAYOUT_OPTIONAL_FIELDS: dict[str, frozenset[str]] = {
+    "standard_card": frozenset({"subtitle", "body"}),
+}
+# Only $.dotted.path navigation is supported in V1 (no array indexing, no
+# wildcards, no filters). Keep the surface tight so the client-side resolver
+# stays small and auditable.
+_JSONPATH_REGEX = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+# Path-length cap is shared with the hostPreview value cap (200 chars).
+_TEMPLATE_PATH_MAX = 200
+_ACTION_ID_MAX = 64
+_ACTION_LABEL_MAX = 64
+_ACTION_ENDPOINT_MAX = 2048
+
+
+def _endpoint_pattern_matches(url: str, pattern: str) -> bool:
+    """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
+    the host as `[^./]*` (no subdomain leak), `*` in the path as `[^/]*`.
+    Required so the client and server agree on which action endpoints are
+    "in" the declared-endpoints set.
+    """
+    # Find where the path starts (first `/` after the scheme).
+    scheme_end = pattern.find("://")
+    if scheme_end == -1:
+        path_start = len(pattern)
+    else:
+        slash_after_authority = pattern.find("/", scheme_end + 3)
+        path_start = slash_after_authority if slash_after_authority != -1 else len(pattern)
+
+    out: list[str] = []
+    for index, character in enumerate(pattern):
+        if character == "*":
+            out.append("[^./]*" if index < path_start else "[^/]*")
+        else:
+            out.append(re.escape(character))
+    return re.match(f"^{''.join(out)}$", url) is not None
+
+
+class TemplateField(BaseModel):
+    """One template field — a JSONPath expression that resolves against the
+    decrypted payload at render time."""
+    path: Annotated[str, Field(min_length=1, max_length=_TEMPLATE_PATH_MAX)]
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        if not _JSONPATH_REGEX.match(value):
+            raise ValueError(
+                f"invalid JSONPath {value!r}: must match $.field(.subfield)*",
+            )
+        return value
+
+
+class TemplateAction(BaseModel):
+    """One declared action button. Endpoint must match the plugin's
+    `endpoints` globs (enforced at publish time)."""
+    id: Annotated[str, Field(min_length=1, max_length=_ACTION_ID_MAX)]
+    label: Annotated[str, Field(min_length=1, max_length=_ACTION_LABEL_MAX)]
+    endpoint: Annotated[str, Field(min_length=1, max_length=_ACTION_ENDPOINT_MAX)]
+
+
+class TemplateObject(BaseModel):
+    """The Phase 3a template manifest block. Senders ship one of these
+    instead of a JS bundle when they want native Compose rendering."""
+    layout: str
+    fields: dict[str, TemplateField]
+    actions: list[TemplateAction] = []
+
+    @field_validator("layout")
+    @classmethod
+    def validate_layout(cls, value: str) -> str:
+        if value not in _TEMPLATE_LAYOUTS:
+            raise ValueError(
+                f"unknown template layout {value!r}; supported: {sorted(_TEMPLATE_LAYOUTS)}",
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_fields_for_layout(self) -> "TemplateObject":
+        required = _LAYOUT_REQUIRED_FIELDS.get(self.layout, frozenset())
+        optional = _LAYOUT_OPTIONAL_FIELDS.get(self.layout, frozenset())
+        allowed = required | optional
+        missing = required - self.fields.keys()
+        if missing:
+            raise ValueError(
+                f"layout {self.layout!r} requires fields {sorted(missing)}",
+            )
+        extra = self.fields.keys() - allowed
+        if extra:
+            raise ValueError(
+                f"layout {self.layout!r} does not accept fields {sorted(extra)}",
+            )
+        # Action ids must be unique within a template so the client can route
+        # an action tap unambiguously.
+        action_ids = [a.id for a in self.actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError(f"duplicate action ids in template")
+        return self
+
+
 class PluginPublishRequest(BaseModel):
     sender_id: UUID
     plugin_identifier: Annotated[str, Field(min_length=1, max_length=200)]
@@ -323,6 +514,16 @@ class PluginPublishRequest(BaseModel):
     signed_bundle_url: str
     capabilities: list[str]
     endpoints: list[str]
+    # Phase 3a. Defaults to "script" for backwards compat with senders
+    # published before the template renderer existed — their canonical
+    # publish envelope does not include this field, so the conditional
+    # serialization in `_publish_envelope` keeps their signature valid.
+    renderer: Literal["script", "template"] = "script"
+    template: TemplateObject | None = None
+    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+    # for live cards.
+    card_type: Literal["event", "live"] = "event"
+    card_key_path: str | None = None
     sender_signature: str  # base64 Ed25519 over canonical publish body
 
     @field_validator("manifest_hash")
@@ -348,6 +549,30 @@ class PluginPublishRequest(BaseModel):
     def validate_sender_signature(cls, value: str) -> str:
         decode_base64(value, field_name="sender_signature", exact=64)
         return value
+
+    @model_validator(mode="after")
+    def validate_renderer_template_pairing(self) -> "PluginPublishRequest":
+        # The pairing rules live here (not on TemplateObject) because the
+        # action-endpoint check needs the surrounding `endpoints` glob list.
+        if self.renderer == "template" and self.template is None:
+            raise ValueError("template required when renderer == 'template'")
+        if self.renderer == "script" and self.template is not None:
+            raise ValueError("template must be omitted when renderer == 'script'")
+        if self.template is not None:
+            for action in self.template.actions:
+                if not any(
+                    _endpoint_pattern_matches(action.endpoint, p)
+                    for p in self.endpoints
+                ):
+                    raise ValueError(
+                        f"action {action.id!r} endpoint {action.endpoint!r} "
+                        f"not allowed by declared endpoints",
+                    )
+        # Phase 3b: live cards MUST have a card_key_path to extract their
+        # stable identity from the payload.
+        if self.card_type == "live" and not self.card_key_path:
+            raise ValueError("card_key_path required when card_type == 'live'")
+        return self
 
 
 class PluginPublishResponse(BaseModel):
@@ -377,6 +602,14 @@ class PluginLatestResponse(BaseModel):
     # plugin_row_id) returns whatever the row's current revoke state is.
     revoked_at: datetime | None = None
     revocation_reason: str | None = None
+    # Phase 3a. Defaults to "script" so pre-Phase-3a stored rows (where the
+    # backfilled server default fills NULL with "script") and pre-Phase-3a
+    # clients (which ignore the field) both see the WebView path.
+    renderer: Literal["script", "template"] = "script"
+    template: TemplateObject | None = None
+    # Phase 3b: card_type ("event" or "live") and optional card_key_path.
+    card_type: Literal["event", "live"] = "event"
+    card_key_path: str | None = None
 
 
 # M11.4: classified revocation reasons. Devices use this to decide UX:

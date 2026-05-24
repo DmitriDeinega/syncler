@@ -76,6 +76,8 @@ object StateMerger {
             pickWinner = ::pickPairedSenderWinner,
         )
 
+        val mutedSenders = (local.mutedSenders + remote.mutedSenders).distinct()
+
         // phase1MigrationDoneAt: sticky-once-set. The earlier of the two
         // non-null values wins so the migration timestamp recorded on
         // whichever device migrated first is authoritative. Once any
@@ -98,6 +100,7 @@ object StateMerger {
             readMessages = readMessages,
             archivedMessages = archivedMessages,
             deletedMessages = deletedMessages,
+            mutedSenders = mutedSenders,
             pairedSenders = pairedSenders,
             phase1MigrationDoneAt = phase1MigrationDoneAt,
         )

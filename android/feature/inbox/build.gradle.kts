@@ -45,12 +45,17 @@ dependencies {
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
     implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.moshi.kotlin)
     implementation(libs.okhttp)
     implementation(libs.timber)
 
     ksp(libs.hilt.compiler)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // TemplateActionRunner test: verify it does NOT send Authorization +
+    // confirm release builds refuse cleartext endpoints. Mirrors how
+    // :feature:plugin-host tests NetworkBridge.
+    testImplementation(libs.okhttp.mockwebserver)
     // Android stubs org.json with NotMocked, breaking host-side parser tests.
     // Pull the real implementation onto the test classpath so the unit tests
     // exercise the same JSON behavior the production runtime sees.

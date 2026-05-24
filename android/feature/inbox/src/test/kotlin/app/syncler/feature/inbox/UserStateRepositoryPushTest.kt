@@ -2,7 +2,7 @@ package app.syncler.feature.inbox
 
 import app.syncler.core.auth.Session
 import app.syncler.core.auth.TokenStore
-import app.syncler.core.network.MessageInboxResponseDto
+import app.syncler.core.network.InboxFeedResponseDto
 import app.syncler.core.network.PluginLatestDto
 import app.syncler.core.network.SignupRequest
 import app.syncler.core.network.SignupResponse
@@ -152,7 +152,7 @@ private class StubApi : SynclerApi {
     override suspend fun revokeDevice(id: String): Response<Unit> = stub()
     override suspend fun deleteAccount(): Response<Unit> = stub()
     override suspend fun getMessage(id: String): MessageInboxItemDto = stub()
-    override suspend fun inbox(since: String?): MessageInboxResponseDto = stub()
+    override suspend fun inbox(since: String?): InboxFeedResponseDto = stub()
     override suspend fun dismissMessage(id: String): Response<Unit> = stub()
     override suspend fun previewPairing(token: String): PairingPreviewResponseDto = stub()
     override suspend fun completePairing(body: PairingCompleteRequestDto): PairingCompleteResponseDto = stub()

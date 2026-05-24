@@ -34,8 +34,51 @@ class DuplicateVersionError(PluginError):
     """(sender_id, plugin_identifier, version) already exists."""
 
 
+class InvalidTemplateError(PluginError):
+    """Template configuration is malformed or invalid."""
+
+
 class PluginNotFoundError(PluginError):
     """No plugin with that identifier."""
+
+
+def _validate_template(template: dict, declared_endpoints: list[str]) -> None:
+    layout = template.get("layout")
+    if layout != "standard_card":
+        raise InvalidTemplateError(f"unknown or missing layout: {layout}")
+
+    fields = template.get("fields", {})
+    if not isinstance(fields, dict):
+        raise InvalidTemplateError("fields must be a dictionary")
+
+    if "title" not in fields:
+        raise InvalidTemplateError("missing required field: title")
+
+    for name, config in fields.items():
+        if not isinstance(config, dict) or "path" not in config:
+            raise InvalidTemplateError(f"malformed config for field {name}")
+        path = config["path"]
+        if not isinstance(path, str) or not path.startswith("$"):
+            raise InvalidTemplateError(f"invalid JSONPath for field {name}: {path}")
+
+    actions = template.get("actions", [])
+    if not isinstance(actions, list):
+        raise InvalidTemplateError("actions must be a list")
+
+    for action in actions:
+        if not isinstance(action, dict):
+            raise InvalidTemplateError("malformed action")
+        aid = action.get("id")
+        label = action.get("label")
+        endpoint = action.get("endpoint")
+        if not aid or not label or not endpoint:
+            raise InvalidTemplateError("actions must have id, label, and endpoint")
+
+        if endpoint not in declared_endpoints:
+            if not any(endpoint.startswith(p.rstrip("*")) for p in declared_endpoints if p.endswith("*")):
+                raise InvalidTemplateError(
+                    f"action endpoint {endpoint} not covered by declaredEndpoints"
+                )
 
 
 def _parse_version(version: str) -> tuple[int, int, int, str]:
@@ -59,8 +102,27 @@ async def publish_plugin(
     signed_bundle_url: str,
     capabilities: list[str],
     endpoints: list[str],
+    renderer: str = "script",
+    template: dict | None = None,
+    card_type: str = "event",
+    card_key_path: str | None = None,
 ) -> Plugin:
     new_key = _parse_version(version)
+
+    if renderer == "template":
+        if not template:
+            raise InvalidTemplateError("template object is required for renderer='template'")
+        _validate_template(template, endpoints)
+    elif renderer != "script":
+        raise InvalidTemplateError(f"unknown renderer type: {renderer}")
+
+    if card_type == "live":
+        if not card_key_path:
+            raise InvalidTemplateError("card_key_path is required for card_type='live'")
+        if not card_key_path.startswith("$"):
+            raise InvalidTemplateError(f"invalid JSONPath for card_key_path: {card_key_path}")
+    elif card_type != "event":
+        raise InvalidTemplateError(f"unknown card_type: {card_type}")
 
     # Reject if any existing non-revoked version is >= new version.
     existing = await db.execute(
@@ -86,6 +148,10 @@ async def publish_plugin(
         bundle_hash=bundle_hash,
         signature=signature,
         signed_bundle_url=signed_bundle_url,
+        renderer=renderer,
+        template=template,
+        card_type=card_type,
+        card_key_path=card_key_path,
         capabilities=capabilities,
         endpoints=endpoints,
     )
@@ -94,9 +160,6 @@ async def publish_plugin(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        # Narrowed: only re-classify the UNIQUE-specific case as a 409
-        # duplicate. Other IntegrityErrors (FK violations etc) escape
-        # to the route handler as 500s so we see actual schema bugs.
         msg = str(exc.orig) if exc.orig else str(exc)
         if "uq_plugins_sender_identifier_version" in msg:
             raise DuplicateVersionError(
@@ -129,14 +192,6 @@ async def get_latest_for_plugin(
 async def get_plugin_by_id(
     db: AsyncSession, *, plugin_row_id: uuid.UUID
 ) -> Plugin:
-    """Returns the plugin row whether or not it's revoked. Used by the
-    device's historical lookup path so an old message can re-resolve the
-    exact bundle it was originally validated against, even after the
-    sender published a newer (or a revoked) version under the same
-    plugin_identifier.
-
-    Raises PluginNotFoundError if the row doesn't exist at all.
-    """
     result = await db.execute(select(Plugin).where(Plugin.id == plugin_row_id))
     plugin = result.scalar_one_or_none()
     if plugin is None:
@@ -144,11 +199,6 @@ async def get_plugin_by_id(
     return plugin
 
 
-# M11.4: severity ordering for monotonic revocation-reason updates. Only an
-# UP-traversal of this list is allowed once a row is revoked, so a sender
-# (or a compromised sender's key) cannot later silently downgrade a
-# `compromised` revoke to `superseded` and trick devices into running
-# untrusted code.
 _REASON_SEVERITY = {
     None: 0,
     "superseded": 1,
@@ -163,15 +213,6 @@ async def revoke_plugin_row(
     plugin_row_id: uuid.UUID,
     reason: str | None = None,
 ) -> Plugin:
-    """Mark a plugin row revoked, optionally with a classification reason.
-
-    Idempotent on `revoked_at` — re-revoking does NOT push the timestamp
-    forward. The reason field is monotonic: a higher-severity reason can
-    overwrite a lower one (so `superseded` → `compromised` works when a
-    vuln surfaces in an already-superseded version), but the reverse
-    silently no-ops so a leaked sender key can't downgrade a security
-    revoke into a harmless one.
-    """
     result = await db.execute(select(Plugin).where(Plugin.id == plugin_row_id))
     plugin = result.scalar_one_or_none()
     if plugin is None:

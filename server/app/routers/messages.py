@@ -1,4 +1,4 @@
-"""Message routes — send, inbox, fetch single, dismiss.
+"""Message routes ג€” send, inbox, fetch single, dismiss.
 
 Sender authentication for ``POST /send`` uses an Ed25519 envelope signature
 verified against the registered sender's public key. Users authenticate
@@ -22,13 +22,17 @@ from app.db import get_db
 from app.middleware.rate_limit import rate_limit
 from app.models import Sender
 from app.schemas import (
+    InboxFeedResponse,
+    LiveCardInboxItem,
     MessageDetailResponse,
     MessageInboxItem,
+    MessageInboxItemExtended,
     MessageInboxResponse,
     MessageSendRequest,
     MessageSendResponse,
     decode_base64,
 )
+from app.services.cards import get_live_cards_for_user
 from app.services.messages import (
     ExpiredEnvelopeError,
     MessageNotFoundError,
@@ -59,7 +63,7 @@ def _b64(value: bytes) -> str:
 
 
 def _build_envelope_bytes(payload: MessageSendRequest) -> bytes:
-    """Build the canonical 7-field envelope the sender signs (matches crypto-spec §4.1)."""
+    """Build the canonical 7-field envelope the sender signs (matches crypto-spec ֲ§4.1)."""
     if payload.expires_at is None:
         raise HTTPException(status_code=400, detail="expires_at is required")
     return assemble_envelope(
@@ -156,25 +160,30 @@ async def send_message(
     return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
 
 
-@router.get("/inbox", response_model=MessageInboxResponse)
+@router.get("/inbox", response_model=InboxFeedResponse)
 async def inbox(
     since: datetime | None = Query(None),
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
-) -> MessageInboxResponse:
-    # Device identity comes from the JWT — no separate query param, and
+) -> InboxFeedResponse:
+    # Device identity comes from the JWT ג€” no separate query param, and
     # the auth dependency already verified the device is not revoked.
-    # Bump last_seen so Settings → Devices shows fresh activity.
+    # Bump last_seen so Settings ג†’ Devices shows fresh activity.
     await touch_device_last_seen(db, device_id=ctx.device.id)
 
+    # 1. Fetch event messages.
     messages, next_since = await inbox_for_device(
         db,
         user_id=ctx.user.id,
         device_id=ctx.device.id,
         since=since,
     )
-    # Project plugin_identifier for each message in one batch query.
-    plugin_ids = list({m.plugin_id for m in messages})
+
+    # 2. Fetch live cards.
+    live_cards = await get_live_cards_for_user(db, user_id=ctx.user.id)
+
+    # 3. Project plugin_identifiers in one batch.
+    plugin_ids = list({m.plugin_id for m in messages} | {c.plugin_id for c in live_cards})
     identifier_by_id: dict[uuid.UUID, str] = {}
     if plugin_ids:
         from app.models import Plugin
@@ -183,8 +192,29 @@ async def inbox(
             sql_select(Plugin.id, Plugin.plugin_identifier).where(Plugin.id.in_(plugin_ids))
         )
         identifier_by_id = {row[0]: row[1] for row in rows.all()}
-    items = [_message_to_inbox_item(m, identifier_by_id.get(m.plugin_id, "")) for m in messages]
-    return MessageInboxResponse(messages=items, next_since=next_since)
+
+    # 4. Build the unified feed.
+    items: list[MessageInboxItemExtended | LiveCardInboxItem] = []
+
+    for m in messages:
+        item = _message_to_inbox_item(m, identifier_by_id.get(m.plugin_id, ""))
+        items.append(MessageInboxItemExtended(**item.model_dump()))
+
+    for c in live_cards:
+        items.append(LiveCardInboxItem(
+            id=c.id,
+            sender_id=c.sender_id,
+            plugin_id=c.plugin_id,
+            plugin_identifier=identifier_by_id.get(c.plugin_id, ""),
+            card_key=c.card_key,
+            encrypted_payload=_b64(c.encrypted_payload),
+            nonce=_b64(c.nonce),
+            sequence_number=c.sequence_number,
+            updated_at=c.updated_at,
+            expires_at=c.expires_at,
+        ))
+
+    return InboxFeedResponse(items=items, next_since=next_since)
 
 
 @router.get("/{message_id}", response_model=MessageDetailResponse)
@@ -213,7 +243,7 @@ async def dismiss_message(
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    # Device comes from the JWT — no query param, no ownership check (the
+    # Device comes from the JWT ג€” no query param, no ownership check (the
     # auth dependency already verified the device exists, belongs to the
     # user, and is not revoked).
     try:
@@ -228,7 +258,7 @@ async def dismiss_message(
 
     # Fan out the dismiss event to other devices. The plugin's dismissBehavior
     # is encoded on the device side (in the plugin manifest), but the platform
-    # always sends the event — devices decide locally whether to act on it.
+    # always sends the event ג€” devices decide locally whether to act on it.
     await push_dismiss_to_other_devices(db, message=message, dismissing_device_id=ctx.device.id)
     # SSE hint: nudge OTHER foreground devices to update their local
     # dismiss state. The dismissing device knows already; we mark its id

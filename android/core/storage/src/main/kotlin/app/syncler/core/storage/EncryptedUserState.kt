@@ -24,6 +24,11 @@ data class EncryptedUserState(
     /** M11.6: per-message delete state. Hidden from all surfaces; merges as union. */
     val deletedMessages: List<DeletedMessageEntry> = emptyList(),
     /**
+     * Phase 3c: sender IDs the user has muted. Muted senders are filtered out
+     * of the inbox view. Merged as a union (mute on any device propagates).
+     */
+    val mutedSenders: List<String> = emptyList(),
+    /**
      * Phase 1: synced paired senders. Each user device that scans a sender's
      * QR adds a [PairedSenderEntry] to this list; the M7 state blob fans the
      * pairing key (encrypted under the user's master key) out to every other
@@ -71,6 +76,9 @@ data class EncryptedUserState(
         put("paired_senders", JSONArray().apply {
             pairedSenders.forEach { put(it.toJson()) }
         })
+        put("muted_senders", JSONArray().apply {
+            mutedSenders.forEach { put(it) }
+        })
         put("phase1_migration_done_at", phase1MigrationDoneAt ?: JSONObject.NULL)
     }.toString()
 
@@ -80,7 +88,9 @@ data class EncryptedUserState(
         const val SCHEMA_V3 = 3
         /** Phase 1: adds `paired_senders` field for synced pairing. */
         const val SCHEMA_V4 = 4
-        const val SCHEMA_CURRENT = SCHEMA_V4
+        /** Phase 3c: adds `muted_senders` field. */
+        const val SCHEMA_V5 = 5
+        const val SCHEMA_CURRENT = SCHEMA_V5
 
         /** Pre-V1 blobs (no schema_version field) — migrated forward at parse. */
         const val SCHEMA_V0 = 0
@@ -94,7 +104,7 @@ data class EncryptedUserState(
             val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
             return EncryptedUserState(
                 schemaVersion = when (schema) {
-                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3 -> SCHEMA_CURRENT  // forward-migrate
+                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4 -> SCHEMA_CURRENT  // forward-migrate
                     else -> schema
                 },
                 installedPlugins = obj.optJSONArray("installed_plugins")
@@ -151,6 +161,13 @@ data class EncryptedUserState(
                     ?.let { arr ->
                         (0 until arr.length()).mapNotNull {
                             runCatching { DeletedMessageEntry.fromJson(arr.getJSONObject(it)) }.getOrNull()
+                        }
+                    }
+                    .orEmpty(),
+                mutedSenders = obj.optJSONArray("muted_senders")
+                    ?.let { arr ->
+                        (0 until arr.length()).mapNotNull {
+                            runCatching { arr.getString(it) }.getOrNull()
                         }
                     }
                     .orEmpty(),

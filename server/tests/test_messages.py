@@ -194,7 +194,7 @@ async def test_send_message_round_trip(
         headers={"Authorization": f"Bearer {session_token}"},
     )
     assert inbox.status_code == 200, inbox.text
-    items = inbox.json()["messages"]
+    items = inbox.json()["items"]
     assert len(items) == 1
     assert items[0]["id"] == message_id
 
@@ -301,7 +301,7 @@ async def test_send_succeeds_when_device_has_no_fcm_token(
         headers={"Authorization": f"Bearer {session_token}"},
     )
     assert inbox.status_code == 200, inbox.text
-    ids = [m["id"] for m in inbox.json()["messages"]]
+    ids = [m["id"] for m in inbox.json()["items"]]
     assert message_id in ids
 
 

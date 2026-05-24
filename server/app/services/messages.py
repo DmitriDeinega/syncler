@@ -185,10 +185,28 @@ async def inbox_for_device(
     limit: int = 50,
 ) -> tuple[list[Message], datetime | None]:
     now = datetime.now(UTC)
+    # Phase 2 carry-over (Codex consultation 57 YELLOW, Phase 3a delivery):
+    # LEFT OUTER JOIN the per-device delivery status so we can filter out
+    # messages this device has already dismissed. When no DeliveryStatus row
+    # exists for (message, device), the join returns NULL — `IS NULL` keeps
+    # those rows. When a row exists with `dismissed_at IS NOT NULL`, the
+    # filter drops it, which is what makes cross-device dismiss visible on
+    # the next pull (and on the `dismiss` SSE event's repository.refresh).
     query = (
         select(Message)
+        .outerjoin(
+            DeliveryStatus,
+            and_(
+                DeliveryStatus.message_id == Message.id,
+                DeliveryStatus.device_id == device_id,
+            ),
+        )
         .where(
-            and_(Message.user_id == user_id, Message.expires_at > now),
+            and_(
+                Message.user_id == user_id,
+                Message.expires_at > now,
+                DeliveryStatus.dismissed_at.is_(None),
+            ),
         )
         .order_by(Message.sent_at.asc())
         .limit(limit)

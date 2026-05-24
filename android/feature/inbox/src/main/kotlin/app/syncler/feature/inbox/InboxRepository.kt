@@ -5,8 +5,11 @@ import app.syncler.core.crypto.Aead
 import app.syncler.core.crypto.MessageAad
 import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.crypto.toCanonicalJsonBytes
+import app.syncler.core.network.InboxFeedItemDto
+import app.syncler.core.network.InboxFeedResponseDto
 import app.syncler.core.network.MessageInboxItemDto
 import app.syncler.core.network.SynclerApi
+import app.syncler.core.network.TemplateBlockDto
 import app.syncler.core.storage.PairedSender
 import app.syncler.core.storage.PairedSenderStore
 import app.syncler.core.storage.compareIsoTimestamps
@@ -33,7 +36,7 @@ import timber.log.Timber
  * bundle so the inbox UI can render it via a WebView.
  *
  * Bundle cache lives for the process lifetime; on app restart we re-fetch.
- * That's fine for V1 — caching across launches is an M11+ refinement that
+ * That's fine for V1 ג€” caching across launches is an M11+ refinement that
  * needs invalidation tied to plugin version updates.
  */
 @Singleton
@@ -63,9 +66,9 @@ class InboxRepository @Inject constructor(
      * validated for (Codex's M11.3 concern: avoid history drift when a
      * plugin author publishes a render-incompatible v2).
      *
-     * In-memory only in V1 — survives process lifetime, lost on restart.
+     * In-memory only in V1 ג€” survives process lifetime, lost on restart.
      * Disk persistence with size-based eviction is V1.5 (see also
-     * `docs/integration-guide.md` §9 "Common errors" for the user-visible
+     * `docs/integration-guide.md` ֲ§9 "Common errors" for the user-visible
      * "Plugin couldn't be re-fetched" path).
      */
     private val bundleByHash = mutableMapOf<String, CachedBundle>()
@@ -78,39 +81,32 @@ class InboxRepository @Inject constructor(
         runCatching {
             val response = api.inbox(since = lastSince)
             val userId = session.currentUserId() ?: return@runCatching 0
-            // Phase 1: a single sender may have multiple active pairings
-            // during the transition window where pre-sync devices each
-            // paired separately (each got its own pairingKey; the sender
-            // encrypts under whichever it received). Group all active
-            // pairings by senderId so decrypt can try each key in turn.
             val pairingsBySender = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }
 
-            // Track whether any message was skipped because the local
-            // pairing set didn't have a candidate for it. If so, we do
-            // NOT advance `lastSince` — the messages might still resolve
-            // once a pending migration / state sync completes, and we
-            // want the next refresh to re-fetch them rather than losing
-            // them (Codex consultation 53 RED #1).
             var sawMissingPairing = false
 
-            val newDecrypted = response.messages.mapNotNull { dto ->
+            val newDecrypted = response.items.mapNotNull { dto ->
                 val candidates = pairingsBySender[dto.senderId].orEmpty()
                 if (candidates.isEmpty()) {
                     Timber.tag(TAG).w("no paired sender for senderId=%s; skipping", dto.senderId)
                     sawMissingPairing = true
                     return@mapNotNull null
                 }
-                val decrypted = decryptWithAnyKey(
-                    dto = dto,
-                    userId = userId,
-                    candidates = candidates,
-                ) ?: run {
+
+                val decrypted = if (dto.type == "live") {
+                    decryptLiveCard(dto, userId, candidates)
+                } else {
+                    decryptEventMessage(dto, userId, candidates)
+                }
+
+                if (decrypted == null) {
                     Timber.tag(TAG).w(
-                        "no candidate pairing key decrypted message %s from sender %s",
-                        dto.id, dto.senderId,
+                        "no candidate pairing key decrypted %s %s from sender %s",
+                        dto.type, dto.id, dto.senderId,
                     )
                     return@mapNotNull null
                 }
+
                 // Resolve plugin bundle by historical row UUID (NOT by current
                 // /latest) so old messages render against the exact bundle
                 // they were validated for. Codex review 40: a sender publishing
@@ -119,27 +115,41 @@ class InboxRepository @Inject constructor(
                 decrypted.copy(
                     bundleJs = plugin?.bundleJs,
                     declaredEndpoints = plugin?.endpoints.orEmpty(),
+                    renderer = plugin?.renderer ?: "script",
+                    template = plugin?.template,
                     bundleHash = plugin?.bundleHashHex,
                     revocationReason = plugin?.revocationReason,
                 )
             }
 
             if (newDecrypted.isNotEmpty()) {
-                val merged = (newDecrypted + _items.value).distinctBy { it.id }
-                // Sort by parsed Instant, not by raw string. ISO timestamps
-                // with variable fractional seconds sort lexically the wrong
-                // way ("…10:00:00Z" > "…10:00:00.500Z") and would put older
-                // messages above newer ones in the feed. Items that fail to
-                // parse fall to the bottom so a corrupt timestamp can't
-                // hijack the top of the inbox.
+                // Merge with existing items. Live cards overwrite by cardKey;
+                // event messages merge by ID.
+                val existing = _items.value
+                val eventMessages = (newDecrypted.filter { it.type == "event" } + existing.filter { it.type == "event" })
+                    .distinctBy { it.id }
+
+                // Live cards: newer sequence number wins.
+                val liveCards = (newDecrypted.filter { it.type == "live" } + existing.filter { it.type == "live" })
+                    .groupBy { it.cardKey }
+                    .map { (_, versions) ->
+                        versions.sortedByDescending { it.sequenceNumber ?: -1 }[0]
+                    }
+
+                val merged = eventMessages + liveCards
+
+                // Sort: live cards pinned above events.
+                // Within events: sentAt descending.
+                // Within live cards: updatedAt descending.
                 _items.value = merged.sortedWith(
-                    compareByDescending<InboxItem> { parseInstantOrNull(it.sentAt) }
+                    compareByDescending<InboxItem> { it.type == "live" }
+                        .thenByDescending { if (it.type == "live") parseInstantOrNull(it.updatedAt ?: "") else parseInstantOrNull(it.sentAt) }
                         .thenByDescending { it.id },
                 )
             }
             if (sawMissingPairing) {
                 Timber.tag(TAG).w(
-                    "holding lastSince at %s — at least one message had no pairing candidate; will re-fetch next refresh once pairings sync",
+                    "holding lastSince at %s ג€” at least one item had no pairing candidate; will re-fetch next refresh once pairings sync",
                     lastSince,
                 )
             } else {
@@ -150,14 +160,93 @@ class InboxRepository @Inject constructor(
     }
 
     /**
+     * Revoke every active pairing for a sender. Mirrors `PairingRepository.revoke`
+     * (which is the canonical path called from the device-management screen)
+     * so the server-side tombstone always lands BEFORE the local synced
+     * removal ג€” without that ordering, an offline device that hadn't sync'd
+     * yet could resurrect the pairing on its next refresh, and the receiving
+     * sender would keep being able to send messages we'd now decrypt.
+     *
+     * Closes Codex consultation 62 RED #7. Per-pairing errors are logged and
+     * skipped so one network failure doesn't leave an inconsistent set of
+     * pairings half-revoked; the next sheet-revoke retry picks them up.
+     */
+    suspend fun revokeSender(senderId: String) {
+        val active = pairedSenderStore.activePairingsForSender(senderId)
+        active.forEach { pairing ->
+            val response = runCatching { api.revokePairing(pairing.pairingId) }
+            response.onFailure {
+                Timber.tag(TAG).w(it, "server revoke failed for pairing %s; keeping local", pairing.pairingId)
+                return@forEach
+            }
+            val resp = response.getOrNull()
+            if (resp == null || !resp.isSuccessful) {
+                Timber.tag(TAG).w(
+                    "server revoke for pairing %s returned %s; keeping local",
+                    pairing.pairingId,
+                    resp?.code()?.toString() ?: "no-response",
+                )
+                return@forEach
+            }
+            pairedSenderStore.remove(pairing.pairingId)
+        }
+    }
+
+    suspend fun upsertCard(data: String) {
+        val userId = session.currentUserId() ?: return
+        val dto = runCatching {
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            moshi.adapter(InboxFeedItemDto::class.java).fromJson(data)
+        }.getOrNull() ?: return
+
+        val candidates = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }[dto.senderId].orEmpty()
+        if (candidates.isEmpty()) return
+
+        val decrypted = decryptLiveCard(dto, userId, candidates) ?: return
+        val plugin = fetchPluginByRowOrNull(dto.pluginId)
+        val item = decrypted.copy(
+            bundleJs = plugin?.bundleJs,
+            declaredEndpoints = plugin?.endpoints.orEmpty(),
+            renderer = plugin?.renderer ?: "script",
+            template = plugin?.template,
+            bundleHash = plugin?.bundleHashHex,
+            revocationReason = plugin?.revocationReason,
+        )
+
+        _items.value = pollMutex.withLock {
+            val existing = _items.value
+            val currentCard = existing.find { it.type == "live" && it.cardKey == item.cardKey && it.senderId == item.senderId }
+
+            if (currentCard != null && (item.sequenceNumber ?: 0L) <= (currentCard.sequenceNumber ?: 0L)) {
+                return@withLock existing
+            }
+
+            val filtered = if (currentCard != null) existing.filter { it !== currentCard } else existing
+            (filtered + item).sortedWith(
+                compareByDescending<InboxItem> { it.type == "live" }
+                    .thenByDescending { if (it.type == "live") parseInstantOrNull(it.updatedAt ?: "") else parseInstantOrNull(it.sentAt) }
+                    .thenByDescending { it.id },
+            )
+        }
+    }
+
+    suspend fun deleteCard(senderId: String, cardKey: String) {
+        _items.value = pollMutex.withLock {
+            _items.value.filterNot { it.type == "live" && it.senderId == senderId && it.cardKey == cardKey }
+        }
+    }
+
+    /**
      * Fetches the historical manifest for `pluginRowId` via the by-id
      * endpoint, verifies the bundle, caches bytes BY HASH. The row UUID
      * resolves to the exact bundle that was active when the message was
-     * sent — survives later sender publishes AND surfaces revocation
+     * sent ג€” survives later sender publishes AND surfaces revocation
      * state (silent for ``superseded``, alert for ``compromised``, etc.).
      *
      * Already-cached hashes short-circuit. If the row's revocation_reason
-     * is ``compromised``, refuse to load the bundle — the render path
+     * is ``compromised``, refuse to load the bundle ג€” the render path
      * shows the security warning instead.
      */
     private suspend fun fetchPluginByRowOrNull(pluginRowId: String): CachedBundle? {
@@ -173,6 +262,25 @@ class InboxRepository @Inject constructor(
                     endpoints = emptyList(),
                     bundleHashHex = null,
                     revocationReason = manifest.revocationReason,
+                    renderer = manifest.renderer,
+                    template = manifest.template,
+                )
+            }
+
+            // Phase 3a: template-renderer plugins ship NO bundle. Short-circuit
+            // the bundle-fetch path entirely ג€” there's nothing to download or
+            // verify by hash, and the WebView path is never used. The
+            // server-side validator already enforced (layout, JSONPath, action
+            // endpoint גˆˆ declaredEndpoints) at publish time, so the client
+            // can trust the manifest's template block as-is.
+            if (manifest.renderer == "template") {
+                return@runCatching CachedBundle(
+                    bundleJs = null,
+                    endpoints = manifest.endpoints,
+                    bundleHashHex = null,
+                    revocationReason = manifest.revocationReason,
+                    renderer = manifest.renderer,
+                    template = manifest.template,
                 )
             }
 
@@ -180,11 +288,15 @@ class InboxRepository @Inject constructor(
                 ?: error("plugin bundle_hash is not valid base64")
             val expectedHashHex = expectedHashBytes.joinToString("") { "%02x".format(it) }
 
-            // Cache hit by hash — same plugin version we already verified.
+            // Cache hit by hash ג€” same plugin version we already verified.
             pluginMutex.withLock { bundleByHash[expectedHashHex] }?.let { existing ->
                 // Refresh revocation_reason on cache hit so a newly-revoked
                 // plugin gets its banner even if its bytes were cached previously.
-                return@runCatching existing.copy(revocationReason = manifest.revocationReason)
+                return@runCatching existing.copy(
+                    revocationReason = manifest.revocationReason,
+                    renderer = manifest.renderer,
+                    template = manifest.template,
+                )
             }
 
             // Scheme check. Release: HTTPS only. Debug: any HTTP for LAN dev.
@@ -209,6 +321,8 @@ class InboxRepository @Inject constructor(
                 endpoints = manifest.endpoints,
                 bundleHashHex = expectedHashHex,
                 revocationReason = manifest.revocationReason,
+                renderer = manifest.renderer,
+                template = manifest.template,
             )
             pluginMutex.withLock { bundleByHash[expectedHashHex] = cached }
             cached
@@ -227,85 +341,121 @@ class InboxRepository @Inject constructor(
         val endpoints: List<String>,
         val bundleHashHex: String?,
         val revocationReason: String?,
+        /**
+         * Phase 3a. "script" (use bundleJs in a WebView) or "template" (use
+         * `template` with the native Compose [TemplateCard] renderer). Falls
+         * back to "script" when the server doesn't supply a value.
+         */
+        val renderer: String = "script",
+        /**
+         * Phase 3a. The template manifest block. Non-null only when
+         * `renderer == "template"`; the server validator enforces the pairing
+         * at publish time.
+         */
+        val template: TemplateBlockDto? = null,
     )
 
     /**
      * Try every candidate pairing key in turn until one decrypts successfully.
      * Returns the first matching [InboxItem]; null if none of the keys work.
-     *
-     * Multi-key fallback exists for the Phase 1 transition window: pre-sync,
-     * each device paired separately with its own pairingKey. The sender
-     * encrypts under whichever key it has registered. After the user re-pairs
-     * (which tombstones the old pairings), this collapses to a single
-     * active key.
-     *
-     * Newest pairing first (by firstPairedAt descending) so a freshly-rotated
-     * key wins the race against stale legacy pairings.
      */
-    private fun decryptWithAnyKey(
-        dto: MessageInboxItemDto,
+    private fun decryptEventMessage(
+        dto: InboxFeedItemDto,
         userId: String,
         candidates: List<PairedSender>,
     ): InboxItem? {
-        // Try newest-first by parsed Instant — variable-fraction-second
-        // ISO-8601 strings don't sort lexicographically (consultation 53).
         val ordered = candidates.sortedWith { a, b ->
-            compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt)  // b vs a = descending
+            compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt)
         }
         for (candidate in ordered) {
-            if (candidate.pairingKey.size != 32) continue
-            val item = decrypt(
-                dto = dto,
-                userId = userId,
-                pairingKey = candidate.pairingKey,
-                senderName = candidate.senderName,
-            )
-            if (item != null) return item
+            val decrypted = runCatching {
+                val aad = MessageAad(
+                    senderId = dto.senderId,
+                    userId = userId,
+                    pluginId = dto.pluginId,
+                    minPluginVersion = dto.minPluginVersion ?: "",
+                    expiresAt = dto.expiresAt,
+                ).toCanonicalJsonBytes()
+
+                val nonce = dto.nonce.base64ToBytes()
+                val ciphertext = (dto.encryptedBody ?: "").base64ToBytes()
+                val plaintext = Aead.decrypt(candidate.pairingKey, nonce + ciphertext, aad)
+                val plaintextString = plaintext.toString(Charsets.UTF_8)
+
+                InboxItem(
+                    id = dto.id,
+                    senderId = dto.senderId,
+                    senderName = candidate.senderName,
+                    pluginId = dto.pluginId,
+                    pluginIdentifier = dto.pluginIdentifier,
+                    payloadJson = plaintextString,
+                    sentAt = dto.sentAt ?: "",
+                    expiresAt = dto.expiresAt,
+                    type = "event",
+                    bundleJs = null,
+                    declaredEndpoints = emptyList(),
+                    bundleHash = null,
+                    revocationReason = null,
+                    renderer = "script",
+                    template = null,
+                    hostPreview = HostPreviewParser.parse(plaintextString),
+                )
+            }.getOrNull()
+            if (decrypted != null) return decrypted
         }
         return null
     }
 
-    private fun decrypt(
-        dto: MessageInboxItemDto,
+    private fun decryptLiveCard(
+        dto: InboxFeedItemDto,
         userId: String,
-        pairingKey: ByteArray,
-        senderName: String,
-    ): InboxItem? = runCatching {
-        val aad = MessageAad(
-            senderId = dto.senderId,
-            userId = userId,
-            pluginId = dto.pluginId,
-            // Sender uses empty string when min_plugin_version isn't set; server
-            // stores null and returns null over the wire — reconstruct ""
-            // so the AAD bytes match what the sender signed/encrypted.
-            minPluginVersion = dto.minPluginVersion ?: "",
-            expiresAt = dto.expiresAt,
-        ).toCanonicalJsonBytes()
+        candidates: List<PairedSender>,
+    ): InboxItem? {
+        val ordered = candidates.sortedWith { a, b ->
+            compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt)
+        }
+        for (candidate in ordered) {
+            val decrypted = runCatching {
+                val aad = app.syncler.core.crypto.LiveCardAad(
+                    senderId = dto.senderId,
+                    userId = userId,
+                    pluginId = dto.pluginId,
+                    cardKey = dto.cardKey ?: "",
+                    sequenceNumber = dto.sequenceNumber ?: 0L,
+                    expiresAt = dto.expiresAt,
+                ).toCanonicalJsonBytes()
 
-        val nonce = dto.nonce.base64ToBytes()
-        val ciphertext = dto.encryptedBody.base64ToBytes()
-        // Aead.decrypt expects (nonce || ciphertext) concatenated; wire splits
-        // them, so we reassemble before handing to the AES-GCM primitive.
-        val wire = nonce + ciphertext
-        val plaintext = Aead.decrypt(pairingKey, wire, aad)
+                val nonce = dto.nonce.base64ToBytes()
+                val ciphertext = (dto.encryptedPayload ?: "").base64ToBytes()
+                val plaintext = Aead.decrypt(candidate.pairingKey, nonce + ciphertext, aad)
+                val plaintextString = plaintext.toString(Charsets.UTF_8)
 
-        val plaintextString = plaintext.toString(Charsets.UTF_8)
-        InboxItem(
-            id = dto.id,
-            senderId = dto.senderId,
-            senderName = senderName,
-            pluginId = dto.pluginId,
-            pluginIdentifier = dto.pluginIdentifier,
-            payloadJson = plaintextString,
-            sentAt = dto.sentAt,
-            expiresAt = dto.expiresAt,
-            bundleJs = null,
-            declaredEndpoints = emptyList(),
-            bundleHash = null,
-            revocationReason = null,
-            hostPreview = HostPreviewParser.parse(plaintextString),
-        )
-    }.onFailure { Timber.tag(TAG).w(it, "decrypt failed for message %s", dto.id) }.getOrNull()
+                InboxItem(
+                    id = dto.id,
+                    senderId = dto.senderId,
+                    senderName = candidate.senderName,
+                    pluginId = dto.pluginId,
+                    pluginIdentifier = dto.pluginIdentifier,
+                    payloadJson = plaintextString,
+                    sentAt = dto.updatedAt ?: dto.expiresAt, // live cards use updatedAt for list ordering
+                    expiresAt = dto.expiresAt,
+                    type = "live",
+                    cardKey = dto.cardKey,
+                    sequenceNumber = dto.sequenceNumber,
+                    updatedAt = dto.updatedAt,
+                    bundleJs = null,
+                    declaredEndpoints = emptyList(),
+                    bundleHash = null,
+                    revocationReason = null,
+                    renderer = "script",
+                    template = null,
+                    hostPreview = HostPreviewParser.parse(plaintextString),
+                )
+            }.getOrNull()
+            if (decrypted != null) return decrypted
+        }
+        return null
+    }
 
     private fun parseInstantOrNull(s: String): Instant? =
         runCatching { Instant.parse(s) }.getOrNull()
@@ -325,7 +475,23 @@ data class InboxItem(
     val sentAt: String,
     val expiresAt: String,
     /**
-     * Plugin JS bundle source. Null when the fetch is in-flight or failed —
+     * Type: "event" (one-off message) or "live" (persistent upsertable card).
+     */
+    val type: String = "event",
+    /**
+     * Stable identifier for live cards. Null for event messages.
+     */
+    val cardKey: String? = null,
+    /**
+     * Sequence number for live cards (M11.5). Null for event messages.
+     */
+    val sequenceNumber: Long? = null,
+    /**
+     * Last update time for live cards. Null for event messages.
+     */
+    val updatedAt: String? = null,
+    /**
+     * Plugin JS bundle source. Null when the fetch is in-flight or failed ג€”
      * the UI surfaces a fallback error card in that case (still pullable from
      * the inbox; detail view can retry).
      */
@@ -346,17 +512,29 @@ data class InboxItem(
     val bundleHash: String?,
     /**
      * Revocation classification when the plugin row this message references
-     * has been pulled. One of: ``superseded`` (silent — UX may show subdued
+     * has been pulled. One of: ``superseded`` (silent ג€” UX may show subdued
      * banner), ``compromised`` (refuse to render; show security warning),
      * ``sender_disabled`` (render with "no longer available" banner),
-     * ``unspecified`` (pre-M11.4 legacy revoke — treat conservatively).
+     * ``unspecified`` (pre-M11.4 legacy revoke ג€” treat conservatively).
      * Null on active rows.
      */
     val revocationReason: String?,
     /**
+     * Phase 3a. "script" (legacy WebView bundle path) or "template" (native
+     * Compose renderer via [TemplateCard]). Defaults to "script" so any code
+     * that hasn't been updated for Phase 3a still picks the WebView path.
+     */
+    val renderer: String = "script",
+    /**
+     * Phase 3a. The template manifest. Non-null iff `renderer == "template"`;
+     * the publish-time server validator enforces the pairing so the dispatch
+     * site can trust this invariant.
+     */
+    val template: TemplateBlockDto? = null,
+    /**
      * Structured row metadata extracted from the decrypted payload's reserved
      * `hostPreview` key. Null when the sender didn't supply one or the block
-     * was malformed (logged and ignored — the row falls back to a generic
+     * was malformed (logged and ignored ג€” the row falls back to a generic
      * "New message from {senderName}" rendering).
      */
     val hostPreview: HostPreview?,

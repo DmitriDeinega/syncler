@@ -125,6 +125,18 @@ class Plugin(Base):
     # M11.4: optional classification of why this plugin row was revoked.
     # See revoke endpoint for the accepted enum and per-reason UX contract.
     revocation_reason: Mapped[str | None] = mapped_column(Text)
+    # Phase 3a: "script" (legacy WebView bundle) or "template" (native
+    # Compose renderer). Backfilled to "script" for pre-existing rows so
+    # the latest endpoint can safely return a non-null value.
+    renderer: Mapped[str] = mapped_column(Text, nullable=False, server_default="script")
+    # Phase 3a: the template manifest block when renderer == "template".
+    # Null otherwise. The publish-time validator in routers/plugins.py
+    # rejects mismatched (renderer, template) pairs before insert.
+    template: Mapped[dict | None] = mapped_column(JSONB_TYPE, nullable=True)
+    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+    # for live cards to extract their stable identity from the payload.
+    card_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="event")
+    card_key_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -170,6 +182,45 @@ class DeliveryStatus(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     actioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveCard(Base):
+    __tablename__ = "live_cards"
+    __table_args__ = (
+        UniqueConstraint("sender_id", "user_id", "card_key", name="uq_live_cards_sender_user_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id"),
+        nullable=False,
+        index=True,
+    )
+    plugin_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("plugins.id"),
+        nullable=False,
+    )
+    card_key: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sequence_number: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class EncryptedUserState(Base):
