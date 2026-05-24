@@ -383,6 +383,83 @@ def assemble_live_card_delete_envelope(
     ).encode("utf-8")
 ```
 
+## 9. Bootstrap Protocol (V1.5)
+
+Automated pairing (V1.5 DX) replaces manual `user_id`/`pairing_key` entry with an encrypted POST from the device to a sender-operated broker. Trust is established by the sender signing its X25519 bootstrap key with its long-term Ed25519 signing key.
+
+### 9.1 Sender Bootstrap Key Registration
+
+The sender generates a static X25519 keypair. It signs the raw 32-byte public key with its Ed25519 signing key to bind the bootstrap identity to the sender identity.
+
+Signing input:
+```text
+"syncler-v1-bootstrap-key:" (24 bytes ASCII) || bootstrap_pub_x25519 (32 bytes raw)
+```
+
+The signature and X25519 public key are registered with the Syncler server. The server stores a hash `bootstrap_key_id = SHA-256(bootstrap_key)[:16]` for stable identification.
+
+### 9.2 Bootstrap Encryption (HPKE-style)
+
+The device fetches the sender's bootstrap key and signature from the server and verifies the signature BEFORE proceeding.
+
+1. Device generates an ephemeral X25519 keypair `(eph_priv, eph_pub)`.
+2. `shared_secret = X25519(eph_priv, sender.bootstrap_key)`.
+3. `aead_key = HKDF-SHA256(salt=eph_pub || sender.bootstrap_key, ikm=shared_secret, info="syncler-v1-bootstrap-aead", length=32)`.
+4. `nonce = 12 random bytes`.
+5. `aad = JSON canonical bytes (sorted keys, compact separators, UTF-8)`.
+6. `ciphertext_with_tag = AES-256-GCM(aead_key, nonce, plaintext, aad)`.
+
+### 9.3 Bootstrap AAD
+
+Canonical JSON binds the envelope to the specific pairing and broker.
+
+```json
+{
+  "bootstrap_key_id": "<base64 16 bytes>",
+  "broker_url": "<string>",
+  "exp": "<ISO8601 UTC with Z suffix>",
+  "pairing_id": "<uuid>",
+  "protocol_version": 1,
+  "sender_id": "<uuid>"
+}
+```
+
+**Security Rule:** The broker MUST NOT reconstruct `broker_url` from the envelope. It MUST use the `broker_url` stored in its own pairing state (indexed by `pairing_id`) created when the sender called `pairing/initiate`.
+
+### 9.4 Test Vectors
+
+These vectors are asserted by `server/tests/test_crypto.py`.
+
+#### Ed25519 Bootstrap Key Signature
+
+```text
+ed25519_seed: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+ed25519_pub: 03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8
+bootstrap_pub_raw: 358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254
+sig_input_hex: 73796e636c65722d76312d626f6f7473747261702d6b65793a358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254
+signature: 714def847ce5343f9b06f9263a57e192975709a73a92ae290b8b0eee47770c184eb3c5492d5a8adaed3b459c5614294ea9ddcd64e7b697af2e7b61142f3ac608
+```
+
+#### HPKE Key Derivation
+
+```text
+eph_seed: 404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
+eph_pub: 79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a
+bootstrap_pub: 358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254
+shared_secret: 04c304fb1ca83cee75e206344231f33797e07d9929db670994b7c6fbeb1dc255
+salt: 79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254
+aead_key: 09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31
+```
+
+#### Bootstrap AAD and AEAD Round-trip
+
+```text
+aad_json: {"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","broker_url":"https://broker.example.com/api/v1","exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444","protocol_version":1,"sender_id":"55555555-6666-7777-8888-999999999999"}
+nonce: a0a1a2a3a4a5a6a7a8a9aaab
+plaintext: {"pairing_key":"8PHy8/T19vf4+fr7/P3+/wARIjNEVWZ3iJmqu8zd7v8=","user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+ciphertext_with_tag: e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276bc04c9f2621575f7f4ec513fd78e252e
+```
+
 ## Equivalents for Android/Kotlin
 
 Use platform or vetted library implementations only:

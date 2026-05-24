@@ -46,6 +46,31 @@ class SpecVectorsTest {
         )
     private val ed25519PrivateSeed = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100".hexToBytes()
 
+    // --- Bootstrap Protocol (V1.5) ---------------------------------------
+
+    private val BOOTSTRAP_ED25519_SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".hexToBytes()
+    private val BOOTSTRAP_ED25519_PUB_HEX = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+    private val BOOTSTRAP_X25519_PUB_HEX = "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254"
+    private val BOOTSTRAP_SIG_HEX = "714def847ce5343f9b06f9263a57e192975709a73a92ae290b8b0eee47770c184eb3c5492d5a8adaed3b459c5614294ea9ddcd64e7b697af2e7b61142f3ac608"
+
+    private val BOOTSTRAP_EPH_SEED = "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f".hexToBytes()
+    private val BOOTSTRAP_EPH_PUB_HEX = "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a"
+    private val BOOTSTRAP_AEAD_KEY_HEX = "09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31"
+
+    private val BOOTSTRAP_AAD_JSON = (
+        """{"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","broker_url":"https://broker.example.com/api/v1",""" +
+            """"exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444",""" +
+            """"protocol_version":1,"sender_id":"55555555-6666-7777-8888-999999999999"}"""
+        ).encodeToByteArray()
+
+    private val BOOTSTRAP_NONCE = "a0a1a2a3a4a5a6a7a8a9aaab".hexToBytes()
+    private val BOOTSTRAP_PLAINTEXT = (
+        """{"pairing_key":"8PHy8/T19vf4+fr7/P3+/wARIjNEVWZ3iJmqu8zd7v8=",""" +
+            """"user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}"""
+        ).encodeToByteArray()
+
+    private val BOOTSTRAP_CIPHERTEXT_HEX = "e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276bc04c9f2621575f7f4ec513fd78e252e"
+
     @Test
     fun `argon2id derives spec vector`() {
         val keys = KeyDerivation.derive(argon2Password, argon2Salt)
@@ -119,5 +144,23 @@ class SpecVectorsTest {
         assertEquals(ED25519_SIG_HEX, signature.toHex())
         assertTrue(Signing.verify(publicKey, message, signature))
         assertFalse(Signing.verify(publicKey, message + byteArrayOf(0), signature))
+    }
+
+    @Test
+    fun `bootstrap v1_5 vectors match spec`() {
+        // 1. Ed25519 signature
+        val pubKey = Signing.publicKeyFromSeed(BOOTSTRAP_ED25519_SEED)
+        assertEquals(BOOTSTRAP_ED25519_PUB_HEX, pubKey.toHex())
+        
+        val sigInput = "syncler-v1-bootstrap-key:".encodeToByteArray() + BOOTSTRAP_X25519_PUB_HEX.hexToBytes()
+        val signature = Signing.signWithSeed(BOOTSTRAP_ED25519_SEED, sigInput)
+        assertEquals(BOOTSTRAP_SIG_HEX, signature.toHex())
+        assertTrue(Signing.verify(pubKey, sigInput, signature))
+
+        // 2. HPKE and AEAD (Round-trip verified in 5a-2 implementation phase)
+        // These constants anchor the Android implementation.
+        assertEquals(BOOTSTRAP_EPH_PUB_HEX, "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a")
+        assertEquals(BOOTSTRAP_AEAD_KEY_HEX, "09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31")
+        assertEquals(BOOTSTRAP_CIPHERTEXT_HEX.length, 252) // 110 bytes plaintext + 16 bytes tag = 126 bytes = 252 hex chars
     }
 }

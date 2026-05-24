@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.crypto.aead import assemble_aad, assemble_envelope, decrypt_message_body
@@ -69,6 +71,38 @@ ED25519_PUBLIC_KEY_HEX = "712651f450ba05b63898b99ef5f7ba45632e8e2527f7f715cd671e
 ED25519_SIGNATURE_HEX = (
     "3d3a4963d6390f4392b36dac13938cadf015da019c6d0b2004e701656f544f6b"
     "336bb9da81ef4fde0b392f3ac33884c7dbb40dcd6f0ac30f1bbc06a464e68a06"
+)
+
+# --- Bootstrap Protocol (V1.5) -------------------------------------------
+
+BOOTSTRAP_ED25519_SEED = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+BOOTSTRAP_ED25519_PUB_HEX = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+BOOTSTRAP_X25519_PUB_HEX = "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254"
+BOOTSTRAP_SIG_HEX = (
+    "714def847ce5343f9b06f9263a57e192975709a73a92ae290b8b0eee47770c18"
+    "4eb3c5492d5a8adaed3b459c5614294ea9ddcd64e7b697af2e7b61142f3ac608"
+)
+
+BOOTSTRAP_EPH_SEED = bytes.fromhex("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f")
+BOOTSTRAP_EPH_PUB_HEX = "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a"
+BOOTSTRAP_SHARED_SECRET_HEX = "04c304fb1ca83cee75e206344231f33797e07d9929db670994b7c6fbeb1dc255"
+BOOTSTRAP_AEAD_KEY_HEX = "09817b8833c85ff7c9b16b4c867e5dc801c3b57a4f56ee453265a9160f4d9b31"
+
+BOOTSTRAP_AAD_JSON = (
+    b'{"bootstrap_key_id":"oCiYEAMutBcnTuvEo45omQ==","broker_url":"https://broker.example.com/api/v1",'
+    b'"exp":"2026-05-24T12:00:00Z","pairing_id":"00000000-1111-2222-3333-444444444444",'
+    b'"protocol_version":1,"sender_id":"55555555-6666-7777-8888-999999999999"}'
+)
+BOOTSTRAP_NONCE = bytes.fromhex("a0a1a2a3a4a5a6a7a8a9aaab")
+BOOTSTRAP_PLAINTEXT = (
+    b'{"pairing_key":"8PHy8/T19vf4+fr7/P3+/wARIjNEVWZ3iJmqu8zd7v8=",'
+    b'"user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'
+)
+BOOTSTRAP_CIPHERTEXT_HEX = (
+    "e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe31375"
+    "7d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee"
+    "327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1"
+    "cff20fb71dd2701ee8daad6a9e7276bc04c9f2621575f7f4ec513fd78e252e"
 )
 
 
@@ -193,3 +227,39 @@ def test_wire_pack_unpack_round_trip() -> None:
 
     with pytest.raises(ValueError):
         unpack_message(wire[:27])
+
+
+def test_bootstrap_v1_5_vectors() -> None:
+    # 1. Ed25519 signature over bootstrap key
+    ed_priv = Ed25519PrivateKey.from_private_bytes(BOOTSTRAP_ED25519_SEED)
+    ed_pub = ed_priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    boot_pub_raw = bytes.fromhex(BOOTSTRAP_X25519_PUB_HEX)
+    sig_input = b"syncler-v1-bootstrap-key:" + boot_pub_raw
+
+    assert ed_pub.hex() == BOSTRAP_ED25519_PUB_HEX if "BOSTRAP" in locals() else ed_pub.hex() == BOOTSTRAP_ED25519_PUB_HEX
+    assert ed_priv.sign(sig_input).hex() == BOOTSTRAP_SIG_HEX
+
+    # 2. HPKE derivation
+    eph_priv = X25519PrivateKey.from_private_bytes(BOOTSTRAP_EPH_SEED)
+    eph_pub = eph_priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    boot_pub = X25519PublicKey.from_public_bytes(boot_pub_raw)
+    shared_secret = eph_priv.exchange(boot_pub)
+    
+    salt = eph_pub + boot_pub_raw
+    aead_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"syncler-v1-bootstrap-aead",
+    ).derive(shared_secret)
+    
+    assert eph_pub.hex() == BOOTSTRAP_EPH_PUB_HEX
+    assert shared_secret.hex() == BOOTSTRAP_SHARED_SECRET_HEX
+    assert aead_key.hex() == BOOTSTRAP_AEAD_KEY_HEX
+
+    # 3. AEAD round-trip
+    ciphertext = AESGCM(aead_key).encrypt(BOOTSTRAP_NONCE, BOOTSTRAP_PLAINTEXT, BOOTSTRAP_AAD_JSON)
+    assert ciphertext.hex() == BOOTSTRAP_CIPHERTEXT_HEX
+    
+    decrypted = AESGCM(aead_key).decrypt(BOOTSTRAP_NONCE, ciphertext, BOOTSTRAP_AAD_JSON)
+    assert decrypted == BOOTSTRAP_PLAINTEXT
