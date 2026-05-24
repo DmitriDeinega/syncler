@@ -1,0 +1,38 @@
+**Codex 77 Verdict**
+
+Per-area:
+
+- `sdk-plugin/src/manifest.ts` + `bridge.ts`: **GREEN**  
+  The publish-vs-runtime split is correct. Strict 64/128 hex validation remains the default, and only `registerPlugin()` opts into placeholder tolerance. Lenient mode still runs the rest of manifest validation, including non-empty strings, capabilities, endpoints, dismiss behavior, and platform version.
+
+- `examples/trading-bot/plugin/src/plugin.ts`: **GREEN with nits**  
+  `ack_url` from payload is acceptable for this example because Android still enforces `declaredEndpoints` natively in both inbox `CardBridge` and plugin-host `NetworkBridge`. Server-side trust is still correctly documented as non-production. Nit: [plugin.ts](D:/Projects/syncler/examples/trading-bot/plugin/src/plugin.ts:80) has mojibake in visible UI text: `Sendingג€¦`. Also comments have `ג€”`.
+
+- `examples/trading-bot/bot.py`: **GREEN**  
+  Env derivation is sane. Defaulting `SYNCLER_LAN_HOST` to `10.0.2.2` is the right emulator-first default, while allowing direct `SYNCLER_ACK_URL` / `SYNCLER_BUNDLE_URL` overrides keeps LAN and CDN paths flexible.
+
+- `examples/trading-bot/README.md`: **YELLOW**  
+  The connectivity matrix itself is useful and should unblock emulator, LAN physical devices, and `adb reverse`. But [README.md](D:/Projects/syncler/examples/trading-bot/README.md:111) still says the plugin POSTs to `http://localhost:8001/api/ack`; that reintroduces the old mental model. It should say it POSTs to payload `ack_url`, defaulting to `http://10.0.2.2:8001/api/ack` for emulator.
+
+**Anything Missed From Codex 76 REDs**
+
+No functional miss. Both original REDs are addressed:
+
+- in-bundle placeholder manifests now register;
+- Android no longer depends on hardcoded `localhost`.
+
+**New Issues**
+
+No new RED blockers. Two cleanup items before commit would be wise:
+
+- Fix mojibake in the new trading plugin files, especially visible `Sendingג€¦`.
+- Fix the stale localhost wording in the README walkthrough.
+
+**Verification**
+
+- Python smoke check passed: default `ack_url` is `http://10.0.2.2:8001/api/ack`.
+- I could not independently rerun Vitest in this sandbox: Vitest failed before collecting tests with Windows `spawn EPERM`.
+
+**Commit-Readiness Vote**
+
+**GREEN, with cleanup nits.** No blocker requiring another design pass; I would fix the mojibake and stale README line before committing Phase 5b.

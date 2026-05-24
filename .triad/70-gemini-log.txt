@@ -1,0 +1,55 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+As a reviewer for the **Phase 5 / V1.5 DX track**, I have reviewed the proposed plan and researched the current codebase. My feedback is summarized below.
+
+### Phase-by-Phase Assessment
+
+| Phase | Rating | Summary of Feedback |
+| :--- | :--- | :--- |
+| **5a** | **GREEN** | The automated handshake is a major win. The hybrid encryption scheme (Ed25519 → X25519) is correct and avoids the server seeing the pairing key. |
+| **5b** | **GREEN** | This is the most-requested feature from dogfooding. A shared `state.json` is a perfect low-friction way to show persistence. |
+| **5c** | **GREEN** | Scaffolding reduces the "blank page" problem. Recommend keeping it in `sdk-plugin/create/` to share types/logic. |
+| **5d** | **GREEN** | Catching "illegal character" and "semver component" errors in the SDK is high-value for shortening the feedback loop. |
+| **5e** | **GREEN** | Standard documentation update. |
+
+---
+
+### Phase 5a — Open Question Answers
+
+*   **Where does the broker URL live?**
+    *   **Recommendation**: Add a `sender_broker_url` field to the **`GET /v1/pairing/preview`** response.
+    *   **Rationale**: The QR should remain small and only contain the syncler-broker URL. When the Android app scans the QR, it already calls `/v1/pairing/preview` to show the sender's name/fingerprint. Including the `sender_broker_url` there lets the app validate the URL and prepare the background POST before the user even taps "Confirm."
+
+*   **Hybrid encryption scheme**:
+    *   Confirmed. Using `crypto_sign_ed25519_pk_to_curve25519` for the sender's public key and then performing X25519 ECDH against a device-generated ephemeral key is the standard, secure path.
+
+*   **Replay protection**:
+    *   **Proposed**: Include a random `bootstrap_token` in the `pairing/initiate` response (stored server-side, mapped to `pairing_id`). Pass it to the device via `/v1/pairing/preview`. The device then includes `HMAC(bootstrap_payload, bootstrap_token)` in its POST to the sender's broker.
+    *   The sender's broker validates this with the syncler server via a new `POST /v1/pairing/verify_bootstrap` endpoint that consumes the token.
+
+*   **Network failure handling**:
+    *   **Recommendation**: Fall back to the manual flow. If the background POST to the `sender_broker_url` fails, the Android app should display the `user_id` and `pairing_key_hex` as it does today, with a small "Automatic pairing failed, please enter manually" hint.
+
+*   **Polling interval / timeout**:
+    *   **Recommendation**: 2-second interval, 300-second (5 min) timeout. This matches the default `ttl_seconds` for pairing tokens.
+
+---
+
+### Phase 5b & 5c — Implementation Details
+
+*   **Example Loop**: I suggest the `trading-bot` example use a **Live Card** (Phase 3b) for its P&L display. This lets the round-trip show how a plugin button can trigger a backend action that then *updates* the existing card via `client.upsert_card`.
+*   **Scaffold Location**: I recommend `sdk-plugin/create/`. It can be its own npm package `@syncler/create-plugin` published from that subdirectory.
+*   **Dependencies**: The README in `examples/trading-bot/` must be explicit that **both** `python3` and `nodejs` are required for the full experience.
+
+### Phase 5d — Priority Backlog
+
+Top 3 priorities for the validator polish:
+1.  **Action Endpoint URL**: Reject anything not starting with `https://` (except on localhost/LAN for debug).
+2.  **Template Fields**: Validate that `template.fields[k].path` matches the `$.field` grammar (currently the server only checks `startsWith("$")`).
+3.  **Plugin ID**: Enforce the `[a-zA-Z0-9.-]` charset strictly to prevent issues with URL-encoding in different hosts.
+
+### Overall Recommendation
+
+**READY TO START.** The sequence 5a → 5b → 5c → 5d → 5e is logical. Landing the protocol change (5a) first ensures the example (5b) and scaffold (5c) can use the "modern" flow from day one.
