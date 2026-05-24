@@ -17,6 +17,11 @@ from app.models import Plugin
 # Components capped at 6 digits each so server + client Int parsers agree.
 _SEMVER = re.compile(r"^(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:-[A-Za-z0-9.\-]+)?$")
 
+# Mirror of schemas._JSONPATH_REGEX — duplicated here to keep this module
+# importable in isolation. Phase 5d hardens the previous startswith("$")
+# checks below to the same grammar the SDK and schemas layer use.
+_JSONPATH_REGEX_SERVICE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
 
 class PluginError(Exception):
     """Base."""
@@ -58,8 +63,11 @@ def _validate_template(template: dict, declared_endpoints: list[str]) -> None:
         if not isinstance(config, dict) or "path" not in config:
             raise InvalidTemplateError(f"malformed config for field {name}")
         path = config["path"]
-        if not isinstance(path, str) or not path.startswith("$"):
-            raise InvalidTemplateError(f"invalid JSONPath for field {name}: {path}")
+        if not isinstance(path, str) or not _JSONPATH_REGEX_SERVICE.match(path):
+            raise InvalidTemplateError(
+                f"invalid JSONPath for field {name}: {path} "
+                "(must match $.field(.subfield)*)",
+            )
 
     actions = template.get("actions", [])
     if not isinstance(actions, list):
@@ -119,8 +127,11 @@ async def publish_plugin(
     if card_type == "live":
         if not card_key_path:
             raise InvalidTemplateError("card_key_path is required for card_type='live'")
-        if not card_key_path.startswith("$"):
-            raise InvalidTemplateError(f"invalid JSONPath for card_key_path: {card_key_path}")
+        if not _JSONPATH_REGEX_SERVICE.match(card_key_path):
+            raise InvalidTemplateError(
+                f"invalid JSONPath for card_key_path: {card_key_path} "
+                "(must match $.field(.subfield)*)",
+            )
     elif card_type != "event":
         raise InvalidTemplateError(f"unknown card_type: {card_type}")
 

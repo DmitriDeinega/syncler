@@ -472,6 +472,90 @@ _ACTION_LABEL_MAX = 64
 _ACTION_ENDPOINT_MAX = 2048
 
 
+_ACTION_ENDPOINT_PATTERN = re.compile(
+    r"(https?):\/\/([a-z0-9._-]+)(?::[0-9]+)?(?:[/?#][\x21-\x7e]*)?",
+)
+"""scheme://<host>[:port][/path|?query|#fragment].
+
+Strict canonical authority grammar — every character class is explicit
+ASCII, no `re.IGNORECASE` (would do Unicode case folding even with
+`re.ASCII`, since that flag only restricts `\\w`, `\\d`, `\\s`, `\\b`
+shorthands — Codex consultation 84 caught `K` U+212A and `ſ` U+017F
+folding into `[A-Z]` and `[A-S]` respectively).
+
+Lowercase scheme + host enforced; authors must write `https://...`,
+not `HTTPS://...`. URLs in published plugin manifests are normalized
+to lowercase by convention.
+
+Host: ASCII alnum + `.` `-` `_` — covers DNS labels, IPv4 dotted
+decimal, and dev hostnames (docker-compose underscores).
+Path/query/fragment, when present: printable ASCII (0x21..0x7e) —
+excludes whitespace, `\\r`, `\\n`, control chars, raw IDN. Port:
+`[0-9]+` (not `\\d`, which would match Unicode digits like `١٢`
+under default Python regex behavior — Codex 84).
+
+IPv6 bracketed hosts (`https://[::1]/x`) are intentionally
+out-of-scope for V1 — no plugin example uses them and the bracketed
+authority syntax would need a dedicated branch.
+
+Mirror of the SDK's `ACTION_ENDPOINT_PATTERN`. Use with ``fullmatch``
+— Python's ``$`` in ``re.match`` matches before a trailing ``\\n``,
+which JS regex does not, and that would create SDK/server parity
+drift on URLs with a stray newline (Codex consultation 83).
+"""
+
+
+def _is_allowed_action_endpoint_scheme(url: str) -> bool:
+    """Phase 5d. HTTPS is always allowed. HTTP is only allowed when the
+    host is `localhost` or an IPv4 literal in a LAN private range
+    (10.x, 172.16-31, 192.168.x, 127.x). Mirror of the SDK's
+    `isAllowedActionEndpointScheme`.
+
+    Consultations 80/81/82/83 walked through a series of SDK/server
+    parity mismatches when each side parsed the URL with its native
+    parser (WHATWG URL in TypeScript, urllib.parse in Python). The
+    fix on both sides: skip the parsers, validate the raw string
+    against a strict canonical authority grammar with ``fullmatch``.
+    See the SDK counterpart for the full rationale.
+    """
+    match = _ACTION_ENDPOINT_PATTERN.fullmatch(url)
+    if not match:
+        return False
+    scheme = match.group(1).lower()
+    host = match.group(2).lower()
+    if scheme == "https":
+        return True
+    if host == "localhost":
+        return True
+    return _is_lan_private_ipv4(host)
+
+
+def _is_lan_private_ipv4(host: str) -> bool:
+    match = re.fullmatch(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})", host)
+    if not match:
+        return False
+    # Reject leading-zero octets so `010.0.0.1` is not treated as `10.x`.
+    # Codex 81 RED: keeps SDK/server in agreement since WHATWG URL
+    # interprets leading-zero octets as octal but Python urlparse doesn't.
+    raw_octets = [match.group(i) for i in range(1, 5)]
+    for raw in raw_octets:
+        if len(raw) > 1 and raw.startswith("0"):
+            return False
+    octets = [int(raw) for raw in raw_octets]
+    if any(octet < 0 or octet > 255 for octet in octets):
+        return False
+    a, b = octets[0], octets[1]
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 127:
+        return True  # 127.0.0.0/8 loopback
+    return False
+
+
 def _endpoint_pattern_matches(url: str, pattern: str) -> bool:
     """Mirror of the Kotlin EndpointMatcher in :plugin-host. Treats `*` in
     the host as `[^./]*` (no subdomain leak), `*` in the path as `[^/]*`.
@@ -557,6 +641,15 @@ class TemplateObject(BaseModel):
         return self
 
 
+_PLUGIN_IDENTIFIER_REGEX = re.compile(
+    r"^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*)+$"
+)
+"""Mirror of the SDK's idPattern (sdk-plugin/src/manifest.ts). Reverse-DNS
+identifier, ASCII only, must contain at least one dot. Phase 5d parity
+fix — previously the server only enforced a length cap, letting the SDK
+catch malformed identifiers but accepting them server-side."""
+
+
 class PluginPublishRequest(BaseModel):
     sender_id: UUID
     plugin_identifier: Annotated[str, Field(min_length=1, max_length=200)]
@@ -603,6 +696,32 @@ class PluginPublishRequest(BaseModel):
         decode_base64(value, field_name="sender_signature", exact=64)
         return value
 
+    @field_validator("plugin_identifier")
+    @classmethod
+    def validate_plugin_identifier(cls, value: str) -> str:
+        # Phase 5d parity fix: mirror the SDK's reverse-DNS check.
+        if not _PLUGIN_IDENTIFIER_REGEX.match(value):
+            raise ValueError(
+                "plugin_identifier must be reverse-DNS "
+                "(e.g. com.example.weather)",
+            )
+        return value
+
+    @field_validator("card_key_path")
+    @classmethod
+    def validate_card_key_path(cls, value: str | None) -> str | None:
+        # Phase 5d: enforce the same $.field(.subfield)* grammar that
+        # template field paths already use. Previously this was just a
+        # startsWith("$") check (server services/plugins.py).
+        if value is None:
+            return value
+        if not _JSONPATH_REGEX.match(value):
+            raise ValueError(
+                f"card_key_path {value!r} must match $.field(.subfield)* "
+                "(no array indexing, wildcards, or filters)",
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_renderer_template_pairing(self) -> "PluginPublishRequest":
         # The pairing rules live here (not on TemplateObject) because the
@@ -613,6 +732,14 @@ class PluginPublishRequest(BaseModel):
             raise ValueError("template must be omitted when renderer == 'script'")
         if self.template is not None:
             for action in self.template.actions:
+                # Phase 5d: action endpoints must be HTTPS, or HTTP targeting
+                # localhost / a LAN private range (mirrors the SDK).
+                if not _is_allowed_action_endpoint_scheme(action.endpoint):
+                    raise ValueError(
+                        f"action {action.id!r} endpoint {action.endpoint!r} "
+                        f"must be HTTPS, or HTTP targeting localhost / a "
+                        f"LAN private range",
+                    )
                 if not any(
                     _endpoint_pattern_matches(action.endpoint, p)
                     for p in self.endpoints
