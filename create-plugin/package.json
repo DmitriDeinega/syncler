@@ -1,0 +1,17 @@
+{
+  "name": "@syncler/create-plugin",
+  "version": "0.1.0",
+  "description": "Scaffold a new Syncler plugin project. Invoked via `npm create @syncler/plugin <name>`.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "create-syncler-plugin": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "templates/"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
