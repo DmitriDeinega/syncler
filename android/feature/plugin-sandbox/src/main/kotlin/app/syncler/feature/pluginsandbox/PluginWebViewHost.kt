@@ -25,13 +25,13 @@ interface PluginWebViewHost {
      * [PluginLoadParcel.bundleHashHex], and start evaluating JS.
      * Returns when the WebView has loaded enough that subsequent
      * [dispatchHook] calls are safe to queue. The real readiness
-     * signal is the sandbox's `onPluginReady` callback, not this
-     * function's return.
+     * signal is [HostSignals.reportReady], fired once the WebView
+     * finishes loading the bundle.
      *
      * Throws an [IllegalStateException] with a
      * [LoadFailureCodes] code on failure.
      */
-    fun startLoad(parcel: PluginLoadParcel, bridgeBroker: BridgeBroker)
+    fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals)
 
     /**
      * Deliver a host-originated hook to the plugin's JS. Caller
@@ -54,13 +54,23 @@ interface PluginWebViewHost {
 }
 
 /**
- * Callback the [PluginWebViewHost] uses to relay
- * `__syncler_internal.call(...)` from the WebView's
- * JavascriptInterface up to the host process. The sandbox owns
- * the actual `IPluginHostCallback` reference; the broker
- * indirection keeps the WebView implementation out of the AIDL
- * type system.
+ * Sandbox-side signals the [PluginWebViewHost] fires up to its
+ * coordinator: bridge calls (from `JavascriptInterface`), ready,
+ * and error. The interface indirection keeps the AIDL types out
+ * of the WebView implementation and lets unit tests substitute a
+ * recording double.
+ *
+ * Phase 10b step 5d: split from the previous `BridgeBroker` so
+ * the WebView impl can drive `onPluginReady` /
+ * `onWebViewError` lifecycle transitions, not just bridge calls.
  */
-fun interface BridgeBroker {
+interface HostSignals {
+    /** JS-bridge `call(method, argsJson, callbackId)` arrived. */
     fun bridgeCall(method: String, argsJson: String, callbackId: String)
+
+    /** WebView finished loading the bundle; plugin is ready. */
+    fun reportReady()
+
+    /** WebView reported an unrecoverable error. */
+    fun reportError(code: String, message: String)
 }

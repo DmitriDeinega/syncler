@@ -88,14 +88,43 @@ class PluginTokenCoordinatorTest {
         coordinator.startLoad(sampleParcel())
         coordinator.reportReady()
 
-        // The webview's stored broker is what the real impl would
-        // call from a @JavascriptInterface method.
-        webView.broker!!.bridgeCall("network.fetch", "{\"url\":\"x\"}", "cb-bridge")
+        // The webview's stored signals interface is what the real
+        // impl would call from a @JavascriptInterface method.
+        webView.signals!!.bridgeCall("network.fetch", "{\"url\":\"x\"}", "cb-bridge")
         assertEquals(
             listOf(
                 "ready(42)",
                 "bridgeCall(42, network.fetch, {\"url\":\"x\"}, cb-bridge)",
             ),
+            callback.events,
+        )
+    }
+
+    @Test
+    fun reportReadyFromWebViewTransitionsToReady() = runBlocking {
+        val callback = RecordingHostCallback()
+        val webView = RecordingWebViewHost()
+        val coordinator = newCoordinator(callback, webView)
+        coordinator.startLoad(sampleParcel())
+        assertEquals(PluginSandboxState.LOADING, coordinator.state)
+
+        // Simulate WebViewClient.onPageFinished firing.
+        webView.signals!!.reportReady()
+        assertEquals(PluginSandboxState.READY, coordinator.state)
+        assertEquals(listOf("ready(42)"), callback.events)
+    }
+
+    @Test
+    fun reportErrorFromWebViewTransitionsToErrored() = runBlocking {
+        val callback = RecordingHostCallback()
+        val webView = RecordingWebViewHost()
+        val coordinator = newCoordinator(callback, webView)
+        coordinator.startLoad(sampleParcel())
+
+        webView.signals!!.reportError("renderer_crash", "boom")
+        assertEquals(PluginSandboxState.ERRORED, coordinator.state)
+        assertEquals(
+            listOf("error(42, renderer_crash, boom)"),
             callback.events,
         )
     }
@@ -150,11 +179,11 @@ private class RecordingHostCallback : PluginHostCallbackLocal {
 
 private class RecordingWebViewHost : PluginWebViewHost {
     val calls = java.util.Collections.synchronizedList(mutableListOf<String>())
-    var broker: BridgeBroker? = null
+    var signals: HostSignals? = null
     var destroyed: Boolean = false
 
-    override fun startLoad(parcel: PluginLoadParcel, bridgeBroker: BridgeBroker) {
-        broker = bridgeBroker
+    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+        signals = hostSignals
         calls.add("startLoad(${parcel.pluginId})")
     }
     override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {

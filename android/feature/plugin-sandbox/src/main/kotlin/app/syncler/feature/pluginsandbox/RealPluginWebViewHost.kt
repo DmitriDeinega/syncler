@@ -4,8 +4,11 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.webkit.WebViewFeature
 import app.syncler.core.pluginaidl.PluginLoadParcel
 import java.io.File
@@ -27,7 +30,7 @@ import timber.log.Timber
  * this class, and this class marshals to the main thread via
  * [mainHandler]. The exception is [JavascriptInterface] methods
  * which Android invokes on a private JS-bridge thread; we hop
- * back onto the main thread via [BridgeBroker.bridgeCall] →
+ * back onto the main thread via [HostSignals.bridgeCall] →
  * [SandboxRouter] only after the bytes leave the WebView.
  */
 class RealPluginWebViewHost(
@@ -40,9 +43,9 @@ class RealPluginWebViewHost(
     private var webView: WebView? = null
 
     @Volatile
-    private var bridgeBrokerRef: BridgeBroker? = null
+    private var hostSignalsRef: HostSignals? = null
 
-    override fun startLoad(parcel: PluginLoadParcel, bridgeBroker: BridgeBroker) {
+    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
         // Defense-in-depth (Phase 10a §10.x): re-verify the bundle
         // hash sandbox-side. The host already checked, but a TOCTOU
         // between host stage and sandbox read would slip through
@@ -66,7 +69,7 @@ class RealPluginWebViewHost(
             throw IllegalStateException(LoadFailureCodes.UNSUPPORTED_RENDERER)
         }
 
-        bridgeBrokerRef = bridgeBroker
+        hostSignalsRef = hostSignals
         val htmlShell = PluginHtmlShell.render(bundleBytes.toString(Charsets.UTF_8))
 
         runOnMain {
@@ -75,6 +78,7 @@ class RealPluginWebViewHost(
             if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
                 androidx.webkit.WebSettingsCompat.setSafeBrowsingEnabled(view.settings, true)
             }
+            view.webViewClient = ReadinessWebViewClient()
             view.addJavascriptInterface(
                 JsBridge(parcel.sandboxToken),
                 PluginHtmlShell.NATIVE_BRIDGE_NAME,
@@ -87,6 +91,54 @@ class RealPluginWebViewHost(
                 null,
             )
             webView = view
+        }
+    }
+
+    /**
+     * Phase 10b step 5d: bridge WebView page-load lifecycle into
+     * the coordinator's `reportReady` / `reportError` signals.
+     * `onPageFinished` is the implicit ready marker — at that
+     * point `loadDataWithBaseURL` has parsed the HTML, the SDK
+     * shell + bundle script tags have both executed, and
+     * subsequent `dispatchHook` calls can rely on
+     * `__syncler_internal_dispatch` being installed.
+     *
+     * Fires once per load via the [reported] guard. A second
+     * `onPageFinished` (e.g., from in-bundle SPA navigation —
+     * blocked by [shouldOverrideUrlLoading] anyway) would be a
+     * no-op rather than a duplicate `onPluginReady`.
+     */
+    private inner class ReadinessWebViewClient : WebViewClient() {
+        @Volatile
+        private var reported: Boolean = false
+
+        override fun onPageFinished(view: WebView, url: String?) {
+            if (reported) return
+            reported = true
+            hostSignalsRef?.reportReady()
+        }
+
+        override fun onReceivedError(
+            view: WebView,
+            request: WebResourceRequest?,
+            error: WebResourceError?,
+        ) {
+            // Only surface main-frame errors as plugin failures —
+            // subresource 404s are routine and the bundle should
+            // handle them. URL match is the cheapest gate.
+            if (request?.isForMainFrame != true) return
+            val code = error?.errorCode?.toString() ?: "webview_error"
+            val message = error?.description?.toString() ?: ""
+            hostSignalsRef?.reportError(code, message)
+        }
+
+        override fun shouldOverrideUrlLoading(
+            view: WebView,
+            request: WebResourceRequest?,
+        ): Boolean {
+            // Plugin pages are not allowed to navigate. Block
+            // everything except the initial `plugin.local/`.
+            return request?.url?.toString() != PluginHtmlShell.INITIAL_URL
         }
     }
 
@@ -113,7 +165,7 @@ class RealPluginWebViewHost(
     }
 
     override fun destroy() {
-        bridgeBrokerRef = null
+        hostSignalsRef = null
         runOnMain {
             runCatching {
                 webView?.removeJavascriptInterface(PluginHtmlShell.NATIVE_BRIDGE_NAME)
@@ -156,21 +208,21 @@ class RealPluginWebViewHost(
      * JS-bridge object the plugin's wrapper calls via
      * `window.__syncler_native__.call(method, argsJson, callbackId)`.
      * Android invokes [call] on a private bridge thread — we
-     * forward to the [BridgeBroker] which routes back to the
-     * host via the AIDL callback.
+     * forward to [HostSignals.bridgeCall] which routes back to
+     * the host via the AIDL callback.
      */
     private inner class JsBridge(private val sandboxToken: Int) {
         @JavascriptInterface
         fun call(method: String?, argsJson: String?, callbackId: String?) {
-            val broker = bridgeBrokerRef
-            if (broker == null) {
+            val signals = hostSignalsRef
+            if (signals == null) {
                 Timber.tag(TAG).w(
                     "JS bridge call after destroy (token=%d method=%s) — dropping",
                     sandboxToken, method,
                 )
                 return
             }
-            broker.bridgeCall(
+            signals.bridgeCall(
                 method = method.orEmpty(),
                 argsJson = argsJson.orEmpty(),
                 callbackId = callbackId.orEmpty(),

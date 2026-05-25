@@ -234,7 +234,7 @@ internal object NoopPluginWebViewHostFactory : PluginWebViewHostFactory {
 }
 
 private object NoopPluginWebViewHost : PluginWebViewHost {
-    override fun startLoad(parcel: PluginLoadParcel, bridgeBroker: BridgeBroker) {
+    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
         // No-op — the real impl evaluates JS in a WebView. Tests
         // substitute a recording double.
     }

@@ -77,17 +77,27 @@ class PluginTokenCoordinator(
                 "startLoad called in state $_state — bug"
             }
         }
-        webViewHost.startLoad(parcel, ::onBridgeCallFromWebView)
+        webViewHost.startLoad(parcel, hostSignals)
     }
 
-    private fun onBridgeCallFromWebView(method: String, argsJson: String, callbackId: String) {
-        // No-state-gate here intentionally — the WebView may emit
-        // a bridge call between our state transition to UNLOADING
-        // and the actual WebView teardown. We deliver up to the
-        // host; the host's pending-callback map decides whether to
-        // satisfy or drop. The adapter in PluginSandboxService
-        // swallows any RemoteException from a dead host.
-        callback.bridgeCall(sandboxToken, method, argsJson, callbackId)
+    private val hostSignals: HostSignals = object : HostSignals {
+        override fun bridgeCall(method: String, argsJson: String, callbackId: String) {
+            // No-state-gate here intentionally — the WebView may emit
+            // a bridge call between our state transition to UNLOADING
+            // and the actual WebView teardown. We deliver up to the
+            // host; the host's pending-callback map decides whether to
+            // satisfy or drop. The adapter in PluginSandboxService
+            // swallows any RemoteException from a dead host.
+            callback.bridgeCall(sandboxToken, method, argsJson, callbackId)
+        }
+
+        override fun reportReady() {
+            this@PluginTokenCoordinator.reportReady()
+        }
+
+        override fun reportError(code: String, message: String) {
+            this@PluginTokenCoordinator.reportError(code, message)
+        }
     }
 
     /**
