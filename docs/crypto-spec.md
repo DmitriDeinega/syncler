@@ -1086,7 +1086,19 @@ Sorted-keys canonical JSON, UTF-8, compact separators. Includes EVERY recipient 
 
 ### 11.9 Sender Device Directory
 
-`GET /v1/senders/me/devices?user_id={uuid}` (sender JWT auth, gated by active `Pairing(sender_id, user_id)`):
+`POST /v1/senders/me/devices` (signed request body, gated by active `Pairing(sender_id, user_id)`):
+
+```json
+{
+  "sender_id": "<uuid>",
+  "user_id": "<uuid>",
+  "request_signature": "<base64 Ed25519 sig>"
+}
+```
+
+Signature is over the canonical JSON of `{"endpoint_kind": "directory_fetch", "sender_id": "<uuid>", "user_id": "<uuid>"}` (sorted keys, UTF-8, compact separators).
+
+Response 200 OK:
 
 ```json
 {
@@ -1104,6 +1116,8 @@ Sorted-keys canonical JSON, UTF-8, compact separators. Includes EVERY recipient 
 ```
 
 `directory_version` is a per-user monotonic integer (`users.device_directory_version`), bumped transactionally on any device enrollment, revocation, or `encryption_public_key` rotation. Senders include the last-seen version in `recipient_directory_version` on every publish.
+
+**Auth model rationale.** Earlier drafts of this section called for sender JWT auth. This codebase doesn't currently have sender JWTs — senders sign each request body with Ed25519 (see §4.1, /v1/pairing/initiate). The directory endpoint reuses that pattern for consistency. Sender JWTs are a V2 optimization; until then a fresh signed POST per directory refresh is the cost. Replay protection (a nonce) is omitted: the directory is identical to what an attacker would see by replaying, so there's no security benefit.
 
 **Consistency assumption:** the directory_version read and the recipient set check on `POST /v1/messages/send` MUST happen in the same DB transaction (strongly consistent). Phase 9 ships single-Postgres only; deferred to V2 / future replication track.
 

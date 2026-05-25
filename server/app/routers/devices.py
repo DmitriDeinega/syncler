@@ -6,8 +6,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import AuthContext, bootstrap_only_user, create_device_token, current_auth_context
 from app.db import get_db
 from app.models import User
-from app.schemas import DeviceEnrollRequest, DeviceEnrollResponse, DeviceListItem, decode_base64
-from app.services.devices import DeviceNotFoundError, enroll_device, list_devices, revoke_device
+from app.schemas import (
+    DeviceEncryptionKeyRotateRequest,
+    DeviceEnrollRequestV2,
+    DeviceEnrollResponse,
+    DeviceListItem,
+    decode_base64,
+)
+from app.services.devices import (
+    DeviceNotFoundError,
+    enroll_device,
+    list_devices,
+    revoke_device,
+    rotate_device_encryption_key,
+)
 from app.services.events import get_event_bus
 
 router = APIRouter(tags=["devices"])
@@ -15,11 +27,12 @@ router = APIRouter(tags=["devices"])
 
 @router.post("/enroll", response_model=DeviceEnrollResponse, status_code=status.HTTP_201_CREATED)
 async def enroll(
-    payload: DeviceEnrollRequest,
+    payload: DeviceEnrollRequestV2,
     user: User = Depends(bootstrap_only_user),
     db: AsyncSession = Depends(get_db),
 ) -> DeviceEnrollResponse:
-    """Enroll a device and return a device-bound JWT.
+    """Phase 9b: enroll a device with BOTH its Ed25519 device-bound JWT key
+    AND its X25519 HPKE encryption key (spec §11.12).
 
     Authenticated by a BOOTSTRAP token (no `did` claim) from /v1/auth/login.
     A revoked device's still-valid device-bound JWT MUST NOT be able to
@@ -30,6 +43,9 @@ async def enroll(
         db,
         user_id=user.id,
         public_key=decode_base64(payload.public_key, field_name="public_key", exact=32),
+        encryption_public_key=decode_base64(
+            payload.encryption_public_key, field_name="encryption_public_key", exact=32
+        ),
         fcm_token=payload.fcm_token,
     )
     return DeviceEnrollResponse(
@@ -37,6 +53,44 @@ async def enroll(
         created_at=device.created_at,
         session_token=create_device_token(user_id=user.id, device_id=device.id),
     )
+
+
+@router.put("/me/encryption_key", status_code=status.HTTP_204_NO_CONTENT)
+async def rotate_encryption_key(
+    payload: DeviceEncryptionKeyRotateRequest,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Phase 9b §11.12: rotate the caller's own X25519 encryption pubkey.
+
+    The path is `me` and the service is hard-wired to mutate only
+    `ctx.device.id` — there is no way to rotate a different device's
+    key through this endpoint. Bumps `users.device_directory_version`
+    so the next sender publish gets a 409 stale_recipient_set.
+    """
+    try:
+        await rotate_device_encryption_key(
+            db,
+            user_id=ctx.user.id,
+            device_id=ctx.device.id,
+            encryption_public_key=decode_base64(
+                payload.encryption_public_key, field_name="encryption_public_key", exact=32
+            ),
+        )
+    except DeviceNotFoundError as exc:
+        # Should be unreachable — current_auth_context resolved this
+        # device. But return 404 instead of 500 if the row vanished.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="device not found"
+        ) from exc
+
+    # SSE fanout so other devices on this user can refetch the directory.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="devices.changed",
+        data={"version": None},  # client refetches; version is bumped in DB
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{device_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
@@ -59,6 +113,12 @@ async def revoke(
     # request, but a long-lived event stream that's already past
     # handshake would otherwise stay open.
     await get_event_bus().close_device_subscribers(device_id)
+    # Phase 9b: also fanout devices.changed so siblings refetch.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="devices.changed",
+        data={"version": None},
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

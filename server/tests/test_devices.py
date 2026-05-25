@@ -102,7 +102,10 @@ async def auth_header(client: AsyncClient, email: str = "device-user@example.com
     bootstrap_headers = {"Authorization": f"Bearer {login.json()['session_token']}"}
     enroll = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, fill + 10)},
+        json={
+            "public_key": b64_bytes(32, fill + 10),
+            "encryption_public_key": b64_bytes(32, fill + 110),
+        },
         headers=bootstrap_headers,
     )
     # Return BOTH the device-bound header and the bootstrap header so
@@ -123,7 +126,11 @@ async def test_enroll_device(client: AsyncClient) -> None:
 
     response = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4), "fcm_token": "fcm-token"},
+        json={
+            "public_key": b64_bytes(32, 4),
+            "encryption_public_key": b64_bytes(32, 104),
+            "fcm_token": "fcm-token",
+        },
         headers=headers,
     )
 
@@ -141,7 +148,10 @@ async def test_enroll_rejects_invalid_public_key(client: AsyncClient) -> None:
 
     response = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(31, 4)},
+        json={
+            "public_key": b64_bytes(31, 4),
+            "encryption_public_key": b64_bytes(32, 104),
+        },
         headers=headers,
     )
 
@@ -157,7 +167,10 @@ async def test_enroll_rejects_device_bound_token(client: AsyncClient) -> None:
 
     response = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 9)},
+        json={
+            "public_key": b64_bytes(32, 9),
+            "encryption_public_key": b64_bytes(32, 109),
+        },
         headers=device_bound_headers,
     )
 
@@ -176,7 +189,10 @@ async def test_list_devices_hides_sensitive_fields(client: AsyncClient) -> None:
 
     first = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 11)},
+        json={
+            "public_key": b64_bytes(32, 11),
+            "encryption_public_key": b64_bytes(32, 111),
+        },
         headers=bootstrap_headers,
     )
     assert first.status_code == 201
@@ -184,7 +200,11 @@ async def test_list_devices_hides_sensitive_fields(client: AsyncClient) -> None:
 
     await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4), "fcm_token": "fcm-token"},
+        json={
+            "public_key": b64_bytes(32, 4),
+            "encryption_public_key": b64_bytes(32, 104),
+            "fcm_token": "fcm-token",
+        },
         headers=bootstrap_headers,
     )
 
@@ -211,14 +231,20 @@ async def test_revoke_device(client: AsyncClient) -> None:
 
     first = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 11)},
+        json={
+            "public_key": b64_bytes(32, 11),
+            "encryption_public_key": b64_bytes(32, 111),
+        },
         headers=bootstrap_headers,
     )
     device_headers = {"Authorization": f"Bearer {first.json()['session_token']}"}
 
     second = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4)},
+        json={
+            "public_key": b64_bytes(32, 4),
+            "encryption_public_key": b64_bytes(32, 104),
+        },
         headers=bootstrap_headers,
     )
     target_device_id = second.json()["device_id"]
@@ -286,7 +312,13 @@ async def test_revoke_other_users_device_returns_404(client: AsyncClient) -> Non
 
 @pytest.mark.asyncio
 async def test_device_routes_require_auth(client: AsyncClient) -> None:
-    enroll = await client.post("/v1/auth/devices/enroll", json={"public_key": b64_bytes(32, 4)})
+    enroll = await client.post(
+        "/v1/auth/devices/enroll",
+        json={
+            "public_key": b64_bytes(32, 4),
+            "encryption_public_key": b64_bytes(32, 104),
+        },
+    )
     listing = await client.get("/v1/auth/devices")
     revoke = await client.post("/v1/auth/devices/00000000-0000-0000-0000-000000000000/revoke")
 
