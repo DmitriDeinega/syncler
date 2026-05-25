@@ -22,7 +22,7 @@ class PluginInstance(
     val manifest: PluginManifest,
     val grantedCapabilities: Set<String>,
     val bundleFilePath: String,
-    val sandboxHandle: SandboxHandle? = null,
+    var sandboxHandle: SandboxHandle? = null,
     var bridge: PluginBridge? = null,
 ) {
     /**

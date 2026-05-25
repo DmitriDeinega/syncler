@@ -279,15 +279,13 @@ class SandboxedPluginInstanceFactory(
             bridgeDispatcher.unregisterBridge(sandboxToken)
             throw exc
         }
-        // Reflect the handle into the instance + bridge. Public
-        // dispatchHook / destroy on the instance now have a target.
-        return PluginInstance(
-            manifest = manifest,
-            grantedCapabilities = grantedCapabilities,
-            bundleFilePath = bundleFilePath,
-            sandboxHandle = handle,
-            bridge = bridge,
-        )
+        // Reflect the handle into the same instance the bridge
+        // was constructed with — we deliberately keep one
+        // [PluginInstance] alive for the load lifecycle so
+        // bridge.plugin and the registry entry are identical.
+        instance.sandboxHandle = handle
+        instance.bridge = bridge
+        return instance
     }
 
     /**
