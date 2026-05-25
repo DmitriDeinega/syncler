@@ -1042,3 +1042,251 @@ class RotateMasterKeyResponse(BaseModel):
     key_generation: int
     encrypted_user_state: RotationUserStateResult | None = None  # null for password_rewrap
     pairings: list[RotationPairingResult] = []
+
+
+# ---------------------------------------------------------------------------
+# Phase 9b — Per-device envelope encryption (V2 wire). Spec §11.
+#
+# These schemas REPLACE the corresponding V1 schemas at the router layer;
+# the V1 classes above remain importable for the moment so legacy tests
+# can be referenced, but no production route still uses them. Phase 9c
+# will delete the V1 classes once all tests are migrated.
+# ---------------------------------------------------------------------------
+
+
+class RecipientEnvelopeWire(BaseModel):
+    """One per-device HPKE wrap of the message CEK. Spec §11.4."""
+
+    device_id: UUID
+    hpke_kem_output: str  # base64, decodes to exactly 32 bytes (X25519 KEM output)
+    hpke_ciphertext: str  # base64, decodes to exactly 48 bytes (HPKE wrap of 32-byte CEK)
+
+    @field_validator("hpke_kem_output")
+    @classmethod
+    def validate_kem_output(cls, value: str) -> str:
+        decode_base64(value, field_name="hpke_kem_output", exact=32)
+        return value
+
+    @field_validator("hpke_ciphertext")
+    @classmethod
+    def validate_ciphertext(cls, value: str) -> str:
+        decode_base64(value, field_name="hpke_ciphertext", exact=48)
+        return value
+
+
+class MessageSendRequestV2(BaseModel):
+    """Event publish wire (POST /v1/messages/send) per spec §11.4."""
+
+    protocol_version: Literal[2]
+    envelope_kind: Literal["event"]
+    sender_id: UUID
+    user_id: UUID
+    plugin_id: UUID
+    expires_at: datetime
+    min_plugin_version: str | None = None
+    payload_nonce: str  # base64 12 bytes
+    payload_ciphertext: str  # base64 ≥ 16 bytes (AES-GCM tag minimum)
+    recipient_envelopes: Annotated[list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)]
+    recipient_directory_version: Annotated[int, Field(ge=0)]
+    envelope_signature: str  # base64 64-byte Ed25519
+
+    @field_validator("expires_at")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("expires_at must be timezone-aware (ISO-8601 with offset)")
+        return value
+
+    @field_validator("payload_nonce")
+    @classmethod
+    def validate_payload_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="payload_nonce", exact=12)
+        return value
+
+    @field_validator("payload_ciphertext")
+    @classmethod
+    def validate_payload_ciphertext(cls, value: str) -> str:
+        decode_base64(value, field_name="payload_ciphertext", minimum=16)
+        return value
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_envelope_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+    @model_validator(mode="after")
+    def reject_duplicate_devices(self) -> "MessageSendRequestV2":
+        # Spec §11.10 row 1: duplicate device_id → 400 duplicate_device_id.
+        seen: set[UUID] = set()
+        for env in self.recipient_envelopes:
+            if env.device_id in seen:
+                raise ValueError(f"duplicate device_id in recipient_envelopes: {env.device_id}")
+            seen.add(env.device_id)
+        return self
+
+
+class LiveCardUpsertRequestV2(BaseModel):
+    """Live-card upsert wire (POST /v1/cards/upsert) per spec §11.5."""
+
+    protocol_version: Literal[2]
+    envelope_kind: Literal["live_card_upsert"]
+    sender_id: UUID
+    user_id: UUID
+    plugin_id: UUID
+    expires_at: datetime
+    min_plugin_version: str | None = None
+    card_key: str
+    card_type: str
+    sequence_number: Annotated[int, Field(ge=0)]
+    payload_nonce: str
+    payload_ciphertext: str
+    recipient_envelopes: Annotated[list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)]
+    recipient_directory_version: Annotated[int, Field(ge=0)]
+    envelope_signature: str
+
+    @field_validator("expires_at")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("expires_at must be timezone-aware (ISO-8601 with offset)")
+        return value
+
+    @field_validator("payload_nonce")
+    @classmethod
+    def validate_payload_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="payload_nonce", exact=12)
+        return value
+
+    @field_validator("payload_ciphertext")
+    @classmethod
+    def validate_payload_ciphertext(cls, value: str) -> str:
+        decode_base64(value, field_name="payload_ciphertext", minimum=16)
+        return value
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_envelope_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+    @model_validator(mode="after")
+    def reject_duplicate_devices(self) -> "LiveCardUpsertRequestV2":
+        seen: set[UUID] = set()
+        for env in self.recipient_envelopes:
+            if env.device_id in seen:
+                raise ValueError(f"duplicate device_id in recipient_envelopes: {env.device_id}")
+            seen.add(env.device_id)
+        return self
+
+
+class LiveCardDeleteRequestV2(BaseModel):
+    """Live-card delete wire (POST /v1/cards/delete) per spec §11.6.
+
+    Adds `protocol_version`, `envelope_kind`, and `plugin_id` over the V1
+    delete shape. `plugin_id` closes the cross-plugin-replay gap Codex
+    flagged at triad 125 #1.
+    """
+
+    protocol_version: Literal[2]
+    envelope_kind: Literal["live_card_delete"]
+    sender_id: UUID
+    user_id: UUID
+    plugin_id: UUID  # NEW vs V1
+    card_key: str
+    nonce: str  # base64 12 bytes
+    expires_at: datetime
+    envelope_signature: str
+
+    @field_validator("expires_at")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("expires_at must be timezone-aware (ISO-8601 with offset)")
+        return value
+
+    @field_validator("nonce")
+    @classmethod
+    def validate_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="nonce", exact=12)
+        return value
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_envelope_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+
+class DeviceDirectoryItem(BaseModel):
+    """One row in the sender-fetched device directory. Spec §11.9."""
+
+    device_id: UUID
+    encryption_public_key: str  # base64 32-byte X25519
+    updated_at: datetime
+
+    @field_validator("encryption_public_key")
+    @classmethod
+    def validate_encryption_pubkey(cls, value: str) -> str:
+        decode_base64(value, field_name="encryption_public_key", exact=32)
+        return value
+
+    @field_serializer("updated_at")
+    def _serialize_updated_at(self, value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+
+class DeviceDirectoryResponse(BaseModel):
+    """Sender-facing device directory. GET /v1/senders/me/devices."""
+
+    directory_version: Annotated[int, Field(ge=0)]
+    user_id: UUID
+    devices: list[DeviceDirectoryItem]
+
+
+class DeviceEnrollRequestV2(BaseModel):
+    """Phase 9b extends device enrollment with an X25519 encryption pubkey.
+    The Ed25519 device-bound JWT pubkey is the existing `public_key` field;
+    `encryption_public_key` is new.
+    """
+
+    public_key: str  # base64 Ed25519 32 bytes
+    encryption_public_key: str  # NEW base64 X25519 32 bytes
+    fcm_token: str | None = None
+
+    @field_validator("public_key")
+    @classmethod
+    def validate_public_key(cls, value: str) -> str:
+        decode_base64(value, field_name="public_key", exact=32)
+        return value
+
+    @field_validator("encryption_public_key")
+    @classmethod
+    def validate_encryption_public_key(cls, value: str) -> str:
+        decode_base64(value, field_name="encryption_public_key", exact=32)
+        return value
+
+
+class DeviceEncryptionKeyRotateRequest(BaseModel):
+    """PUT /v1/auth/devices/me/encryption_key — rotates the X25519 pubkey
+    for the calling device. Bumps users.device_directory_version.
+    """
+
+    encryption_public_key: str  # base64 X25519 32 bytes
+
+    @field_validator("encryption_public_key")
+    @classmethod
+    def validate_encryption_public_key(cls, value: str) -> str:
+        decode_base64(value, field_name="encryption_public_key", exact=32)
+        return value
+
+
+class StaleRecipientSetError(BaseModel):
+    """409 body for spec §11.10 stale_recipient_set."""
+
+    error: Literal["stale_recipient_set"] = "stale_recipient_set"
+    message: str
+    current_directory_version: int
+    missing_device_ids: list[UUID]
+
+
