@@ -145,9 +145,18 @@ def decrypt_bootstrap_envelope(
             f"exp outside ±{BROKER_CLOCK_SKEW_SECONDS}s tolerance: delta={delta:.1f}s",
         )
 
-    # X25519 ECDH.
-    eph_pub = X25519PublicKey.from_public_bytes(ephemeral_pubkey)
-    shared_secret = sender_bootstrap_priv.exchange(eph_pub)
+    # X25519 ECDH. `from_public_bytes` validates input length and
+    # `exchange` rejects low-order / invalid points — both can raise
+    # ValueError / cryptography-library exceptions. Wrap as
+    # BootstrapDecryptError so the broker's exception handler doesn't
+    # let an opaque-401 path leak a 500 (Codex consultation 89 RED).
+    try:
+        eph_pub = X25519PublicKey.from_public_bytes(ephemeral_pubkey)
+        shared_secret = sender_bootstrap_priv.exchange(eph_pub)
+    except Exception as exc:
+        raise BootstrapDecryptError(
+            "X25519 ECDH failed — invalid ephemeral_pubkey",
+        ) from exc
 
     # HKDF derivation. salt = eph_pub || sender_bootstrap_pub.
     salt = ephemeral_pubkey + sender_bootstrap_pub

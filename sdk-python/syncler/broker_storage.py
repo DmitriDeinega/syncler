@@ -41,6 +41,17 @@ class BrokerStorage(Protocol):
     subsequent calls with identical values are idempotent; calls with
     different values raise [BrokerStorageConflictError]. This semantics
     is what defeats envelope replay (spec §9.3).
+
+    Phase 5a-2.1 — V1.5 fixed-config broker note: the protocol does not
+    track *pending* pairing IDs; `complete()` accepts any UUID. This
+    means the broker built on top of this storage cannot reject
+    envelopes whose `pairing_id` was never reserved by a prior
+    `pairing/initiate`. The primary replay guard is still the CAS in
+    `complete()`, and UUID entropy (122 bits for uuid4) plus the
+    mandatory rate limiter make storage pollution by an attacker
+    impractical. V2 will add a pending-pairing registry. See
+    `docs/crypto-spec.md §9.3` "V1.5 deviation" for the full
+    discussion.
     """
 
     def reserve(self, pairing_id: str) -> None:
@@ -49,13 +60,20 @@ class BrokerStorage(Protocol):
         explicit slot creation (e.g. DB rows with not-null
         constraints). Idempotent."""
 
-    def complete(self, pairing_id: str, entry: BrokerEntry) -> None:
-        """Compare-and-set. Behavior:
+    def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+        """Compare-and-set. Returns ``True`` when this call was the
+        first completion (the storage was previously empty for this
+        ``pairing_id``); returns ``False`` on idempotent replay of the
+        same values. Raises [BrokerStorageConflictError] when the
+        entry differs from a previously-stored one.
 
-        - First call for `pairing_id` → stores entry, returns.
-        - Second call with same `entry` → idempotent, returns.
+        - First call for `pairing_id` → stores entry, returns ``True``.
+        - Second call with same `entry` → idempotent, returns ``False``.
         - Second call with different `entry` →
           [BrokerStorageConflictError].
+
+        The FastAPI broker uses the return value to distinguish HTTP
+        201 (first completion) from 200 (idempotent replay).
 
         Implementations MUST be atomic at the storage layer (Postgres
         UPSERT WHERE NOT EXISTS or equivalent — NOT a Python-level
@@ -68,9 +86,13 @@ class BrokerStorage(Protocol):
 
 class InMemoryBrokerStorage:
     """Default in-process implementation. Suitable for dev / tests /
-    single-process toy deployments. Loses state on restart. Not safe
-    across multiple uvicorn workers — use a real storage backend
-    (Redis, Postgres) for production multi-worker setups.
+    single-process toy deployments. Loses state on restart. NOT safe
+    across multiple uvicorn workers — each worker has its own dict,
+    so `complete()` calls land in different processes and replays may
+    appear as 201 in one worker and 200 in another, or worst case
+    let two devices complete the same pairing inconsistently. Use a
+    real storage backend (Redis, Postgres) for production multi-worker
+    setups.
     """
 
     def __init__(self) -> None:
@@ -81,15 +103,15 @@ class InMemoryBrokerStorage:
         # No-op: dict permits any key. `complete` is the CAS point.
         return None
 
-    def complete(self, pairing_id: str, entry: BrokerEntry) -> None:
+    def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
         with self._lock:
             existing = self._entries.get(pairing_id)
             if existing is None:
                 self._entries[pairing_id] = entry
-                return
+                return True
             # Idempotent: same value is fine.
             if existing.user_id == entry.user_id and existing.pairing_key == entry.pairing_key:
-                return
+                return False
             raise BrokerStorageConflictError(
                 f"pairing_id {pairing_id} already completed with different values",
             )

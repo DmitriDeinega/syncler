@@ -89,12 +89,99 @@ class PairingViewModel @Inject constructor(
 
     fun confirm() {
         val current = _state.value as? PairingState.PreviewReady ?: return
+
+        // V1.5: classify automated metadata BEFORE /complete.
+        // HardError indicates substitution-attack risk: refuse to
+        // pair at all (do NOT silently fall back to manual).
+        val classification = repository.classifyBootstrap(current.preview)
+        if (classification is BootstrapClassification.HardError) {
+            _state.value = PairingState.BootstrapHardError(
+                preview = current.preview,
+                message = classification.message,
+            )
+            return
+        }
+
+        // If automated metadata is well-formed, verify the
+        // bootstrap_key signature against the sender's Ed25519 pub
+        // key. If verify fails: HARD error (same posture as malformed
+        // metadata — could be syncler-server substitution).
+        if (classification is BootstrapClassification.Automated) {
+            // The senderPublicKey field comes from /preview as a
+            // base64 string; the upstream /complete identity-match
+            // assertion guarantees it survives unchanged through
+            // confirmation. Decode defensively so a malformed value
+            // becomes a HardError state, not a crash (Codex 89 RED).
+            val senderEdPub = runCatching {
+                android.util.Base64.decode(current.preview.senderPublicKey, android.util.Base64.NO_WRAP)
+            }.getOrNull()
+            if (senderEdPub == null || senderEdPub.size != 32) {
+                _state.value = PairingState.BootstrapHardError(
+                    preview = current.preview,
+                    message = "preview senderPublicKey is not a valid 32-byte base64 Ed25519 key",
+                )
+                return
+            }
+            val verified = repository.verifyBootstrapKeySignature(
+                senderPublicKeyEd25519Raw = senderEdPub,
+                bootstrapKeyRaw = classification.bootstrapKeyRaw,
+                bootstrapKeySignatureRaw = classification.bootstrapKeySignatureRaw,
+            )
+            if (!verified) {
+                _state.value = PairingState.BootstrapHardError(
+                    preview = current.preview,
+                    message = "bootstrap_key_signature verification failed — refusing automated pairing",
+                )
+                return
+            }
+        }
+
         _state.value = PairingState.Confirming(current.preview)
         viewModelScope.launch {
             val pairingKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
             val placeholder = "syncler-pairing-bootstrap-v1".toByteArray()
-            repository.confirm(current.candidate, current.preview, pairingKey, placeholder).fold(
-                onSuccess = { _state.value = PairingState.Success(it) },
+            val confirmResult = repository.confirm(
+                current.candidate, current.preview, pairingKey, placeholder,
+            )
+            confirmResult.fold(
+                onSuccess = { sender ->
+                    // Local PairedSender is persisted at this point regardless
+                    // of what happens with the broker POST below (Codex 87 RED).
+                    if (classification is BootstrapClassification.Automated) {
+                        val userId = session.currentUserId()
+                        if (userId == null) {
+                            // Shouldn't happen — user must be signed in to pair.
+                            _state.value = PairingState.BootstrapFailedFallback(
+                                sender = sender,
+                                reason = "current user_id is null; cannot build bootstrap envelope",
+                            )
+                            return@fold
+                        }
+                        _state.value = PairingState.BootstrapPosting(sender)
+                        val envelope = repository.buildEnvelopeDto(
+                            automated = classification,
+                            pairingId = sender.pairingId,
+                            senderId = sender.senderId,
+                            userId = userId,
+                            pairingKey = pairingKey,
+                        )
+                        val postResult = repository.postBootstrapEnvelope(
+                            senderBrokerUrl = classification.senderBrokerUrl,
+                            envelope = envelope,
+                        )
+                        _state.value = postResult.fold(
+                            onSuccess = { PairingState.BootstrapSucceeded(sender) },
+                            onFailure = { err ->
+                                PairingState.BootstrapFailedFallback(
+                                    sender = sender,
+                                    reason = err.message ?: err.javaClass.simpleName,
+                                )
+                            },
+                        )
+                    } else {
+                        _state.value = PairingState.Success(sender)
+                    }
+                },
                 onFailure = { _state.value = PairingState.Error(it.message ?: "Pairing failed") },
             )
         }
@@ -121,7 +208,21 @@ sealed interface PairingState {
         val preview: PairingPreviewResponseDto,
     ) : PairingState
     data class Confirming(val preview: PairingPreviewResponseDto) : PairingState
+    /** V1 manual flow success — show the user_id + pairing_key_hex to copy. */
     data class Success(val sender: PairedSender) : PairingState
+    /** V1.5 automated path: posting envelope to sender broker. */
+    data class BootstrapPosting(val sender: PairedSender) : PairingState
+    /** V1.5 automated path: broker accepted the envelope. Pairing complete on both sides. */
+    data class BootstrapSucceeded(val sender: PairedSender) : PairingState
+    /** V1.5 automated path: broker POST failed; show fallback manual copy UI. */
+    data class BootstrapFailedFallback(val sender: PairedSender, val reason: String) : PairingState
+    /**
+     * V1.5 automated path: metadata malformed or signature invalid.
+     * Hard refusal — pairing was NOT finalized. User cannot fall back
+     * to manual either, because incomplete metadata is a substitution-
+     * attack indicator.
+     */
+    data class BootstrapHardError(val preview: PairingPreviewResponseDto, val message: String) : PairingState
     data class Error(val message: String) : PairingState
 }
 
@@ -197,6 +298,27 @@ fun PairingScreen(
                     onCopy = { label, value -> copyToClipboard(context, label, value) },
                     onDone = { viewModel.reset(); onDone() },
                 )
+                is PairingState.BootstrapPosting -> Text("Notifying ${s.sender.senderName}…")
+                is PairingState.BootstrapSucceeded -> BootstrapSuccessCard(
+                    sender = s.sender,
+                    onDone = { viewModel.reset(); onDone() },
+                )
+                is PairingState.BootstrapFailedFallback -> {
+                    Text(
+                        "Automatic pairing failed (${s.reason}). Pairing is still complete on this device — copy the values below into your sender to finish the catch-up.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    PairingSuccessCard(
+                        sender = s.sender,
+                        userId = viewModel.currentUserId(),
+                        onCopy = { label, value -> copyToClipboard(context, label, value) },
+                        onDone = { viewModel.reset(); onDone() },
+                    )
+                }
+                is PairingState.BootstrapHardError -> Text(
+                    "Refusing to pair: ${s.message}. The sender's automated pairing metadata is malformed or has an invalid signature; pairing was NOT created.",
+                    color = MaterialTheme.colorScheme.error,
+                )
                 is PairingState.Error -> Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error)
             }
 
@@ -237,6 +359,26 @@ private fun FingerprintConfirmation(
         confirmButton = { Button(onClick = onConfirm) { Text("Confirm") } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun BootstrapSuccessCard(
+    sender: PairedSender,
+    onDone: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Paired automatically with ${sender.senderName}", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "The sender's broker received the bootstrap envelope and now has the pairing key. No manual copy required.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(onClick = onDone) { Text("Done") }
+        }
+    }
 }
 
 @Composable

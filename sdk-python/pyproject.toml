@@ -13,6 +13,22 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0,<9",
+    # Broker deps included in [dev] so `pip install -e .[dev]` lets a
+    # clean checkout run the broker tests without remembering to also
+    # install [broker]. Production senders that just want the SDK +
+    # broker (no test deps) install [broker] only.
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "httpx>=0.27",
+]
+# V1.5 automated pairing — ready-to-mount FastAPI broker app
+# (`syncler.broker.make_app`). Senders that opt into automated
+# pairing install with `pip install syncler[broker]` and run their
+# own broker behind their `sender_broker_url`. Vanilla
+# `pip install syncler` does NOT pull FastAPI / uvicorn.
+broker = [
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
 ]
 
 [build-system]

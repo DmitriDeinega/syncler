@@ -197,6 +197,16 @@ data class PairingPreviewResponseDto(
     @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
     @Json(name = "sender_name_hash") val senderNameHash: String,
     @Json(name = "expires_at") val expiresAt: String,
+    // V1.5 automated pairing — the sender registered an X25519
+    // bootstrap key with syncler at adoption time. When all four
+    // fields are present + bootstrapProtocolVersion == 1, the
+    // device can POST an encrypted envelope directly to
+    // [senderBrokerUrl] instead of asking the user to copy values
+    // by hand. See `docs/integration-guide.md §8.5` + `docs/crypto-spec.md §9`.
+    @Json(name = "sender_broker_url") val senderBrokerUrl: String? = null,
+    @Json(name = "bootstrap_key") val bootstrapKey: String? = null,
+    @Json(name = "bootstrap_key_signature") val bootstrapKeySignature: String? = null,
+    @Json(name = "bootstrap_protocol_version") val bootstrapProtocolVersion: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)

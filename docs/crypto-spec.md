@@ -428,6 +428,19 @@ Canonical JSON binds the envelope to the specific pairing and broker.
 
 **Security Rule:** The broker MUST NOT reconstruct `sender_broker_url` from the envelope. It MUST use the `sender_broker_url` stored in its own pairing state (indexed by `pairing_id`) created when the sender called `pairing/initiate`.
 
+#### V1.5 deviation: fixed-config broker
+
+The reference broker implementation shipped under the optional `syncler[broker]` extra (`sdk-python/syncler/broker/app.py`) makes a deliberate tradeoff for V1.5: it uses a **single fixed `sender_broker_url`** configured at app startup, not a per-`pairing_id` map.
+
+This satisfies the "AAD-binding" half of the security rule above — the trusted state IS the configured URL, byte-equal to what the sender signed at `pairing/initiate` — but DOES NOT satisfy the "reject unknown `pairing_id`" half. An attacker with knowledge of the public bootstrap key can mint a cryptographically valid envelope for an arbitrary uuid4 `pairing_id` (they pick the AAD; AEAD authenticates the ciphertext, not the existence of a prior `/initiate` call for that ID).
+
+The V1.5 mitigations:
+- `pairing_id` is `uuid4` (~122 bits of entropy), so an attacker cannot enumerate real pending IDs to harvest them.
+- The broker's `rate_limiter` hook is **mandatory in production** — without it an attacker can spam decrypt attempts.
+- V2 will add a pending-pairing registry as a first-class `BrokerStorage` method, at which point this deviation can be removed.
+
+Production senders that need stricter behavior today implement their own [BrokerStorage] backed by Postgres or Redis, store a row at `pairing/initiate` time, and reject `complete()` calls for unknown `pairing_id`s.
+
 ### 9.4 Test Vectors
 
 These vectors are asserted by `server/tests/test_crypto.py`.

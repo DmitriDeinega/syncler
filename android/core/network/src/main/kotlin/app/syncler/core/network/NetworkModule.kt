@@ -87,4 +87,51 @@ object NetworkModule {
     @Provides
     @Singleton
     fun provideSynclerApi(retrofit: Retrofit): SynclerApi = retrofit.create(SynclerApi::class.java)
+
+    /**
+     * Unauthenticated OkHttp client for the V1.5 automated-pairing broker POST.
+     *
+     * The bootstrap envelope goes to a **sender-controlled URL**. The
+     * default [provideOkHttpClient] adds an auth interceptor that
+     * injects the user's bearer token into every outbound request, which
+     * would leak the session token to the sender's broker. This client
+     * is built from scratch with NO interceptors (no auth, no logging)
+     * so that path stays clean (consultation 87 RED). The broker POST
+     * authenticates by being able to decrypt — no HTTP-level auth header
+     * is required or appropriate.
+     */
+    @Provides
+    @Singleton
+    @BrokerOkHttp
+    fun provideBrokerOkHttpClient(): OkHttpClient =
+        OkHttpClient.Builder()
+            .connectionSpecs(
+                if (BuildConfig.DEBUG) {
+                    listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+                } else {
+                    listOf(ConnectionSpec.MODERN_TLS)
+                },
+            )
+            .build()
+
+    @Provides
+    @Singleton
+    fun provideBrokerApi(@BrokerOkHttp client: OkHttpClient, moshi: Moshi): BrokerApi =
+        // Base URL placeholder — every BrokerApi call uses @Url to
+        // override with the sender-supplied broker URL.
+        Retrofit.Builder()
+            .baseUrl("http://placeholder/")
+            .client(client)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+            .create(BrokerApi::class.java)
 }
+
+/**
+ * Qualifier for the unauthenticated broker OkHttp client. Prevents
+ * accidental reuse of the auth-interceptor-wrapped client when injecting
+ * an OkHttpClient elsewhere.
+ */
+@javax.inject.Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class BrokerOkHttp

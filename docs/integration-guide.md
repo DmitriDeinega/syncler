@@ -20,6 +20,8 @@ In every case you also need **backend code** that publishes the plugin once and 
 
 The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, arrival time — pulled from the `hostPreview` block you embed in your payload (§2). The detail view that opens on tap is what your script bundle's `render()` or your template manifest produces.
 
+**Pairing** — V1 has the user copy `user_id` + `pairing_key_hex` from the device into your sender's CLI by hand. V1.5 (the default going forward) replaces the copy step with an encrypted POST from the device to your sender's broker. The user only sees the fingerprint-confirm step; the rest is automatic. See §8.5 for setup.
+
 ### What the host does for you
 
 Once a card is in a user's inbox, the host handles all of the following without you doing anything plugin-side:
@@ -538,6 +540,138 @@ def action():
 8. The server pushes an `inbox.changed` event over the SSE stream the open app is subscribed to (foreground); the phone refreshes its inbox, decrypts the message, fetches your bundle (or applies your template manifest), and shows the native row within ~1s. If the app is backgrounded, FCM wakes it and the inbox refresh happens on the next foreground.
 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
+
+## 8.5 Automated pairing (V1.5)
+
+V1 pairing makes the user copy `user_id` + `pairing_key_hex` by hand into your sender's CLI. V1.5 replaces step 5 above with an encrypted POST: after the user confirms the fingerprint, the app silently delivers the pairing key to your sender's broker. The user never sees a hex blob.
+
+The protocol underneath (HPKE-style envelope, X25519 ECDH, AES-GCM with AAD-binding) is in `docs/crypto-spec.md §9`. This section is the integration walkthrough.
+
+### Why automated
+
+- One-step pairing for users.
+- Production senders don't need a manual-paste UX.
+- The substitution-attack guards (Ed25519 over the bootstrap key + AAD-binding on `sender_broker_url`) keep V1's trust model intact.
+
+### Sender setup
+
+You need to do four things, once:
+
+1. **Generate an X25519 bootstrap keypair** alongside your existing Ed25519 signing key. Persist the private key somewhere safe (file with 0600, KMS, secrets manager).
+
+   ```python
+   from syncler.bootstrap import x25519_keypair_pem
+   bootstrap_priv, bootstrap_pub_raw = x25519_keypair_pem()
+   # bootstrap_pub_raw is 32 raw bytes — store both fields somewhere
+   # your broker process can read them.
+   ```
+
+2. **Register the bootstrap key with syncler** (once per sender, or per rotation):
+
+   ```python
+   client.register_bootstrap_key(bootstrap_public_key_raw=bootstrap_pub_raw)
+   ```
+
+   Internally the SDK Ed25519-signs `b"syncler-v1-bootstrap-key:" + bootstrap_pub_raw` and POSTs to `/v1/senders/me/bootstrap-key`.
+
+3. **Run a broker** that your devices POST to. The SDK ships one under the `[broker]` extra:
+
+   ```sh
+   pip install 'syncler[broker]'
+   ```
+
+   ```python
+   # broker_app.py
+   from syncler.broker import make_app
+   from syncler.broker_storage import InMemoryBrokerStorage
+   from syncler.bootstrap import load_x25519_private_key_from_raw
+
+   storage = InMemoryBrokerStorage()
+   priv = load_x25519_private_key_from_raw(open("bootstrap.key", "rb").read())
+   pub_raw = open("bootstrap.pub", "rb").read()
+
+   app = make_app(
+       bootstrap_private_key=priv,
+       bootstrap_public_key_raw=pub_raw,
+       sender_broker_url="https://sender.example.com/syncler/bootstrap",
+       storage=storage,
+   )
+   ```
+
+   ```sh
+   uvicorn broker_app:app --host 0.0.0.0 --port 8443 \
+       --ssl-keyfile=key.pem --ssl-certfile=cert.pem
+   ```
+
+   Your reverse proxy maps `https://sender.example.com/syncler/bootstrap` → this app.
+
+4. **Tell `Client` where the broker storage lives** so `wait_for_pairing` can poll it:
+
+   ```python
+   client = Client(
+       sender_name="Example",
+       private_key_path="sender.pem",
+       broker_storage=storage,            # NEW — same storage the broker app writes to
+   )
+   # The sender's X25519 bootstrap keypair lives outside Client (the
+   # broker app holds it). The Client only needs the storage handle
+   # to learn when a pairing has completed.
+
+   path = client.create_pairing_qr(
+       ttl_seconds=300,
+       out_path="pair.png",
+       sender_broker_url="https://sender.example.com/syncler/bootstrap",  # NEW
+   )
+
+   # Blocks until the broker writes (user_id, pairing_key) to storage.
+   # On success the Pairing dataclass carries `pairing_id` + `user_id`;
+   # the 32-byte pairing key is stored on `client.pairing_key` so
+   # subsequent `send_to(...)` calls just work.
+   pairing = client.wait_for_pairing(timeout_seconds=120)
+   # `client.pairing_key` is now set; no further `set_pairing` call needed.
+   ```
+
+### Android user flow
+
+When the device fetches the preview and sees all four bootstrap fields, the pairing screen uses the automated path:
+
+1. User scans the QR.
+2. App fetches preview; verifies `bootstrap_key_signature` against the sender's Ed25519 pub key.
+3. User confirms the fingerprint (unchanged).
+4. App calls `/complete` — Syncler-side pairing is finalized.
+5. App builds the bootstrap envelope and POSTs to `sender_broker_url`.
+6. Broker decrypts, writes to its storage, returns 201.
+7. `Client.wait_for_pairing` in your sender's send loop picks up the new pairing tuple.
+
+If step 5 fails (broker down, network glitch), the app **shows a fallback banner** with the same `user_id` + `pairing_key_hex` block as the V1 manual flow. The device-side pairing is already real (step 4 finalized it); only the sender catch-up needs the manual paste.
+
+### Failure modes
+
+| What | App behavior |
+|---|---|
+| `bootstrap_key_signature` doesn't verify | **Hard refusal.** Pairing NOT finalized. Treated as substitution-attack indicator — user does not get a fallback. |
+| Preview has only some bootstrap fields | **Hard refusal**, same reason. Sender MUST register all four atomically. |
+| Broker returns 401 (decrypt failed) | Fallback banner (manual paste). |
+| Broker returns 409 (replay with different values) | Fallback banner — the pairing key from your sender's `wait_for_pairing` will not match this device's, so the user must paste the device's values. |
+| Broker returns 5xx or times out | Retried up to 3 attempts (250ms / 750ms backoff). If still failing, fallback banner. |
+| Sender's `wait_for_pairing` times out | Sender's responsibility — typically loop again with a fresh QR. The device-side pairing is still real; user can paste manually. |
+
+### Security boundaries
+
+Three guards make this safe:
+
+1. **Bootstrap key signature.** The sender's X25519 bootstrap public key is signed by its long-term Ed25519 signing key (which the user confirms via fingerprint). The Syncler server cannot substitute its own X25519 key — the signature would fail to verify against the Ed25519 pub key the user just confirmed.
+
+2. **AAD-binding on `sender_broker_url`.** Even if the Syncler server could change which URL the device POSTs to, the broker reconstructs AAD using its OWN configured `sender_broker_url`. An envelope crafted for a different URL fails AEAD tag verification.
+
+3. **CAS replay guard at the broker.** A captured envelope replayed to the same broker with the same plaintext is idempotent (200). Replayed with different values gets a 409.
+
+### Production hardening
+
+- Use Redis or Postgres for `BrokerStorage` (the shipped `InMemoryBrokerStorage` is NOT safe across multiple uvicorn workers — each worker has its own dict, so the same envelope can decrypt-and-complete twice).
+- The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. Without it, an attacker with the public bootstrap key can spam the decrypt path for cheap-but-not-free CPU. Implement per-IP and per-`pairing_id` limits.
+- Terminate TLS at your reverse proxy; the broker is HTTP-only inside the trust boundary.
+- See `docs/crypto-spec.md §9.3 "V1.5 deviation"` for the fixed-config-broker tradeoff (does NOT reject envelopes for unknown `pairing_id`s — UUID entropy + rate limiter are the V1.5 mitigations).
 
 ## 9. Common server errors
 

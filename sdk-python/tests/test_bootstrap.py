@@ -201,9 +201,11 @@ def test_in_memory_broker_storage_cas():
     s = InMemoryBrokerStorage()
     pairing_id = "00000000-1111-2222-3333-444444444444"
     entry_a = BrokerEntry(user_id="aaaa", pairing_key=b"\x01" * 32)
-    s.complete(pairing_id, entry_a)
+    # Phase 5a-2.1: complete() returns True on first completion,
+    # False on idempotent replay. Broker uses this to send 201 vs 200.
+    assert s.complete(pairing_id, entry_a) is True
     # Idempotent second store with same values.
-    s.complete(pairing_id, entry_a)
+    assert s.complete(pairing_id, entry_a) is False
     assert s.fetch(pairing_id) == entry_a
     # Conflict on different values.
     entry_b = BrokerEntry(user_id="bbbb", pairing_key=b"\x02" * 32)
