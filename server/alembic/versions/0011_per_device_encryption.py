@@ -102,8 +102,25 @@ def upgrade() -> None:
     op.alter_column("live_cards", "encrypted_body_pointer", server_default=None)
     op.alter_column("live_cards", "card_type", server_default=None)
 
+    # Phase 9b (Codex 128 #2): tighten the unique to include plugin_id.
+    # V1 unique was (sender_id, user_id, card_key) which let two plugins
+    # from the same sender collide on a shared card_key. V2 upsert and
+    # delete both scope by plugin_id; the constraint mirrors.
+    op.drop_constraint("uq_live_cards_sender_user_key", "live_cards", type_="unique")
+    op.create_unique_constraint(
+        "uq_live_cards_sender_user_plugin_key",
+        "live_cards",
+        ["sender_id", "user_id", "plugin_id", "card_key"],
+    )
+
 
 def downgrade() -> None:
+    op.drop_constraint("uq_live_cards_sender_user_plugin_key", "live_cards", type_="unique")
+    op.create_unique_constraint(
+        "uq_live_cards_sender_user_key",
+        "live_cards",
+        ["sender_id", "user_id", "card_key"],
+    )
     op.drop_column("live_cards", "min_plugin_version")
     op.drop_column("live_cards", "card_type")
     op.drop_column("live_cards", "encrypted_body_pointer")

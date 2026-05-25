@@ -105,12 +105,16 @@ async def upsert_live_card_v2(
 
     pointer = build_v2_pointer(payload)
 
-    # Upsert with sequence-number monotonicity check.
+    # Phase 9b (Codex 128 #2): upsert is now plugin-scoped. The V1
+    # lookup by (sender_id, user_id, card_key) could conflict across
+    # two plugins from the same sender that happened to use the same
+    # card_key. V2 delete already scopes by plugin_id; upsert mirrors.
     existing_result = await db.execute(
         select(LiveCard).where(
             and_(
                 LiveCard.sender_id == sender_id,
                 LiveCard.user_id == user_id,
+                LiveCard.plugin_id == plugin_id,
                 LiveCard.card_key == card_key,
             )
         )

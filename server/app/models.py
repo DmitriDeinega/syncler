@@ -226,8 +226,15 @@ class DeliveryStatus(Base):
 
 class LiveCard(Base):
     __tablename__ = "live_cards"
+    # Phase 9b (Codex 128 #2): unique now includes plugin_id so two
+    # plugins from the same sender can't collide on a shared card_key.
+    # V1 unique was (sender_id, user_id, card_key); migration 0011
+    # tightens it.
     __table_args__ = (
-        UniqueConstraint("sender_id", "user_id", "card_key", name="uq_live_cards_sender_user_key"),
+        UniqueConstraint(
+            "sender_id", "user_id", "plugin_id", "card_key",
+            name="uq_live_cards_sender_user_plugin_key",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)

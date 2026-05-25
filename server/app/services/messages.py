@@ -197,16 +197,18 @@ async def inbox_for_device(
     limit: int = 50,
 ) -> tuple[list[Message], datetime | None]:
     now = datetime.now(UTC)
-    # Phase 2 carry-over (Codex consultation 57 YELLOW, Phase 3a delivery):
-    # LEFT OUTER JOIN the per-device delivery status so we can filter out
-    # messages this device has already dismissed. When no DeliveryStatus row
-    # exists for (message, device), the join returns NULL — `IS NULL` keeps
-    # those rows. When a row exists with `dismissed_at IS NOT NULL`, the
-    # filter drops it, which is what makes cross-device dismiss visible on
-    # the next pull (and on the `dismiss` SSE event's repository.refresh).
+    # Phase 9b §11.4 (Codex 128 #1): INNER JOIN now — V2 envelopes are
+    # per-device, so a message without a DeliveryStatus row for this
+    # device has no recipient_envelope for it either. The store_message_v2
+    # path fans out DeliveryStatus rows for every device active at publish
+    # time; devices enrolled AFTER a publish won't have a row and
+    # therefore won't see undecryptable messages.
+    #
+    # `dismissed_at.is_(None)` still drops cross-device dismissed rows so
+    # that machinery survives the join change.
     query = (
         select(Message)
-        .outerjoin(
+        .join(
             DeliveryStatus,
             and_(
                 DeliveryStatus.message_id == Message.id,
