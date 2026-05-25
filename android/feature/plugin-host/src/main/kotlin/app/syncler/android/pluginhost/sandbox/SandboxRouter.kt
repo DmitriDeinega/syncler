@@ -144,16 +144,25 @@ class SandboxRouter(
      * the sandbox's sync load-fail teardown after the host catch
      * block already cleaned up) must not over-release the
      * connection ref count.
+     *
+     * Returns `true` if this call won the race for the token —
+     * lets the caller gate any *additional* per-token work
+     * (lifecycle dispatch, log lines) on the same atomic remove.
+     * Triad 118 finding: the release was idempotent but the
+     * lifecycle dispatch wasn't, so a load-fail teardown could
+     * still emit bogus crash/unload signals to the dispatcher.
      */
-    private fun releaseHandle(sandboxToken: Int) {
+    private fun releaseHandle(sandboxToken: Int): Boolean {
         val removed = handles.remove(sandboxToken)
-        if (removed != null) {
+        return if (removed != null) {
             scope.launch { connection.release() }
+            true
         } else {
             Timber.tag(TAG).w(
                 "releaseHandle for unknown token=%d — skipping release (idempotent guard)",
                 sandboxToken,
             )
+            false
         }
     }
 
@@ -165,17 +174,25 @@ class SandboxRouter(
      * one explicitly here, otherwise the ref count stays > 0 forever
      * and the idle-unbind path can never fire on a future
      * load → unload cycle.
+     *
+     * Triad 118 finding (Codex #1): the previous snapshot+clear
+     * dance wasn't atomic against in-flight `onPluginUnloaded` /
+     * `onPluginCrashed` from coroutines that had already started.
+     * If both paths called `release()` for the same token, the ref
+     * count over-decremented. Per-token `handles.remove(token) !=
+     * null` gating closes the race — only whoever wins the remove
+     * does the release + lifecycle dispatch.
      */
     private fun handleSandboxDeath() {
-        // Snapshot + clear under the same operation. Each removed
-        // handle gets a paired connection.release() + a synthetic
-        // onPluginCrashed so the bridge dispatcher's pending-call
-        // maps can drain.
-        val dead = handles.values.toList()
-        handles.clear()
-        dead.forEach { handle ->
+        // Snapshot keys (cheap copy) then iterate. The atomic
+        // remove gates both the release AND the dispatch, so a
+        // racing onPluginUnloaded that lost the remove emits
+        // nothing additional.
+        val tokens = handles.keys.toList()
+        tokens.forEach { token ->
+            val removed = handles.remove(token) ?: return@forEach
             scope.launch {
-                bridgeDispatcher.onPluginCrashed(handle.sandboxToken, "process_died")
+                bridgeDispatcher.onPluginCrashed(removed.sandboxToken, "process_died")
                 connection.release()
             }
         }
@@ -233,18 +250,22 @@ class SandboxRouter(
         }
 
         override fun onPluginCrashed(sandboxToken: Int, reason: String) {
-            // releaseHandle is idempotent — even if a stale crash
-            // fires after a successful unload, we won't double-
-            // release. Lifecycle dispatch still happens so callers
-            // get a "plugin gone" signal even for stale tokens
-            // (defensive — they may have stashed the token).
-            scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
-            releaseHandle(sandboxToken)
+            // Triad 118 (Codex #2): gate dispatch on releaseHandle
+            // winning the atomic remove. A stale crash from a
+            // load-fail teardown (after the host catch already
+            // cleaned up) loses the remove and we emit nothing —
+            // otherwise the dispatcher would see a bogus crash
+            // signal for a plugin it already cleaned up.
+            if (releaseHandle(sandboxToken)) {
+                scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+            }
         }
 
         override fun onPluginUnloaded(sandboxToken: Int) {
-            scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
-            releaseHandle(sandboxToken)
+            // Same generation fence as onPluginCrashed.
+            if (releaseHandle(sandboxToken)) {
+                scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
+            }
         }
     }
 
