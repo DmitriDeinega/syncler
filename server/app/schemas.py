@@ -262,13 +262,29 @@ class LiveCardDeleteRequest(BaseModel):
     # cannot rely on rarity.
     user_id: UUID
     card_key: str
-    # base64 64 bytes Ed25519 over canonical (sender_id || user_id || card_key).
+    # Phase 12 (V1.5 backlog from Codex 95): the delete envelope MUST carry
+    # a nonce + expires_at so a captured delete can't be replayed forever
+    # against a current card with the same (sender_id, user_id, card_key).
+    # Same shapes + constraints as the upsert envelope: 12-byte nonce
+    # checked against the shared `nonce_replay` registry; `expires_at`
+    # must be a future instant ≤ 48h ahead (the same MAX_TTL cap upsert
+    # uses).
+    nonce: str  # base64 12 bytes
+    expires_at: datetime
+    # base64 64 bytes Ed25519 over canonical
+    #   (sender_id, user_id, card_key, nonce, expires_at).
     envelope_signature: str
 
     @field_validator("envelope_signature")
     @classmethod
     def validate_signature(cls, value: str) -> str:
         decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+    @field_validator("nonce")
+    @classmethod
+    def validate_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="nonce", exact=12)
         return value
 
 

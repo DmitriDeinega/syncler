@@ -161,19 +161,26 @@ async def upsert(
 
 
 def _build_delete_envelope_bytes(payload: LiveCardDeleteRequest) -> bytes:
-    """Canonical envelope for live card delete (Codex consultation 62 RED #5).
+    """Canonical envelope for live card delete.
 
     Binds `user_id` so a delete signature for one user's card cannot be
-    replayed against another user's card with the same (sender, card_key).
-    Uses the same `assemble_envelope` canonicalization as the upsert path
-    so signing libraries on the sender side stay consistent across the
-    two routes.
+    replayed against another user's card with the same (sender, card_key)
+    — Codex consultation 62 RED #5.
+
+    Phase 12 (Codex 95) — also binds `nonce` + `expires_at` so a
+    captured delete envelope is rejected after either (a) the
+    `expires_at` instant passes or (b) the server has already recorded
+    the nonce in the shared replay registry. Without this binding a
+    captured delete could be replayed indefinitely against any future
+    card with the same `(sender_id, user_id, card_key)`.
     """
     return assemble_envelope(
         {
             "sender_id": str(payload.sender_id),
             "user_id": str(payload.user_id),
             "card_key": payload.card_key,
+            "nonce": payload.nonce,
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
         }
     )
 
@@ -197,12 +204,45 @@ async def delete(
     if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
 
+    # Phase 12 (Codex 95): freshness + replay protection. Same shape as
+    # upsert — refuse already-expired envelopes and envelopes that
+    # exceed the live-card TTL cap; then check the shared per-sender
+    # nonce registry.
+    from datetime import UTC, datetime
+    from app.services.cards import MAX_TTL
+    now = datetime.now(UTC)
+    if payload.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="expires_at is not in the future",
+        )
+    if payload.expires_at > now + MAX_TTL:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"expires_at exceeds the {int(MAX_TTL.total_seconds() // 3600)}h "
+                "live-card cap"
+            ),
+        )
+    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="nonce already used",
+        )
+
     await delete_live_card(
         db,
         sender_id=payload.sender_id,
         user_id=payload.user_id,
         card_key=payload.card_key,
     )
+    # Phase 12: delete_live_card only commits when a row was actually
+    # deleted; when the card doesn't exist (already deleted earlier,
+    # or never created) the session never commits and the nonce row
+    # we just recorded would roll back on session-close, allowing a
+    # captured envelope to replay forever. Explicit commit closes
+    # that gap.
+    await db.commit()
 
     # SSE fanout to all of the user's devices so they drop the card locally.
     # Idempotent: if the card didn't exist, delete_live_card no-ops; we still

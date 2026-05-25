@@ -217,7 +217,7 @@ Never reuse an AES-GCM nonce with the same key. Clients must generate 12-byte no
 
 The V1.5 server enforces replay protection via a durable per-sender registry backed by the `nonce_replay` Postgres table (composite PK on `(sender_id, nonce)`, atomic INSERT ON CONFLICT DO NOTHING). The previous V1 in-memory LRU registry was process-local and lost state on worker restart; the durable registry survives restarts and synchronizes across multiple uvicorn workers. Rows are pruned by `app/jobs/retention.py` after 30 days (matching the upper bound on accepted envelope lifetime — envelopes older than that already fail the `expires_at` check at the service layer, so the registry can safely forget them).
 
-The same registry is shared by `POST /v1/messages/send` and `POST /v1/cards/upsert`. Cards-upsert was scoped in even though sequence-number CAS already mitigates most replay scenarios — defense-in-depth against resurrecting deleted cards with an old sequence. **The card delete envelope (`POST /v1/cards/delete`) does not currently carry a nonce or expiry**, so a captured delete can be replayed indefinitely against a current card with the same `(sender_id, user_id, card_key)`; this gap is tracked separately as a V2 follow-up.
+The same registry is shared by `POST /v1/messages/send`, `POST /v1/cards/upsert`, and `POST /v1/cards/delete`. Cards-upsert was scoped in even though sequence-number CAS already mitigates most replay scenarios — defense-in-depth against resurrecting deleted cards with an old sequence. **Phase 12 added freshness + replay protection to `POST /v1/cards/delete`** (closing Codex consultation 95): the delete envelope now binds `nonce` (12 random bytes) and `expires_at` (≤ 48 h in the future, same cap as upsert). The server checks the envelope is unexpired, then records the nonce in the shared registry (409 on replay). The route explicitly commits even when the underlying card was already gone — without that commit the nonce row would roll back on session-close and a replay could land against a future card with the same `(sender_id, user_id, card_key)`.
 
 ## 8. Live Cards (Phase 3b)
 
@@ -270,12 +270,16 @@ Canonical JSON for `POST /v1/cards/delete`:
 ```json
 {
   "card_key": "...",
+  "expires_at": "<ISO 8601 UTC ≤ 48 h ahead>",
+  "nonce": "<base64 12 random bytes>",
   "sender_id": "...",
   "user_id": "..."
 }
 ```
 
 **`user_id` is REQUIRED in the envelope.** Without it, a delete signature valid for one user's card could be replayed against another user's card with a coincidentally matching `(sender_id, card_key)` — the table is uniquely keyed on `(sender_id, user_id, card_key)`, so the lookup would otherwise be ambiguous. (Codex consultation 62 security finding.) The server matches the exact triple before deleting; mismatched triples no-op silently and still publish a `card.delete` SSE event so all of the user's devices clear any stale local copy.
+
+**Phase 12 — `nonce` + `expires_at` are REQUIRED.** Without them a captured delete envelope replays indefinitely against any future card under the same `(sender_id, user_id, card_key)`. The server (a) rejects envelopes whose `expires_at` is in the past or exceeds the 48 h live-card TTL cap, and (b) records `nonce` in the shared `nonce_replay` registry — same registry used by `messages/send` and `cards/upsert`. The delete route explicitly commits even when the card was already absent so the nonce row persists across a replay attempt. (Codex consultation 95 finding.)
 
 ### 8.4 Test Vectors
 
@@ -372,10 +376,14 @@ def assemble_live_card_delete_envelope(
     sender_id: str,
     user_id: str,
     card_key: str,
+    nonce: str,           # base64 of 12 random bytes
+    expires_at: str,      # ISO 8601, e.g. "2026-05-25T12:00:00Z"
 ) -> bytes:
     return json.dumps(
         {
             "card_key": card_key,
+            "expires_at": expires_at,
+            "nonce": nonce,
             "sender_id": _canon_uuid(sender_id),
             "user_id": _canon_uuid(user_id),
         },

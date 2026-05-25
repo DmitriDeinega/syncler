@@ -468,6 +468,8 @@ class Client:
         *,
         user_id: str,
         card_key: str,
+        nonce: bytes | None = None,
+        expires_at: datetime | None = None,
     ) -> None:
         """Delete a persistent live card for a specific user. Fires card.delete SSE.
 
@@ -476,21 +478,45 @@ class Client:
         another user's card with the same (sender, card_key). Mirrors the
         server's `_build_delete_envelope_bytes`. Closes Codex consultation
         62 RED #5.
+
+        Phase 12 (Codex 95): the envelope also binds a freshly-generated
+        ``nonce`` + ``expires_at`` so a captured delete can't be replayed
+        indefinitely against a future card with the same
+        ``(sender_id, user_id, card_key)``. Defaults: ``nonce`` =
+        ``os.urandom(12)``, ``expires_at`` = now + 7 days (server caps at
+        48h). Callers can pass either to control the freshness window
+        explicitly — usually you'll just let the defaults ride.
         """
+        import os
+
         self._require_sender_id()
         sender_id = self._canonical_sender_id()
         user_id_canonical = _canon_uuid(user_id)
+        nonce_bytes = nonce if nonce is not None else os.urandom(12)
+        if len(nonce_bytes) != 12:
+            raise ValueError(f"nonce must be 12 bytes, got {len(nonce_bytes)}")
+        # Server caps at 48h. Default at 24h gives a comfortable
+        # freshness window that's well under the cap; callers can
+        # override if they need shorter (or longer, up to 48h).
+        if expires_at is None:
+            expires_at = datetime.now(UTC) + timedelta(hours=24)
+        expires_at_str = expires_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        nonce_b64_str = b64(nonce_bytes)
         envelope = canonical_json(
             {
                 "sender_id": sender_id,
                 "user_id": user_id_canonical,
                 "card_key": card_key,
+                "nonce": nonce_b64_str,
+                "expires_at": expires_at_str,
             }
         )
         body = {
             "sender_id": sender_id,
             "user_id": user_id_canonical,
             "card_key": card_key,
+            "nonce": nonce_b64_str,
+            "expires_at": expires_at_str,
             "envelope_signature": b64(self.private_key.sign(envelope)),
         }
         resp = self.session.post(f"{self.base_url}/v1/cards/delete", json=body, timeout=10)

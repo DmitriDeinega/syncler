@@ -445,6 +445,8 @@ client.delete_card(
 
 `user_id` is **required**. The canonical signed envelope binds `(sender_id, user_id, card_key)` — without `user_id` in the signature, an attacker (or a coincidence: two users with the same `card_key` under the same sender) could be deleted by mistake. The delete endpoint matches exactly that triple in the row lookup.
 
+**Phase 12 freshness + replay protection:** as of V1.5 the delete envelope also binds a `nonce` (12 random bytes) and `expires_at` (defaults to now + 24 h; server caps at 48 h). The SDK generates both automatically, so the canonical call above keeps working unchanged. Callers MAY pass `nonce=` and `expires_at=` to control the freshness window explicitly — useful when retrying after a 409 to confirm a previous delete already landed. Server-side enforcement: expired envelopes return 400; replayed nonces return 409. See `docs/crypto-spec.md §8.3` for the envelope shape.
+
 ### 5.5 Revoking a plugin version
 
 Revoke a single published plugin row when that exact version should be treated as inactive:

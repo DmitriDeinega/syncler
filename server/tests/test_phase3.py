@@ -463,17 +463,24 @@ async def test_card_delete_signature_bound_to_user(
         assert r.status_code == 201, r.text
 
     # Build a delete envelope for ALICE's card and submit it.
+    # Phase 12: delete envelope now binds nonce + expires_at too.
+    delete_nonce_b64 = _b64(uuid.uuid4().bytes[:12])
+    delete_expires_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
     alice_envelope = _canonical(
         {
             "sender_id": str(sender_id),
             "user_id": str(alice_user_id),
             "card_key": "shared-key",
+            "nonce": delete_nonce_b64,
+            "expires_at": delete_expires_at,
         }
     )
     delete_body = {
         "sender_id": str(sender_id),
         "user_id": str(alice_user_id),
         "card_key": "shared-key",
+        "nonce": delete_nonce_b64,
+        "expires_at": delete_expires_at,
         "envelope_signature": _b64(private_key.sign(alice_envelope)),
     }
     response = await app_client.post("/v1/cards/delete", json=delete_body)
@@ -491,6 +498,154 @@ async def test_card_delete_signature_bound_to_user(
         LiveCard.__table__.select().where(LiveCard.user_id == alice_user_id)
     )
     assert list(rows_alice.all()) == []
+
+
+# ---------- Phase 12 (Codex 95): delete-envelope freshness + replay ------
+
+
+def _delete_body(
+    sender_id: uuid.UUID,
+    user_id: uuid.UUID,
+    private_key,
+    *,
+    card_key: str,
+    nonce: bytes | None = None,
+    expires_at: datetime | None = None,
+) -> dict:
+    """Build a Phase-12-shaped delete request body."""
+    if nonce is None:
+        nonce = uuid.uuid4().bytes[:12]
+    if expires_at is None:
+        expires_at = datetime.now(UTC) + timedelta(hours=1)
+    expires_at_str = expires_at.isoformat().replace("+00:00", "Z")
+    nonce_b64 = _b64(nonce)
+    envelope = _canonical(
+        {
+            "sender_id": str(sender_id),
+            "user_id": str(user_id),
+            "card_key": card_key,
+            "nonce": nonce_b64,
+            "expires_at": expires_at_str,
+        }
+    )
+    return {
+        "sender_id": str(sender_id),
+        "user_id": str(user_id),
+        "card_key": card_key,
+        "nonce": nonce_b64,
+        "expires_at": expires_at_str,
+        "envelope_signature": _b64(private_key.sign(envelope)),
+    }
+
+
+@pytest.mark.asyncio
+async def test_card_delete_rejects_replayed_envelope(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    """A captured delete envelope MUST be rejected on the second
+    submission via the per-sender nonce_replay registry. Without this
+    the delete would replay forever against any future card with the
+    same (sender_id, user_id, card_key). Codex consultation 95.
+    """
+    sender_id, private_key = await _register_sender(app_client)
+    user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
+    await _enroll_device(app_client, bootstrap)
+    plugin_id = await _seed_pairing_and_live_plugin(
+        db_session, user_id=user_id, sender_id=sender_id,
+    )
+
+    # First card + first delete succeed.
+    body1 = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    r = await app_client.post("/v1/cards/upsert", json=body1)
+    assert r.status_code == 201, r.text
+
+    delete = _delete_body(sender_id, user_id, private_key, card_key="C")
+    r = await app_client.post("/v1/cards/delete", json=delete)
+    assert r.status_code == 204, r.text
+
+    # Sender re-creates the card (could be a legitimate later state).
+    body2 = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    r = await app_client.post("/v1/cards/upsert", json=body2)
+    assert r.status_code == 201, r.text
+
+    # Replay the exact same delete envelope → 409 nonce-already-used.
+    r = await app_client.post("/v1/cards/delete", json=delete)
+    assert r.status_code == 409, r.text
+    assert "nonce already used" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_card_delete_rejects_expired_envelope(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    """A delete with expires_at in the past gets 400. Codex 95."""
+    sender_id, private_key = await _register_sender(app_client)
+    user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
+    await _enroll_device(app_client, bootstrap)
+    plugin_id = await _seed_pairing_and_live_plugin(
+        db_session, user_id=user_id, sender_id=sender_id,
+    )
+    body = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    await app_client.post("/v1/cards/upsert", json=body)
+
+    expired = datetime.now(UTC) - timedelta(seconds=5)
+    delete = _delete_body(
+        sender_id, user_id, private_key, card_key="C", expires_at=expired,
+    )
+    r = await app_client.post("/v1/cards/delete", json=delete)
+    assert r.status_code == 400, r.text
+    assert "expires_at" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_card_delete_rejects_exceeds_ttl_cap(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    """A delete with expires_at > now + 48h gets 400. Same cap as upsert."""
+    sender_id, private_key = await _register_sender(app_client)
+    user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
+    await _enroll_device(app_client, bootstrap)
+    plugin_id = await _seed_pairing_and_live_plugin(
+        db_session, user_id=user_id, sender_id=sender_id,
+    )
+    body = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    await app_client.post("/v1/cards/upsert", json=body)
+
+    too_far = datetime.now(UTC) + timedelta(hours=72)
+    delete = _delete_body(
+        sender_id, user_id, private_key, card_key="C", expires_at=too_far,
+    )
+    r = await app_client.post("/v1/cards/delete", json=delete)
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.asyncio
+async def test_card_delete_records_nonce_even_when_card_missing(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    """A delete for a non-existent card still records the nonce so a
+    replay can't later land against a freshly-created card with the
+    same key. The route must explicitly commit because
+    `delete_live_card` no-ops without committing when the row is
+    absent — without that commit the nonce_replay insert rolls back
+    on session-close.
+    """
+    sender_id, private_key = await _register_sender(app_client)
+    user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
+    await _enroll_device(app_client, bootstrap)
+    await _seed_pairing_and_live_plugin(
+        db_session, user_id=user_id, sender_id=sender_id,
+    )
+
+    # Delete a card that doesn't exist — should still succeed (idempotent).
+    delete = _delete_body(sender_id, user_id, private_key, card_key="never-existed")
+    r = await app_client.post("/v1/cards/delete", json=delete)
+    assert r.status_code == 204, r.text
+
+    # Now replay → MUST 409. If the no-op path didn't commit, this
+    # would silently succeed and reveal the replay window.
+    r = await app_client.post("/v1/cards/delete", json=delete)
+    assert r.status_code == 409, r.text
 
 
 # ---------- Phase 2 carry-over: inbox dismiss filter ---------------------
