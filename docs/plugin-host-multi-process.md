@@ -1,8 +1,10 @@
 # Multi-Process Plugin Host (V1.5 runtime #1, Phase 10)
 
-Status: **design v3** — Phase 10a (this document) locks the AIDL
+Status: **design v4** — Phase 10a (this document) locks the AIDL
 contract, process lifecycle, and migration plan. Phase 10b implements.
-v3 revisions land the triad 114 findings (unload→reload race,
+v4 revisions land the triad 115 findings (token-allocation
+ownership, cleanup ACK in AIDL, WebView wipe trigger scope).
+v3 revisions landed the triad 114 findings (unload→reload race,
 state-machine completeness, generation fencing, staged-path
 collision, manifest-error wording, WebView-data isolation).
 v2 revisions landed the triad 113 findings (security framing,
@@ -360,10 +362,10 @@ AIDL behavior per state:
 |---|---|---|---|---|---|
 | `loading` | rejected, `concurrent_load_in_progress` | buffered (sandbox replays after `onPluginReady`) | buffered | OK; cancels load → `unloading` | returns `"loading"` |
 | `ready` | rejected — caller MUST `unloadPlugin` first | delivered | delivered | OK → `unloading` | returns `"ready"` |
-| `errored` | OK; allocates new token, old slot stays in `errored` | dropped + warn-log | dropped | OK → `unloading` | returns `"errored"` |
+| `errored` | OK with a host-allocated new token; old slot stays in `errored` | dropped + warn-log | dropped | OK → `unloading` | returns `"errored"` |
 | `unloading` | rejected, `concurrent_unload_in_progress` (host SHOULD await `unloaded` then retry) | dropped + warn-log | dropped + warn-log | no-op (re-entrant) | returns `"unloading"` |
-| `unloaded` | OK; allocates new token | dropped + warn-log (caller bug) | dropped + warn-log | no-op | returns `"unloaded"` |
-| `process_dead` | OK after rebind; allocates new token | dropped + `onPluginCrashed` fires once | dropped | no-op | returns `"process_dead"` |
+| `unloaded` | OK with a host-allocated new token | dropped + warn-log (caller bug) | dropped + warn-log | no-op | returns `"unloaded"` |
+| `process_dead` | OK after rebind with a host-allocated new token | dropped + `onPluginCrashed` fires once | dropped | no-op | returns `"process_dead"` |
 
 The "rejected" rows return `IllegalStateException` over Binder with
 a structured error code. The host's `PluginRegistry` is the one
