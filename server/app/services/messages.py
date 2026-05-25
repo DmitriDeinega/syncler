@@ -90,18 +90,38 @@ async def _plugin(
     return result.scalar_one_or_none()
 
 
-async def store_message(
+async def store_message_v2(
     db: AsyncSession,
     *,
-    sender_id: uuid.UUID,
-    user_id: uuid.UUID,
-    plugin_id: uuid.UUID,
-    encrypted_body: bytes,
-    nonce: bytes,
-    envelope_signature: bytes,
-    min_plugin_version: str | None,
-    expires_at: datetime,
+    payload: object,  # MessageSendRequestV2 — avoid circular import on type
 ) -> Message:
+    """Phase 9b: persist a V2 publish payload as a Message + per-device
+    DeliveryStatus rows.
+
+    The full V2 wire (payload_ciphertext, payload_nonce,
+    recipient_envelopes, recipient_directory_version,
+    envelope_signature) is serialized into the
+    ``Message.encrypted_body_pointer`` column via
+    ``build_v2_pointer``. The inbox fetch path reconstructs the wire
+    from that pointer on the way out.
+
+    The caller (POST /v1/messages/send) has already:
+    - Verified the Ed25519 envelope signature
+    - Burned the payload_nonce in the nonce-replay table
+    - Run the recipient-set classifier (§11.10)
+    - Resolved the sender + plugin records
+
+    so this function focuses on the persistence shape and the
+    delivery_status fan-out.
+    """
+    # Local import to avoid module-load-time cycles (services <-> schemas).
+    from app.services.envelopes_v2 import build_v2_pointer
+
+    sender_id = payload.sender_id
+    user_id = payload.user_id
+    plugin_id = payload.plugin_id
+    expires_at = payload.expires_at
+
     now = datetime.now(UTC)
     if expires_at <= now:
         raise ExpiredEnvelopeError("expires_at is not in the future")
@@ -116,35 +136,27 @@ async def store_message(
     if plugin is None:
         raise PluginInactiveError("plugin missing, revoked, or not owned by sender")
 
-    # Storage is independent of the push channel. We require at least one
-    # non-revoked device so the message has a recipient; devices without an
-    # FCM token can still receive it via the /v1/messages/inbox pull endpoint
-    # (used in dev builds without google-services.json, and as a fallback for
-    # users who declined notification permission). FCM push, when available,
-    # is best-effort on top of storage — see push_message_to_user_devices.
     devices = await _active_devices(db, user_id)
     if not devices:
         raise NoActiveDeviceWithPluginError("user has no active devices")
 
-    # Encrypted body is opaque to the server; we keep it in a separate blob table or
-    # inline. For V1 we keep it inline via an "encrypted_body_pointer" addressed JSON.
-    pointer = _build_pointer(encrypted_body, nonce, envelope_signature)
-
+    pointer = build_v2_pointer(payload)
     message = Message(
         id=uuid.uuid4(),
         sender_id=sender_id,
         user_id=user_id,
         plugin_id=plugin_id,
         encrypted_body_pointer=pointer,
-        min_plugin_version=min_plugin_version,
+        min_plugin_version=payload.min_plugin_version,
         expires_at=expires_at,
     )
     db.add(message)
     await db.flush()
 
-    # Delivery_status rows still cover ALL non-revoked devices (FCM-less devices
-    # can still pull via inbox once they come online and acquire a token).
-    for device in await _active_devices(db, user_id):
+    # Delivery_status rows cover EVERY active device (same pattern as V1).
+    # The per-device decrypt happens client-side using its own slot in
+    # recipient_envelopes; the server doesn't filter.
+    for device in devices:
         db.add(
             DeliveryStatus(
                 message_id=message.id,

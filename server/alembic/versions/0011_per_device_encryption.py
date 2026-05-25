@@ -76,8 +76,39 @@ def upgrade() -> None:
     op.execute("DELETE FROM delivery_status")
     op.execute("DELETE FROM messages")
 
+    # Restructure live_cards for V2 wire. The V1 columns
+    # (encrypted_payload, nonce) carried the raw pairing-key-AEAD wire;
+    # V2 stores the full envelope (including per-device HPKE wraps and
+    # the envelope_signature) in encrypted_body_pointer alongside the
+    # card metadata fields. The table is already empty from the
+    # DELETE above, so the schema change is destruction-safe.
+    op.drop_column("live_cards", "encrypted_payload")
+    op.drop_column("live_cards", "nonce")
+    op.add_column(
+        "live_cards",
+        sa.Column("encrypted_body_pointer", sa.Text(), nullable=False, server_default=""),
+    )
+    op.add_column(
+        "live_cards",
+        sa.Column("card_type", sa.Text(), nullable=False, server_default="standard_card"),
+    )
+    op.add_column(
+        "live_cards",
+        sa.Column("min_plugin_version", sa.Text(), nullable=True),
+    )
+    # Drop the server_defaults; they were only there to satisfy NOT
+    # NULL on the (empty) table at migration time. New rows must
+    # supply values explicitly.
+    op.alter_column("live_cards", "encrypted_body_pointer", server_default=None)
+    op.alter_column("live_cards", "card_type", server_default=None)
+
 
 def downgrade() -> None:
+    op.drop_column("live_cards", "min_plugin_version")
+    op.drop_column("live_cards", "card_type")
+    op.drop_column("live_cards", "encrypted_body_pointer")
+    op.add_column("live_cards", sa.Column("encrypted_payload", sa.LargeBinary(), nullable=False, server_default=b""))
+    op.add_column("live_cards", sa.Column("nonce", sa.LargeBinary(), nullable=False, server_default=b""))
     op.drop_column("users", "device_directory_version")
     op.drop_column("devices", "updated_at")
     op.drop_constraint(

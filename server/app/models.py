@@ -249,8 +249,14 @@ class LiveCard(Base):
         nullable=False,
     )
     card_key: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Phase 9b V2 wire (docs/crypto-spec.md §11.5). The full envelope
+    # (payload_ciphertext, payload_nonce, recipient_envelopes,
+    # recipient_directory_version, envelope_signature) is serialized
+    # into encrypted_body_pointer via build_v2_pointer. The old
+    # encrypted_payload/nonce columns are gone.
+    encrypted_body_pointer: Mapped[str] = mapped_column(Text, nullable=False)
+    card_type: Mapped[str] = mapped_column(Text, nullable=False)
+    min_plugin_version: Mapped[str | None] = mapped_column(Text)
     sequence_number: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="0"
     )

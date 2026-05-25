@@ -1290,3 +1290,73 @@ class StaleRecipientSetError(BaseModel):
     missing_device_ids: list[UUID]
 
 
+class MessageInboxItemV2(BaseModel):
+    """V2 inbox item shape. Device reconstructs the V2 envelope from these
+    fields, verifies the Ed25519 signature, picks its own
+    recipient_envelope by device_id, HPKE-opens the CEK, AES-GCM-decrypts
+    the payload.
+    """
+
+    id: UUID
+    sender_id: UUID
+    plugin_id: UUID
+    plugin_identifier: str
+    min_plugin_version: str | None
+    protocol_version: Literal[2] = 2
+    envelope_kind: Literal["event"] = "event"
+    payload_nonce: str  # base64
+    payload_ciphertext: str  # base64
+    recipient_envelopes: list[RecipientEnvelopeWire]
+    recipient_directory_version: int
+    envelope_signature: str  # base64
+    sent_at: datetime
+    expires_at: datetime
+
+    @field_serializer("expires_at")
+    def _serialize_expires_at(self, value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+
+class LiveCardInboxItemV2(BaseModel):
+    """V2 live-card inbox item. Mirrors MessageInboxItemV2 plus
+    card-specific fields. Device verifies signature, picks its own
+    recipient envelope, opens CEK, decrypts payload, then routes via
+    plugin_identifier + card_key.
+    """
+
+    id: UUID
+    sender_id: UUID
+    plugin_id: UUID
+    plugin_identifier: str
+    min_plugin_version: str | None
+    protocol_version: Literal[2] = 2
+    envelope_kind: Literal["live_card_upsert"] = "live_card_upsert"
+    card_key: str
+    card_type: str
+    sequence_number: int
+    payload_nonce: str
+    payload_ciphertext: str
+    recipient_envelopes: list[RecipientEnvelopeWire]
+    recipient_directory_version: int
+    envelope_signature: str
+    updated_at: datetime
+    expires_at: datetime
+
+    @field_serializer("updated_at")
+    def _serialize_updated_at(self, value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+    @field_serializer("expires_at")
+    def _serialize_expires_at(self, value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+
+class InboxFeedResponseV2(BaseModel):
+    """V2 unified inbox feed. Items are either event messages or live
+    cards; the `envelope_kind` discriminator tells them apart.
+    """
+
+    items: list[MessageInboxItemV2 | LiveCardInboxItemV2]
+    next_since: datetime | None
+
+

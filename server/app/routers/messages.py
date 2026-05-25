@@ -22,17 +22,23 @@ from app.db import get_db
 from app.middleware.rate_limit import rate_limit
 from app.models import Sender
 from app.schemas import (
-    InboxFeedResponse,
-    LiveCardInboxItem,
-    MessageDetailResponse,
-    MessageInboxItem,
-    MessageInboxItemExtended,
-    MessageInboxResponse,
-    MessageSendRequest,
+    InboxFeedResponseV2,
+    LiveCardInboxItemV2,
+    MessageInboxItemV2,
+    MessageSendRequestV2,
     MessageSendResponse,
+    RecipientEnvelopeWire,
+    StaleRecipientSetError,
     decode_base64,
 )
 from app.services.cards import get_live_cards_for_user
+from app.services.envelopes_v2 import (
+    RecipientSetError,
+    RecipientSetOK,
+    build_event_envelope_bytes,
+    classify_recipient_set,
+    parse_v2_pointer,
+)
 from app.services.messages import (
     ExpiredEnvelopeError,
     MessageNotFoundError,
@@ -43,8 +49,7 @@ from app.services.messages import (
     get_message_for_user,
     inbox_for_device,
     mark_dismissed,
-    parse_pointer,
-    store_message,
+    store_message_v2,
 )
 from app.services.devices import touch_device_last_seen
 from app.services.events import get_event_bus
@@ -62,33 +67,18 @@ def _b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
-def _build_envelope_bytes(payload: MessageSendRequest) -> bytes:
-    """Build the canonical 7-field envelope the sender signs (matches crypto-spec ֲ§4.1)."""
-    if payload.expires_at is None:
-        raise HTTPException(status_code=400, detail="expires_at is required")
-    return assemble_envelope(
-        {
-            "sender_id": str(payload.sender_id),
-            "user_id": str(payload.user_id),
-            "plugin_id": str(payload.plugin_id),
-            "min_plugin_version": payload.min_plugin_version or "",
-            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
-            "encrypted_body": payload.encrypted_body,
-            "nonce": payload.nonce,
-        }
-    )
-
-
 @router.post("/send", response_model=MessageSendResponse, status_code=status.HTTP_201_CREATED)
 async def send_message(
-    payload: MessageSendRequest,
+    payload: MessageSendRequestV2,
     request: Request,
     _: None = Depends(rate_limit("message_send_ip")),
     db: AsyncSession = Depends(get_db),
 ) -> MessageSendResponse:
-    if payload.expires_at is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expires_at is required")
-
+    """Phase 9b V2 publish (spec §11.4). Per-recipient HPKE envelopes,
+    Ed25519 signature over the full sorted envelope (§11.8),
+    recipient-set classifier (§11.10), nonce-replay table on
+    payload_nonce.
+    """
     try:
         sender: Sender = await get_active_sender(db, payload.sender_id)
     except SenderNotFoundError as exc:
@@ -96,14 +86,15 @@ async def send_message(
     except SenderRevokedError as exc:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
 
-    envelope_bytes = _build_envelope_bytes(payload)
+    # Spec §11.8: verify the Ed25519 envelope signature BEFORE trusting any
+    # envelope field for routing/storage/HPKE info reconstruction
+    # (Codex 127 guardrail #4).
+    envelope_bytes = build_event_envelope_bytes(payload)
     signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
-
     if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
 
-    # Per-sender rate limit AFTER signature verification (so spammers can't
-    # inflate someone else's bucket by spoofing the body sender_id).
+    # Per-sender rate limit AFTER signature verification.
     request.state.sender_id = str(payload.sender_id)
     request.state.user_id = str(payload.user_id)
     from app.middleware.rate_limit import check_rate_limit
@@ -111,36 +102,52 @@ async def send_message(
     await check_rate_limit(db, request, RATE_LIMITS["message_send"])
     await check_rate_limit(db, request, RATE_LIMITS["message_send_user_hour"])
 
-    # Replay check AFTER signature verification (so attackers can't OOM the
-    # nonce table by spamming junk envelopes). Phase 7: durable
-    # Postgres-backed registry. The insert lives in the same session as
-    # store_message — they commit together atomically, so a failed
-    # store_message rolls back the nonce burn and the sender can retry.
-    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
-    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+    # Nonce-replay check on payload_nonce (the AES-GCM nonce).
+    payload_nonce_bytes = decode_base64(
+        payload.payload_nonce, field_name="payload_nonce", exact=12
+    )
+    if not await record_nonce_or_reject(db, payload.sender_id, payload_nonce_bytes):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
 
-    try:
-        message = await store_message(
-            db,
-            sender_id=payload.sender_id,
-            user_id=payload.user_id,
-            plugin_id=payload.plugin_id,
-            encrypted_body=decode_base64(payload.encrypted_body, field_name="encrypted_body", minimum=16),
-            nonce=nonce_bytes,
-            envelope_signature=signature,
-            min_plugin_version=payload.min_plugin_version,
-            expires_at=payload.expires_at,
+    # Recipient-set classifier (§11.10). Runs in the same transaction
+    # as store_message_v2 below so the directory_version + active set
+    # are consistent (Codex 127 guardrail #3).
+    classification = await classify_recipient_set(
+        db,
+        user_id=payload.user_id,
+        recipient_envelopes=payload.recipient_envelopes,
+        sender_directory_version=payload.recipient_directory_version,
+    )
+    if isinstance(classification, RecipientSetError):
+        if classification.http_status == 409:
+            body = StaleRecipientSetError(
+                message=classification.message,
+                current_directory_version=classification.current_directory_version,
+                missing_device_ids=classification.missing_device_ids,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=body.model_dump(mode="json"),
+                headers={
+                    "X-Stale-Directory-Version": str(
+                        classification.current_directory_version
+                    ),
+                },
+            )
+        raise HTTPException(
+            status_code=classification.http_status,
+            detail={
+                "error": classification.code,
+                "message": classification.message,
+                "current_directory_version": classification.current_directory_version,
+            },
         )
+
+    try:
+        message = await store_message_v2(db, payload=payload)
     except ExpiredEnvelopeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except PairingMissingError as exc:
-        # Phase 13 (Codex 112): unify with /v1/cards/upsert which already
-        # uses 410 Gone. After root_compromise_rotation revokes every
-        # pairing, the legitimate sender's next send returns 410 and
-        # they re-pair from scratch. "Gone" is the right semantic — the
-        # pairing once existed; "Forbidden" would suggest the sender
-        # never had authorization.
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="no active pairing") from exc
     except PluginInactiveError as exc:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing, revoked, or not owned by sender") from exc
@@ -161,18 +168,19 @@ async def send_message(
     return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
 
 
-@router.get("/inbox", response_model=InboxFeedResponse)
+@router.get("/inbox", response_model=InboxFeedResponseV2)
 async def inbox(
     since: datetime | None = Query(None),
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
-) -> InboxFeedResponse:
-    # Device identity comes from the JWT ג€” no separate query param, and
-    # the auth dependency already verified the device is not revoked.
-    # Bump last_seen so Settings ג†’ Devices shows fresh activity.
+) -> InboxFeedResponseV2:
+    """Phase 9b V2 inbox feed (spec §11.4 + §11.5). Returns the FULL
+    V2 envelope for each message / live card so the device can verify
+    the Ed25519 signature, pick its own recipient_envelope by
+    device_id, HPKE-open the CEK, and AES-GCM-decrypt the payload.
+    """
     await touch_device_last_seen(db, device_id=ctx.device.id)
 
-    # 1. Fetch event messages.
     messages, next_since = await inbox_for_device(
         db,
         user_id=ctx.user.id,
@@ -180,10 +188,8 @@ async def inbox(
         since=since,
     )
 
-    # 2. Fetch live cards.
     live_cards = await get_live_cards_for_user(db, user_id=ctx.user.id)
 
-    # 3. Project plugin_identifiers in one batch.
     plugin_ids = list({m.plugin_id for m in messages} | {c.plugin_id for c in live_cards})
     identifier_by_id: dict[uuid.UUID, str] = {}
     if plugin_ids:
@@ -194,48 +200,34 @@ async def inbox(
         )
         identifier_by_id = {row[0]: row[1] for row in rows.all()}
 
-    # 4. Build the unified feed.
-    items: list[MessageInboxItemExtended | LiveCardInboxItem] = []
+    items: list[MessageInboxItemV2 | LiveCardInboxItemV2] = []
 
     for m in messages:
-        item = _message_to_inbox_item(m, identifier_by_id.get(m.plugin_id, ""))
-        items.append(MessageInboxItemExtended(**item.model_dump()))
+        items.append(_message_to_inbox_item_v2(m, identifier_by_id.get(m.plugin_id, "")))
 
     for c in live_cards:
-        items.append(LiveCardInboxItem(
-            id=c.id,
-            sender_id=c.sender_id,
-            plugin_id=c.plugin_id,
-            plugin_identifier=identifier_by_id.get(c.plugin_id, ""),
-            card_key=c.card_key,
-            encrypted_payload=_b64(c.encrypted_payload),
-            nonce=_b64(c.nonce),
-            sequence_number=c.sequence_number,
-            updated_at=c.updated_at,
-            expires_at=c.expires_at,
-        ))
+        items.append(_live_card_to_inbox_item_v2(c, identifier_by_id.get(c.plugin_id, "")))
 
-    return InboxFeedResponse(items=items, next_since=next_since)
+    return InboxFeedResponseV2(items=items, next_since=next_since)
 
 
-@router.get("/{message_id}", response_model=MessageDetailResponse)
+@router.get("/{message_id}", response_model=MessageInboxItemV2)
 async def get_message(
     message_id: uuid.UUID,
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
-) -> MessageDetailResponse:
+) -> MessageInboxItemV2:
     try:
         message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
-    # Fetch plugin_identifier for this one message.
     from app.models import Plugin
     from sqlalchemy import select as sql_select
     plugin_row = await db.execute(
         sql_select(Plugin.plugin_identifier).where(Plugin.id == message.plugin_id)
     )
     identifier = plugin_row.scalar_one_or_none() or ""
-    return MessageDetailResponse(**_message_to_inbox_item(message, identifier).model_dump())
+    return _message_to_inbox_item_v2(message, identifier)
 
 
 @router.post("/{message_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
@@ -272,17 +264,50 @@ async def dismiss_message(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _message_to_inbox_item(message, plugin_identifier: str) -> MessageInboxItem:  # noqa: ANN001
-    encrypted_body, nonce, envelope_signature = parse_pointer(message.encrypted_body_pointer)
-    return MessageInboxItem(
+def _message_to_inbox_item_v2(message, plugin_identifier: str) -> MessageInboxItemV2:  # noqa: ANN001
+    """Phase 9b V2 inbox projection (spec §11.4). Reconstructs the full
+    V2 envelope from the stored pointer; device gets every recipient's
+    envelope (full fanout) so signature verification can reconstruct
+    the canonical signed envelope bytes byte-for-byte.
+    """
+    fields = parse_v2_pointer(message.encrypted_body_pointer)
+    return MessageInboxItemV2(
         id=message.id,
         sender_id=message.sender_id,
         plugin_id=message.plugin_id,
         plugin_identifier=plugin_identifier,
         min_plugin_version=message.min_plugin_version,
-        encrypted_body=_b64(encrypted_body),
-        nonce=_b64(nonce),
-        envelope_signature=_b64(envelope_signature),
+        payload_nonce=fields.payload_nonce,
+        payload_ciphertext=fields.payload_ciphertext,
+        recipient_envelopes=[
+            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+        ],
+        recipient_directory_version=fields.recipient_directory_version,
+        envelope_signature=fields.envelope_signature,
         sent_at=message.sent_at,
         expires_at=message.expires_at,
+    )
+
+
+def _live_card_to_inbox_item_v2(card, plugin_identifier: str) -> LiveCardInboxItemV2:  # noqa: ANN001
+    """Phase 9b V2 live-card projection (spec §11.5)."""
+    fields = parse_v2_pointer(card.encrypted_body_pointer)
+    return LiveCardInboxItemV2(
+        id=card.id,
+        sender_id=card.sender_id,
+        plugin_id=card.plugin_id,
+        plugin_identifier=plugin_identifier,
+        min_plugin_version=card.min_plugin_version,
+        card_key=card.card_key,
+        card_type=card.card_type,
+        sequence_number=card.sequence_number,
+        payload_nonce=fields.payload_nonce,
+        payload_ciphertext=fields.payload_ciphertext,
+        recipient_envelopes=[
+            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+        ],
+        recipient_directory_version=fields.recipient_directory_version,
+        envelope_signature=fields.envelope_signature,
+        updated_at=card.updated_at,
+        expires_at=card.expires_at,
     )
