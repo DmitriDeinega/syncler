@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthContext, current_auth_context
 from app.crypto.aead import assemble_envelope
-from app.crypto.nonce import get_global_registry
+from app.services.nonce_replay import record_nonce_or_reject
 from app.crypto.signatures import verify_message_envelope
 from app.db import get_db
 from app.middleware.rate_limit import rate_limit
@@ -112,13 +112,12 @@ async def send_message(
     await check_rate_limit(db, request, RATE_LIMITS["message_send_user_hour"])
 
     # Replay check AFTER signature verification (so attackers can't OOM the
-    # nonce registry by spamming junk). We check first to short-circuit,
-    # then re-mark after successful store_message so failed stores don't
-    # burn the nonce.
+    # nonce table by spamming junk envelopes). Phase 7: durable
+    # Postgres-backed registry. The insert lives in the same session as
+    # store_message — they commit together atomically, so a failed
+    # store_message rolls back the nonce burn and the sender can retry.
     nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
-    registry = get_global_registry()
-    sender_key = str(payload.sender_id).encode("utf-8")
-    if registry.has(sender_key, nonce_bytes):
+    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
 
     try:
@@ -143,10 +142,6 @@ async def send_message(
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active devices") from exc
     except NonceReplayError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
-
-    # Mark nonce as seen ONLY after store_message succeeds; failed stores
-    # don't burn the nonce.
-    registry.mark(sender_key, nonce_bytes)
 
     await push_message_to_user_devices(db, message=message)
     # SSE hint: nudge any device the recipient has in foreground to pull

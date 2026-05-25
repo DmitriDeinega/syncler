@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crypto.nonce import reset_global_registry
 from app.models import Pairing, Plugin
 
 
@@ -29,11 +28,10 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-@pytest.fixture(autouse=True)
-def _reset_nonce_registry():
-    reset_global_registry()
-    yield
-    reset_global_registry()
+# Phase 7: the in-memory nonce registry was removed; replay detection
+# now uses the durable `nonce_replay` table. The test DB is recreated
+# per test session via conftest, and individual tests use distinct
+# senders / nonces, so no autouse reset fixture is needed.
 
 
 async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com") -> tuple[uuid.UUID, str]:

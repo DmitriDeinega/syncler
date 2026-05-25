@@ -215,7 +215,9 @@ public_key = private_key.public_key().public_bytes(
 
 Never reuse an AES-GCM nonce with the same key. Clients must generate 12-byte nonces with a CSPRNG.
 
-The V1 server performs a per-sender in-memory LRU replay check for the last 100,000 nonces. This protects the current server process only. A Redis or database-backed replay check is planned for V1.5.
+The V1.5 server enforces replay protection via a durable per-sender registry backed by the `nonce_replay` Postgres table (composite PK on `(sender_id, nonce)`, atomic INSERT ON CONFLICT DO NOTHING). The previous V1 in-memory LRU registry was process-local and lost state on worker restart; the durable registry survives restarts and synchronizes across multiple uvicorn workers. Rows are pruned by `app/jobs/retention.py` after 30 days (matching the upper bound on accepted envelope lifetime — envelopes older than that already fail the `expires_at` check at the service layer, so the registry can safely forget them).
+
+The same registry is shared by `POST /v1/messages/send` and `POST /v1/cards/upsert`. Cards-upsert was scoped in even though sequence-number CAS already mitigates most replay scenarios — defense-in-depth against resurrecting deleted cards with an old sequence. **The card delete envelope (`POST /v1/cards/delete`) does not currently carry a nonce or expiry**, so a captured delete can be replayed indefinitely against a current card with the same `(sender_id, user_id, card_key)`; this gap is tracked separately as a V2 follow-up.
 
 ## 8. Live Cards (Phase 3b)
 

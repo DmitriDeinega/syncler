@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer
 from sqlalchemy import JSON, LargeBinary, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -269,6 +269,50 @@ class PendingPairing(Base):
     # substitute it.
     sender_broker_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NonceReplay(Base):
+    """Phase 7 — durable per-sender nonce-replay registry.
+
+    Each row records one (sender_id, nonce) pair that has been
+    successfully envelope-decrypted. Insertion uses INSERT ON
+    CONFLICT DO NOTHING on the composite PK so concurrent workers
+    racing the same nonce will see exactly one accept and N-1
+    rejections.
+
+    Replaces the legacy in-memory NonceRegistry (server/app/crypto/nonce.py),
+    which lost state on worker restart and did not synchronize
+    across multiple uvicorn workers.
+
+    Retention: rows are pruned after `MAX_RETENTION` (30 days) since
+    `seen_at`; envelopes older than that would already be rejected
+    by the message-expiry / card-expiry checks, so the replay
+    registry can safely forget them. See
+    `server/app/jobs/retention.py` for the periodic cleanup task
+    and `server/app/services/nonce_replay.py` for the best-effort
+    on-write cleanup.
+    """
+
+    __tablename__ = "nonce_replay"
+    __table_args__ = (
+        CheckConstraint(
+            "octet_length(nonce) = 12",
+            name="ck_nonce_replay_nonce_length",
+        ),
+    )
+
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
 
 
 class RateLimitEvent(Base):

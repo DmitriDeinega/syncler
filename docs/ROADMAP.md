@@ -21,7 +21,7 @@ This file is the public roadmap. Internal implementation phases (Phase 0 / 1 / 2
 2. **Native Kotlin plugin runtime (out-of-process).** A second plugin format alongside the JS bundle: a signed AAR loaded into the isolated process. Performance + platform-API parity for plugin authors who want a native experience, with the IPC boundary preventing in-process ClassLoader poisoning.
 3. **Master-key rotation.** UX + protocol for rotating the user's 32-byte master key without losing access to historical state. Required before per-device encryption (#4) lands.
 4. **Per-device envelope encryption.** Senders encrypt the payload separately for each of the user's enrolled devices, keyed by per-device public keys instead of the shared user master key. Enables forward secrecy and immediate per-device revocation without rotating user-wide keys.
-5. **Durable nonce-replay protection.** Move the per-sender nonce registry from in-memory to Postgres so a worker restart can't accept a replayed envelope.
+5. ~~**Durable nonce-replay protection.**~~ **Shipped.** Per-sender nonce registry moved from in-memory LRU to a Postgres `nonce_replay` table (composite PK on `(sender_id, nonce)`, atomic INSERT ON CONFLICT DO NOTHING). The replay row commits transactionally with `store_message` / `upsert_live_card` so a failed downstream write rolls back the nonce burn and the sender can retry. Retention pruning (30 days, matching `MAX_RETENTION`) runs hybrid: best-effort on-write batch plus a periodic pass in `app/jobs/retention.py` under a Postgres advisory lock for multi-worker safety. Card-upsert scoped in (defense-in-depth on top of sequence-number CAS). Spec: `docs/crypto-spec.md §7`. Shipped in Phase 7.
 
 ## V1.5 — Developer experience (shipped)
 

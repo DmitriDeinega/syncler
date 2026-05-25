@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app.crypto.aead import assemble_aad, assemble_envelope, decrypt_message_body
 from app.crypto.argon2 import ARGON2_PARAMS_V1, params_for_version, verify_auth_key_hash
 from app.crypto.hkdf import derive_pairing_key
-from app.crypto.nonce import NonceRegistry, generate_nonce
+from app.crypto.nonce import generate_nonce
 from app.crypto.signatures import canonical_manifest_for_signing, verify_message_envelope, verify_plugin_bundle
 from app.crypto.wire import pack_message, unpack_message
 
@@ -205,18 +205,13 @@ def test_assemble_envelope_canonical_and_validation() -> None:
         assemble_envelope(ENVELOPE_FIELDS | {"unrelated": "x"})
 
 
-def test_nonce_registry_detects_replay_and_isolates_senders() -> None:
-    registry = NonceRegistry(window=2)
+def test_generate_nonce_yields_12_bytes() -> None:
+    # Phase 7: the in-memory NonceRegistry was deleted (durable replay
+    # detection now lives in app.services.nonce_replay against
+    # Postgres). The integration tests for the DB-backed flow live in
+    # `test_nonce_replay.py`.
     nonce = generate_nonce()
-
     assert len(nonce) == 12
-    assert not registry.seen(b"sender-a", nonce)
-    assert registry.seen(b"sender-a", nonce)
-    assert not registry.seen(b"sender-b", nonce)
-
-    assert not registry.seen(b"sender-a", b"111111111111")
-    assert not registry.seen(b"sender-a", b"222222222222")
-    assert not registry.seen(b"sender-a", nonce)
 
 
 def test_wire_pack_unpack_round_trip() -> None:

@@ -29,6 +29,7 @@ from app.services.cards import (
     upsert_live_card,
 )
 from app.services.events import get_event_bus
+from app.services.nonce_replay import record_nonce_or_reject
 from app.services.senders import (
     SenderNotFoundError,
     SenderRevokedError,
@@ -94,6 +95,16 @@ async def upsert(
     from app.middleware.rate_limit_config import RATE_LIMITS
     await check_rate_limit(db, request, RATE_LIMITS["card_upsert"])
 
+    # Phase 7: replay protection for live-card upserts. Sequence-number
+    # CAS in upsert_live_card defends against most replay scenarios, but
+    # nothing prevents resurrecting a card with an older sequence after
+    # the current row is deleted. The shared nonce registry closes that
+    # gap. Same transactional semantics as messages.py — the insert
+    # commits with upsert_live_card's commit, or rolls back together.
+    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+
     try:
         card = await upsert_live_card(
             db,
@@ -102,7 +113,7 @@ async def upsert(
             plugin_id=payload.plugin_id,
             card_key=payload.card_key,
             encrypted_payload=decode_base64(payload.encrypted_payload, field_name="encrypted_payload", minimum=16),
-            nonce=decode_base64(payload.nonce, field_name="nonce", exact=12),
+            nonce=nonce_bytes,
             sequence_number=payload.sequence_number,
             expires_at=payload.expires_at,
         )
