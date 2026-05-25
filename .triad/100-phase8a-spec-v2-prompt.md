@@ -1,0 +1,513 @@
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+=================================================================
+
+# Consultation 100 — Phase 8a spec v2 (master-key rotation)
+
+Consultation 99 voted: **Codex RED, Gemini YELLOW** with a
+critical new AAD-prediction finding. This consultation reviews
+spec v2 which folds in every flagged contradiction + the
+state_version-prediction lockstep + the
+key_generation_observed-everywhere requirement.
+
+Treat the text below as a spec PR. If dual-GREEN, I commit it
+verbatim as Phase 8a.
+
+---
+
+```markdown
+## 10. Master-Key Rotation (V1.5)
+
+The user's 32-byte master key (`§2`) is the root secret for all
+per-user symmetric crypto: it AES-GCM-encrypts the synced user-
+state blob and every per-pairing opaque blob. Rotation replaces
+the master key while preserving access to all historical state.
+
+### 10.1 Rotation modes
+
+Every rotation request carries a `reason` field:
+
+| `reason` | Master key | Wrap key | Auth salt | Data re-encrypted | `key_generation` bump | Sessions revoked |
+|---|---|---|---|---|---|---|
+| `password_rewrap` | unchanged | NEW (from new password) | NEW (16 random bytes) | NO | NO | NO |
+| `root_hygiene_rotation` | NEW (32 random bytes) | unchanged | unchanged | YES | YES (+1) | NO |
+| `root_compromise_rotation` | NEW | NEW (from new password) | NEW | YES | YES (+1) | YES — all sessions including the initiating one |
+
+The matrix is the source of truth. The text below specifies each
+column.
+
+For `password_rewrap` the master key value stays byte-identical;
+only its wrapping changes. No dependent data needs re-encryption
+because the encryption key (the master key) is unchanged.
+
+For `root_compromise_rotation` the initiating session is revoked
+along with all others — the user must log in again from scratch
+on every device. A session-hijacker who issued the rotation
+loses access at the same moment a legitimate user does, and the
+legitimate user proves possession of the new credentials by
+logging back in.
+
+### 10.2 What rotation does NOT protect against
+
+Master-key rotation re-encrypts data stored under the old key. It does NOT revoke:
+
+- **Sender-held pairing keys.** Senders received stable pairing
+  keys at bootstrap and continue to encrypt messages with them.
+  A compromised pairing key needs a separate re-pair protocol
+  (V2 follow-up). The Android UX MUST distinguish "rotate
+  account encryption key" from "revoke / re-pair sender".
+- Messages already delivered to other devices.
+- Data exfiltrated from an unlocked device.
+- Sessions in modes that don't revoke (see table).
+- Cards encrypted under per-sender pairing keys (those keys are
+  unchanged; cards remain decryptable).
+
+The Android UX MUST display a "backup-or-lose-access" warning
+(spec MUST, not just product nicety) before submitting any
+rotation that changes the password — a forgotten new password
+makes encrypted account data unrecoverable.
+
+### 10.3 Schema
+
+```sql
+ALTER TABLE users
+    ADD COLUMN key_generation INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE encrypted_user_state
+    ADD COLUMN key_generation INTEGER NOT NULL DEFAULT 1;
+    -- state_version already exists from M7 CAS state.
+
+ALTER TABLE pairings
+    ADD COLUMN state_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE pairings
+    ADD COLUMN key_generation INTEGER NOT NULL DEFAULT 1;
+
+CREATE TABLE master_key_rotation_audit (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL CHECK (reason IN
+        ('password_rewrap','root_hygiene_rotation','root_compromise_rotation')),
+    old_generation INTEGER NOT NULL,
+    new_generation INTEGER NOT NULL,
+    initiating_session_id UUID,
+    initiating_device_id UUID,
+    ip TEXT,
+    user_agent TEXT,
+    paired_count INTEGER NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX ix_mkr_audit_user_time ON master_key_rotation_audit (user_id, occurred_at DESC);
+```
+
+The audit row is INSERTed inside the same transaction as the
+rotation (before COMMIT). If the rotation rolls back, the audit
+row rolls back with it. If the rotation commits, the audit row
+is durably stored. Audit fields exclude all secret material.
+
+### 10.4 CAS counter semantics (LOCKSTEP CONTRACT)
+
+This is the rule blobs depend on for AAD verification:
+
+1. The client encrypts a blob using
+   `state_version_observed + 1` (the version the row will have
+   *after* the server's write) in the AAD.
+2. The server, on a successful CAS write, increments the
+   row's `state_version` by EXACTLY ONE.
+3. Therefore on decrypt the AAD `state_version` and the row's
+   `state_version` match byte-for-byte.
+
+If a server impl uses any other increment policy (timestamp,
+opaque ID, "next available integer above N"), decryption will
+fail with an AEAD tag error and the blob is permanently
+unreadable. Implementations MUST integrity-test this lockstep
+with the test vectors in §10.10.
+
+The same rule applies to `key_generation`:
+
+1. For `root_*` rotations, the client encrypts every blob it
+   writes during rotation with `new_generation = old + 1` in
+   the AAD.
+2. The server sets `users.key_generation = new_generation` and
+   every blob row's `key_generation` to the same value.
+3. For `password_rewrap`, `key_generation` is unchanged and
+   appears identically in every AAD.
+
+### 10.5 `key_generation_observed` is required on EVERY state-mutating endpoint
+
+Every endpoint that writes a `key_generation`-tagged blob MUST
+require the client to pass `key_generation_observed` in the
+request, and MUST 409 (with `current_key_generation` in the
+response) if it doesn't match `users.key_generation`. This
+prevents the post-rotation race where a pre-rotation client
+still holds the old master key in memory and tries to push
+state encrypted under it after the rotation committed.
+
+Endpoints in scope:
+- `POST /v1/account/rotate-master-key`
+- `PUT /v1/state` (the encrypted_user_state CAS push)
+- `PUT /v1/pairings/{pairing_id}/state` (the per-pairing state CAS)
+- Any future endpoint writing a `key_generation`-tagged blob.
+
+The 409 response shape for ALL of these endpoints is:
+
+```json
+{
+  "error": "key_generation_mismatch",
+  "current_key_generation": <int>,
+  "client_action": "refetch_master_key_and_state"
+}
+```
+
+### 10.6 Wire format — rotation
+
+```http
+POST /v1/account/rotate-master-key
+Content-Type: application/json
+Authorization: Bearer <session_token>
+
+{
+  "reason": "root_hygiene_rotation" | "root_compromise_rotation" | "password_rewrap",
+  "key_generation_observed": <int>,
+  "rotation_challenge": "<base64 32 bytes — see §10.7>",
+  "current_password_proof": "<base64 32 bytes — see §10.7>",
+
+  // Required for `password_rewrap` and `root_compromise_rotation`,
+  // forbidden for `root_hygiene_rotation`:
+  "new_auth_salt": "<base64 16 bytes>",
+  "new_auth_key_hash": "<base64 32 bytes>",
+
+  // Always required:
+  "new_encrypted_master_key": "<base64 AES-GCM blob>",
+
+  // Forbidden for `password_rewrap`; required for `root_*`:
+  "new_encrypted_user_state": {
+    "encrypted_blob": "<base64>",
+    "state_version_observed": <int>
+  },
+  "pairings": [
+    {
+      "pairing_id": "<uuid>",
+      "state_version_observed": <int>,
+      "new_encrypted_state": "<base64>"
+    }
+  ]
+}
+```
+
+`pairings[]` MUST list EVERY pairing currently associated with
+the user (for `root_*`). A `password_rewrap` MUST omit
+`new_encrypted_user_state` and `pairings`.
+
+### 10.7 `rotation_challenge` + `current_password_proof`
+
+`current_password_proof` is the Argon2id-derived `auth_key`
+(first 32 bytes of the 64-byte derivation) for the user's
+CURRENT password. It MUST be:
+
+- Sent only over TLS.
+- Constant-time-compared against `users.auth_key_hash` at
+  verification.
+- Never logged anywhere — not in request logs, not in audit
+  rows, not in error responses.
+- Bound to a fresh, server-issued challenge nonce so a captured
+  proof can't be replayed as a future rotation.
+
+The nonce flow (closes Codex 99 replay concern):
+
+1. Client: `POST /v1/account/rotate-master-key/challenge` →
+   server returns `{rotation_challenge: <base64 32 bytes>, expires_at: <ISO>}`.
+   The challenge is stored server-side keyed on
+   `(user_id, session_id)` with a 5-minute TTL.
+2. Client includes the same `rotation_challenge` in the
+   subsequent POST to `/rotate-master-key`.
+3. Server consumes (deletes) the challenge during the rotation
+   transaction; second use fails with 401.
+
+The Argon2id derivation re-runs on the client at rotation time
+— there is NO recent-auth window or cached `wrap_key`. The
+user re-types the current password.
+
+### 10.8 Server-side processing
+
+Inside ONE Postgres transaction:
+
+1. Validate request shape (Pydantic — reject unknown fields,
+   required field combinations per reason).
+2. Look up + consume the `rotation_challenge` for
+   `(user_id, session_id)`. 401 if missing or expired.
+3. Verify `current_password_proof` against
+   `users.auth_key_hash` constant-time. 401 if mismatch.
+4. Rate-limit: at most **3 rotations per user per 24-hour
+   window**. The 4th is rejected 429 with
+   `Retry-After`.
+5. `SELECT users.* FROM users WHERE id = :user_id FOR UPDATE`.
+6. Verify `users.key_generation == key_generation_observed`.
+   409 if mismatch (return current).
+7. For `root_*`: count user's active pairings inside the lock.
+   Verify the request lists exactly that count of pairings
+   (no missing, no extra). If any concurrent pairing was
+   created or deleted since the client's fetch, the count
+   mismatches → 409 `pairing_set_changed` (NOT 400 — this is
+   a concurrency conflict, not malformed request).
+8. CAS each pairing: `pairings.state_version == state_version_observed`.
+   First mismatch → 409 `pairing_state_changed` with the list
+   of mismatched `pairing_id` + their current `state_version`.
+9. CAS `encrypted_user_state.state_version == state_version_observed`.
+   Same 409 shape with `current_state_version`.
+10. Apply writes:
+    - `users.encrypted_master_key = new_encrypted_master_key`.
+    - For `password_rewrap` and `root_compromise_rotation`:
+      `users.auth_key_hash = SHA-256(new_auth_key_hash)`,
+      `users.auth_salt = new_auth_salt`.
+    - For `root_*`: `users.key_generation = old + 1`.
+    - For `root_*`: rewrite `encrypted_user_state` (bump
+      `state_version` by EXACTLY 1, set `key_generation =
+      new_generation`).
+    - For `root_*`: rewrite EACH pairing's `encrypted_state`,
+      `state_version` (+1), `key_generation = new_generation`.
+11. INSERT one `master_key_rotation_audit` row capturing the
+    fields listed in §10.3.
+12. For `root_compromise_rotation`: DELETE FROM `device_sessions
+    WHERE user_id = :user_id` (ALL sessions including this one).
+13. COMMIT.
+
+Response (200):
+
+```json
+{
+  "key_generation": <new>,
+  "encrypted_user_state": {
+    "state_version": <new>,
+    "key_generation": <new>
+  },
+  "pairings": [
+    {"pairing_id": "<uuid>", "state_version": <new>, "key_generation": <new>}
+  ]
+}
+```
+
+For `root_compromise_rotation` the client must immediately
+log in again — the response is the last authenticated call
+this session will make.
+
+### 10.9 AAD shapes
+
+All AAD bytes use canonical JSON: `sort_keys=True`,
+`ensure_ascii=True`, `separators=(",", ":")`. Same encoder as §4.
+UUIDs use `str(uuid.UUID(v))` (lowercase no-brace).
+
+#### `encrypted_user_state.encrypted_blob` AAD:
+
+```json
+{"key_generation": <int>, "state_version": <int>, "user_id": "<uuid>"}
+```
+
+`state_version` is the POST-write value (see §10.4 lockstep).
+
+#### `pairings.encrypted_state` AAD:
+
+```json
+{"key_generation": <int>, "pairing_id": "<uuid>", "state_version": <int>, "user_id": "<uuid>"}
+```
+
+#### `users.encrypted_master_key` AAD:
+
+```json
+{"auth_salt_b64": "<base64 of current auth_salt>", "user_id": "<uuid>"}
+```
+
+NO `key_generation` in the master-key-wrap AAD: the wrapped
+blob is identified by the salt+user pair, not by the generation
+counter (otherwise rotation could brick the wrapped blob since
+the wrap-AAD would have to be predicted just like state_version,
+but the master-key-wrap is the chicken-and-egg root and can't
+participate in the per-blob lockstep).
+
+### 10.10 Downgrade defense
+
+Every device persists `highest_key_generation_seen` in local
+unencrypted storage. Every response carrying a
+`key_generation`-tagged value is checked:
+
+```text
+if response.key_generation < highest_key_generation_seen:
+    hard_fail("server returned downgraded key_generation; possible attack")
+```
+
+This catches a malicious/compromised server attempting to serve
+pre-rotation data to a rotated client.
+
+### 10.11 Mixed-client behavior
+
+The server detects client capability via the `X-Syncler-Client-Min-Phase`
+header set by all Phase-8-aware apps to the integer `8`.
+
+- Pre-Phase-8 client (header missing or < 8) hits a
+  `key_generation`-tagged endpoint while `users.key_generation > 1`:
+  server responds **426 Upgrade Required** with
+  `{error: "account_upgraded_requires_newer_client",
+    minimum_supported_phase: 8}`. The legacy app's response
+  parser logs the error and surfaces a "please upgrade the app"
+  banner.
+- Pre-Phase-8 client + `users.key_generation == 1`: server
+  serves normally. The user has not rotated yet so the legacy
+  app can still decrypt the existing blobs.
+
+### 10.12 Client-side flow
+
+(unchanged from spec v1 — the orchestration is the same;
+mechanics are now correctly specified by the table in §10.1 and
+the lockstep contract in §10.4.)
+
+### 10.13 Test vectors
+
+Phase 8a locks the following byte-equivalent fixtures. 8b's
+server, Android, and SDK tests all assert these.
+
+```text
+# Constants (locked from §1):
+argon2id: m_cost=19456 KiB, time_cost=2, parallelism=1, hash_len=64
+
+# Common fixtures:
+user_id_uuid:  "11111111-1111-1111-1111-111111111111"
+
+# === FIXTURE A: password_rewrap (no MK change) ===
+old_password_utf8: "correct horse battery staple"
+old_auth_salt:     0x0102030405060708090a0b0c0d0e0f10
+old_argon2id_out:  <64 bytes — locked at impl from test_crypto.py>
+old_auth_key:      first 32 bytes of old_argon2id_out
+old_wrap_key:      bytes 32..64 of old_argon2id_out
+old_wrap_nonce:    0x000000000000000000000001
+old_wrap_aad_json: {"auth_salt_b64":"AQIDBAUGBwgJCgsMDQ4PEA==","user_id":"11111111-1111-1111-1111-111111111111"}
+old_master_key:    0x1111...11  (32 bytes of 0x11)
+old_wrapped_blob:  AES-256-GCM(old_wrap_key, old_wrap_nonce, old_master_key, old_wrap_aad_json)
+
+new_password_utf8: "Tr0ub4dor & 3"
+new_auth_salt:     0x202122232425262728292a2b2c2d2e2f
+new_argon2id_out:  <64 bytes>
+new_auth_key:      first 32 bytes
+new_wrap_key:      bytes 32..64
+new_wrap_nonce:    0x000000000000000000000002
+new_wrap_aad_json: {"auth_salt_b64":"ICEiIyQlJicoKSorLC0uLw==","user_id":"11111111-1111-1111-1111-111111111111"}
+new_wrapped_blob:  AES-256-GCM(new_wrap_key, new_wrap_nonce, old_master_key, new_wrap_aad_json)
+                   # NB: same master key bytes wrapped under new key + new AAD
+
+# === FIXTURE B: root_hygiene_rotation (new MK, same password) ===
+new_master_key:    0x2222...22  (32 bytes of 0x22)
+# Wrap reuses old_wrap_key (password unchanged).
+hygiene_wrap_nonce: 0x000000000000000000000003
+hygiene_wrap_aad_json: same as old_wrap_aad_json (same salt)
+hygiene_wrapped_blob: AES-256-GCM(old_wrap_key, hygiene_wrap_nonce, new_master_key, hygiene_wrap_aad_json)
+
+# Old user_state and new user_state under key_generation lockstep:
+state_json:        {"installed_plugins":[],"muted_senders":[]}
+old_us_aad_json:   {"key_generation":1,"state_version":5,"user_id":"11111111-1111-1111-1111-111111111111"}
+old_us_nonce:      0x000000000000000000000010
+old_encrypted_us:  AES-256-GCM(old_master_key, old_us_nonce, state_json, old_us_aad_json)
+
+new_us_aad_json:   {"key_generation":2,"state_version":6,"user_id":"11111111-1111-1111-1111-111111111111"}
+new_us_nonce:      0x000000000000000000000011
+new_encrypted_us:  AES-256-GCM(new_master_key, new_us_nonce, state_json, new_us_aad_json)
+```
+
+8b implementations MUST produce byte-identical
+`old_encrypted_us` and `new_encrypted_us` given the fixture
+inputs. Argon2id derivations are tested separately (and reused
+from existing §6 vectors where applicable).
+
+The 64-byte Argon2id outputs in the fixtures will be computed
+and locked in spec v3 once the implementation has run against a
+reference Argon2id library; for v2 review treat them as
+"locked at first impl, deviation MUST require a spec
+update".
+```
+
+---
+
+## Changes from v1 (with consult-99 source labels)
+
+1. (Codex 99 RED #1) `password_rewrap` no longer
+   sends/rewrites user-state or pairings. Table in §10.1 +
+   wire-format §10.6 + processing §10.8 all consistent.
+2. (Codex 99 RED #2) Salt rotation behavior locked: rotated
+   on `password_rewrap` and `root_compromise_rotation`,
+   unchanged on `root_hygiene_rotation`. §10.1 table is
+   canonical.
+3. (Codex 99 RED #3) `root_compromise_rotation` session
+   semantics concrete: deletes ALL device_sessions including
+   initiating session; user must re-login.
+4. (Codex 99 RED #4) `root_compromise_rotation` requires
+   `new_auth_salt + new_auth_key_hash` (password reset). Made
+   explicit in the table.
+5. (Codex 99 RED #5) `current_password_proof` specified
+   with server-issued challenge nonce flow (§10.7) — TLS-only,
+   never logged, consumed once.
+6. (Codex 99 RED #6) Response shape now includes all per-row
+   versions, not just user-state (§10.8 response block).
+7. (Codex 99 #7) `encrypted_user_state.state_version` is
+   pre-existing (M7 CAS) — schema diff doesn't add it.
+   Clarified.
+8. (Codex 99 #8) 409 payload shapes locked (§10.5 + §10.8).
+9. (Codex 99 #9) Missing/extra pairings = 409
+   `pairing_set_changed`, not 400.
+10. (Codex 99 #10) Audit log INSERTed inside the rotation
+    transaction.
+11. (Codex 99 #11) Rate limit concrete: 3 per user per 24h.
+12. (Gemini 99 RED — CRITICAL) AAD `state_version` and
+    `key_generation` lockstep contract spelled out as §10.4.
+    Client uses `state_version_observed + 1`; server
+    increments by EXACTLY 1.
+13. (Gemini 99) `key_generation_observed` is required on
+    EVERY state-mutating endpoint, not just rotation (§10.5).
+14. (Gemini 99) Pairings-count check inside `FOR UPDATE`
+    user-row lock (§10.8 step 7).
+15. (Gemini 99) 426 Upgrade Required for mixed clients
+    (§10.11).
+16. Cards explicitly excluded from rotation (§10.2 last
+    bullet) — they encrypt under per-sender pairing keys, not
+    the master key.
+
+## Open questions for v2
+
+1. **AAD for `users.encrypted_master_key`.** §10.9 binds
+   `auth_salt_b64 + user_id`, NOT `key_generation`. Rationale:
+   the wrapped blob has to be decryptable BEFORE the client
+   knows the current generation (chicken-and-egg). Confirm
+   this is safe — any attacker model where `auth_salt` and
+   `user_id` aren't tight enough?
+
+2. **Phase-detection header.** `X-Syncler-Client-Min-Phase: 8`
+   is the proposed gate. Alternative: derive from the
+   client's User-Agent. I lean header (explicit, testable).
+   Concerns?
+
+3. **5-minute challenge TTL.** Long enough for the user to
+   re-type the password without spawning a UI race; short
+   enough that a hijacker can't sit on a stolen challenge.
+   Any tighter or looser preferred?
+
+4. **`3 rotations per user per 24h`.** Forces a hijacker who
+   rotated once to wait, but lets a legitimate user recover
+   from mistakes (e.g. typed new password wrong). Concerns?
+
+5. **Argon2id output fixtures in §10.13.** I deferred computing
+   these to the implementer rather than running Argon2 in my
+   head. The spec calls out "locked at first impl, deviation
+   MUST require a spec update" — is that an acceptable
+   commitment level for the spec PR, or do you want the bytes
+   in the spec text now?
+
+## Output
+
+Per reviewer:
+1. Per-section: GREEN / YELLOW / RED.
+2. Answers to the five open questions.
+3. Anything STILL missing or wrong after the v2 revision.
+4. Anything new.
+
+If dual-GREEN, this becomes `docs/crypto-spec.md §10` exactly
+as written above (modulo the Argon2id fixture bytes which I'll
+fill in at 8b first commit).
+
+Reply text only. Do NOT call any write/mutation tool.

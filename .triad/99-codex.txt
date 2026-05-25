@@ -1,0 +1,47 @@
+**Verdict: RED**
+
+Do not commit verbatim. The shape is good, but there are several spec-level contradictions that will produce incompatible implementations.
+
+**Open Questions**
+
+1. **AAD fields:** Mostly right. Include `user_id`, `key_generation`, `state_version`, and `pairing_id` for pairing state. Also specify exact UUID string format and whether AAD uses pre-update or post-update `state_version` / `key_generation`. It should bind to the row values stored with that ciphertext, meaning the new post-rotation values.
+
+2. **`key_generation_observed`:** Yes, explicit field required. Do not rely on blob CAS values to imply user-level generation. Add it to the wire format and make the server compare it under the user row lock.
+
+3. **Recent-auth window:** Force re-type at rotation time. A cached recent-auth bit weakens the core protection against session hijack. If you later want a UX shortcut, make it a separate explicit threat-model decision.
+
+4. **Cards’ `encrypted_payload`:** Confirmed, assuming cards are encrypted only under sender/pairing keys and not transitively under the master key. They should survive unchanged. The spec should state cards are excluded from the rotation transaction.
+
+5. **Backup/recovery banner:** Yes. Add a client UX MUST before password change or root rotation: warn that losing the password/master unwrap path makes encrypted account data unrecoverable.
+
+6. **Mixed clients:** I would require server-side refusal for pre-Phase-8 clients once `users.key_generation > 1`, if the server can identify client capability. Silent AEAD failure is technically safe but poor and may cause confusing destructive recovery flows. Minimum: endpoints returning generation-tagged blobs should include a clear “client upgrade required” error for clients lacking key-generation support.
+
+**Blocking Issues**
+
+`password_rewrap` is internally inconsistent. §10.1 says unchanged master key, no data re-encryption, no generation bump. But the wire format requires `new_encrypted_user_state` and `pairings`, and server steps 9-10 rewrite blobs and bump `state_version`. Pick one. I recommend: `password_rewrap` only updates `encrypted_master_key` and auth credentials, does not send/rewrite user-state or pairing-state, and does not bump blob `state_version`.
+
+Salt handling contradicts itself. §10.1 says password rewrap uses the existing `auth_salt`; the wire format says `new_auth_salt` is required for `password_rewrap`; §10.6.2 says `auth_salt` may change after `password_rewrap`. Decide whether password change rotates salt. I recommend rotating salt on password change, but then fix §10.1.
+
+`root_compromise_rotation` says the initiating session is forced to re-derive credentials on next authenticated request, but server processing only deletes other sessions. You need a concrete mechanism: session credential epoch, `requires_reauth` flag, session version mismatch, or revoke the initiating session after response.
+
+`root_compromise_rotation` requiring `new_auth_key_hash` / `new_auth_salt` is ambiguous. Is root compromise also a password change? If yes, say it forces password reset and new password derivation. If no, those fields should not be required.
+
+`current_password_proof` is dangerously underspecified. Sending the raw `auth_key` makes it a password-equivalent credential. Specify TLS-only, never logged, constant-time hash verification, and preferably use a server nonce/challenge bound to session/user/reason so a captured proof cannot be replayed as a future rotation proof.
+
+The response shape is too small. `{key_generation, state_version}` only covers user-state, not per-pairing versions. Either return all updated pairing versions or require clients to refetch after success.
+
+**Other Spec Fixes Needed**
+
+Define whether `state_version_observed` for `encrypted_user_state` exists in schema already; §10.3 only adds `key_generation`, but later relies on `encrypted_user_state.state_version`.
+
+Define the exact 409 payloads. “Return current state” could leak encrypted blobs, versions, pairing IDs, or all of the above. Implementers need exact fields.
+
+Define missing-pairing behavior under concurrent pairing creation/deletion. If a pairing is added after client fetch but before rotation, missing pairings → 400 or 409? This should be 409 conflict, not malformed request.
+
+Move audit logging semantics either inside the transaction with durable insert before commit, or explicitly after commit with failure handling. Current “Commit. Emit” means rotation can succeed with no audit log.
+
+Replace “at most N” with a real configurable policy name/default. Specs should not contain unresolved placeholders.
+
+Test vectors are not yet actionable because Argon2id parameters, AES-GCM blob encoding format, UUID fixture values, AAD versions, and tag/ciphertext concatenation order are not locked.
+
+Overall: the design is close, but this is not ready for verbatim commit. Fix the contradictions around `password_rewrap`, salt rotation, root-compromise session handling, and explicit generation CAS first.

@@ -1,0 +1,54 @@
+Reviewer: **Codex**
+
+§10.5 update: **GREEN**
+
+The expanded lock rule fixes the Consultation 101 issue. The scoped list is complete for `key_generation`-tagged state mutation:
+
+- `POST /v1/account/rotate-master-key`
+- `PUT /v1/state`
+- `PUT /v1/pairings/{pairing_id}/state`
+- `POST /v1/pairing/complete`
+- pairing revoke/delete
+- future writers/removers of generation-tagged rows
+
+Minor naming note only: the current codebase route is `POST /v1/pairing/{pairing_id}/revoke`, while the spec text says `DELETE /v1/pairings/{pairing_id}`. That is not a protocol race issue, but if §10 is going in verbatim, align route names or explicitly say “or its revoke equivalent.”
+
+§10.8 update: **YELLOW**
+
+The ordering is now race-sound: user-row lock → challenge lock → proof → successful-rotation rate check → key-generation check → pairing set → CAS. I do not see a remaining generation-mixing window, assuming every listed endpoint actually takes the user lock as its first DB operation.
+
+Step 8/9 atomic forms are acceptable. `UPDATE ... WHERE state_version = :observed RETURNING ...` and `SELECT ... FOR UPDATE` then compare/update are both valid. The important part is no check-then-update gap; v4 now says that clearly.
+
+Still missing before verbatim inclusion:
+
+1. Step 8 should scope pairing CAS by ownership and active status:
+
+```sql
+WHERE pairing_id = :pid
+  AND user_id = :u
+  AND revoked_at IS NULL
+  AND state_version = :observed
+```
+
+The current text only uses `pairing_id` and `state_version`. UUID secrecy should not be the authorization boundary, and a stale/revoked pairing should not be rotated.
+
+2. Step 7 should verify the exact active pairing ID set, not just count.
+
+“Request lists exactly that count” is weaker than “request lists exactly the active pairing IDs.” The spec should require deduping request IDs and comparing against:
+
+```sql
+SELECT pairing_id FROM pairings
+WHERE user_id = :u AND revoked_at IS NULL
+```
+
+Otherwise the invariant depends on later CAS failures rather than being explicitly specified.
+
+3. Step 9 should explicitly say affected rows = 0 is a 409 for `encrypted_user_state`, same as step 8. The phrase “same pattern” implies it, but this is a good place to be mechanical.
+
+Failed-proof counter: **GREEN with implementation caveat**
+
+This matches the existing `rate_limit_events` model: `(actor_type, actor_id, route, window_start)` with count increment/upsert. The existing middleware commits rate-limit increments immediately on the session it is given, so for failed proof inside a rollbacking rotation transaction, the separate `session_factory()` transaction is the right requirement.
+
+Implementation caveat: do not call the normal request-scoped `check_rate_limit(db, ...)` inside the rotation transaction for this counter. Use a separate session and either add a dedicated `RATE_LIMITS["rotate_proof_fail"]` path or call the lower-level increment helper equivalent with `actor_type='user'`, `actor_id=user_id`, `route='rotate_proof_fail'`, then commit.
+
+Anything new: no new race window found in the ordering. The only blockers are the pairing ownership/exact-set precision issues above, so this is not dual-GREEN yet.

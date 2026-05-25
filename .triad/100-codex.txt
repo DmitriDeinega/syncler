@@ -1,0 +1,97 @@
+Reviewer result: **Codex RED**.
+
+The v2 revision fixes many v1 contradictions, but I would not commit verbatim yet. There is one critical auth-proof flaw and a few spec-level consistency gaps.
+
+**Per-Section**
+- §10.1 Rotation modes: **GREEN**
+- §10.2 Non-goals / UX warning: **GREEN**
+- §10.3 Schema: **YELLOW**
+- §10.4 CAS lockstep: **GREEN**
+- §10.5 `key_generation_observed`: **GREEN**
+- §10.6 Wire format: **YELLOW**
+- §10.7 Challenge + current password proof: **RED**
+- §10.8 Server processing: **YELLOW**
+- §10.9 AAD shapes: **GREEN**
+- §10.10 Downgrade defense: **GREEN**
+- §10.11 Mixed-client behavior: **GREEN**
+- §10.12 Client flow: **GREEN**
+- §10.13 Test vectors: **YELLOW**
+
+**Critical RED**
+§10.7 says `current_password_proof` is the Argon2id-derived `auth_key`, and that it is “bound to a fresh, server-issued challenge nonce.” It is not actually bound.
+
+As written, the client sends:
+
+```text
+rotation_challenge = fresh nonce
+current_password_proof = stable auth_key
+```
+
+A captured `current_password_proof` can be replayed with a future fresh challenge, because the proof bytes do not depend on the challenge. Consuming the challenge prevents replay of the exact same request, but not replay of the same stable password proof.
+
+Fix should be something like:
+
+```text
+current_password_proof = HMAC-SHA256(
+  key = auth_key,
+  msg = "syncler.rotate-master-key.v1" || user_id || session_id || rotation_challenge
+)
+```
+
+But that introduces another requirement: the server must be able to verify the HMAC. If the server stores only `SHA-256(auth_key)`, it cannot compute the expected HMAC. Options:
+
+1. Store a verifier suitable for challenge proof verification.
+2. Send `auth_key` and accept that it is a password-equivalent bearer secret, but remove the “captured proof can’t be replayed” claim.
+3. Use a PAKE / proper password-auth proof protocol later.
+
+For this spec, I would not claim replay resistance unless the proof is cryptographically challenge-bound.
+
+**Other Issues**
+There is a naming/hash inconsistency around `users.auth_key_hash`.
+
+§10.7 says compare `current_password_proof` against `users.auth_key_hash`.
+
+§10.8 says:
+
+```text
+users.auth_key_hash = SHA-256(new_auth_key_hash)
+```
+
+But the request field is named `new_auth_key_hash`, and the table says “Auth salt” changes. This leaves unclear whether the DB stores:
+
+```text
+auth_key
+SHA-256(auth_key)
+client-supplied auth_key_hash
+SHA-256(client-supplied auth_key_hash)
+```
+
+This needs exact byte semantics. Suggested cleanup:
+
+```text
+new_auth_key_proof_material: base64 32 bytes auth_key
+users.auth_key_hash = SHA-256(auth_key)
+current_password_proof verification hashes the supplied current auth_key before constant-time compare
+```
+
+Or rename the wire field if the client really sends a hash.
+
+§10.8 pairing-set concurrency is still underspecified. “Count user's active pairings inside the lock” only works if all pairing create/delete operations also serialize on the same `users FOR UPDATE` row lock. Otherwise a pairing can be created/deleted concurrently after the count. Add a MUST: every endpoint that creates/deletes pairings for a user must first lock that user row, or rotation must lock the relevant pairing set with a stronger strategy.
+
+§10.3 schema lacks fields for the rotation challenge storage. That is fine if intentionally elsewhere, but §10.7 makes it part of this feature. I’d add either a small table schema or explicitly say it may be Redis/ephemeral storage with atomic consume semantics.
+
+§10.13 should not leave Argon2id bytes “locked at first impl” if this is meant to be committed verbatim as a spec. That is acceptable for a draft, but weak for a normative crypto spec. I’d make this v2 YELLOW until the actual bytes are present.
+
+**Open Questions**
+1. Master-key-wrap AAD without `key_generation`: **acceptable**. `auth_salt_b64 + user_id` is enough for context binding. The bigger risk is not AAD; it is rollback/downgrade, which §10.10 handles at the generation layer.
+
+2. Phase header: **header is better than User-Agent**. Explicit, testable, and less brittle. Keep it.
+
+3. 5-minute challenge TTL: **reasonable**, but only after fixing the proof binding. With the current stable-proof design, TTL does not solve replay of captured proof material.
+
+4. 3 rotations per 24h: **reasonable**, but ensure emergency recovery/admin flows are considered. Also clarify whether rejected attempts count; I’d rate-limit successful rotations separately from failed proof attempts.
+
+5. Argon2id fixtures: **bytes should be in the spec before final commit**. “Locked at first impl” is okay for implementation planning, not ideal for a normative PR that downstream tests must trust.
+
+**Verdict**
+Not dual-GREEN. The main blocker is §10.7: the challenge flow currently does not bind the password proof to the challenge, despite claiming it does. Fix that and clarify the auth-key hash semantics; then this is likely close to GREEN.

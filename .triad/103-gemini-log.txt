@@ -1,0 +1,27 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+# Review: Consultation 103 — Phase 8a spec v5 (master-key rotation)
+
+The refinements in v5 successfully address the edge cases identified in v102, moving the spec from speculative to implementation-ready.
+
+## 1. §10.5 and §10.8 changes: GREEN
+
+*   **§10.5 (Route correction): GREEN.** Aligning the spec with the existing `POST /v1/pairing/{pairing_id}/revoke` implementation prevents "ghost implementation" bugs where the spec and code diverge on fundamental REST semantics.
+*   **§10.8 Step 7 (Set Equality): GREEN.** Upgrading from "count" to "exact active set" equality is a critical security fix. It prevents a subtle race condition where a client might unknowingly rotate keys for a pairing set that has changed membership (e.g., one revoked, one added) but maintained the same count.
+*   **§10.8 Step 8 (Predicate Hardening): GREEN.** Adding `user_id` and `revoked_at IS NULL` to the `UPDATE` clause provides essential defense-in-depth. It ensures that the database remains the final arbiter of authorization and state validity, even if application-level set validation fails.
+*   **§10.8 Step 9 (Explicit 409): GREEN.** Standardizing the `state_version_mismatch` response for the `encrypted_user_state` CAS ensures the client has a deterministic path for recovery (fetching the new version and re-trying the rotation).
+
+## 2. Anything still missing
+
+None. The spec now covers:
+*   The exact SQL predicates required for atomic rotation.
+*   The specific 409 error codes for different failure modes (pairing set change vs. state version mismatch).
+*   Correct route names for the CAS-lockstep contract.
+
+## 3. Anything new
+
+The transition to **exact set validation** in §10.8 Step 7 introduces a requirement for the client to be aware of the "canonical active set" during the rotation flow. While this adds minor complexity to the client logic, it is the only way to guarantee a consistent security boundary across all devices.
+
+**Verdict: Dual-GREEN.** This spec is now ready for verbatim inclusion in `docs/crypto-spec.md §10` and subsequent implementation.
