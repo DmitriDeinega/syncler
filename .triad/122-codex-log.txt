@@ -1,0 +1,2804 @@
+Reading prompt from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler\android
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e60e7-12d2-7931-a0b4-81ac3948a36a
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 122 — Phase 10b step 6 fixups (post-121)
+
+Triad 121: Gemini GREEN. Codex RED with blocker + secondary +
+nit. All addressed at `4624533`.
+
+## v2 deltas
+
+1. **Generation fence on registry eviction** (Codex 121 RED blocker).
+   On reload, the old instance's destroy() fires
+   handle.unload() async; later onPluginUnloaded for the old
+   token reached `RegistryUnloadListener` whose previous impl
+   called `PluginRegistry.unload(pluginId)` — evicting the
+   NEW instance. Fix:
+
+   - `PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)`:
+     guards removal on
+     `instances[pluginId].sandboxHandle?.sandboxToken == sandboxToken`.
+     Late callbacks for stale tokens skip.
+   - `RegistryUnloadListener` takes sandboxToken in its ctor;
+     `onPluginCrashed` + `onPluginUnloaded` both call
+     `handleSandboxTerminated` keyed by that token.
+   - `handleSandboxTerminated` nulls the matched instance's
+     `sandboxHandle` so any subsequent `destroy()` (e.g.
+     `PluginRegistry.clear()` at app shutdown) is a no-op on
+     the AIDL leg — sandbox is already torn down. Closes
+     Codex's secondary "re-acquire to issue redundant unload"
+     concern.
+
+2. **Thread real manifest JSON** (Codex 121 nit).
+   `PluginInstanceFactory.create(…)` gains a `manifestJson:
+   String` parameter. `SandboxedPluginInstanceFactory` passes
+   it through to `PluginLoadParcel.diagnosticManifestJson`
+   (truncated to `DIAGNOSTIC_MANIFEST_BYTES_CAP = 64 KB`).
+   The wire layer also truncates — belt-and-suspenders so a
+   buggy upstream can't blow the Binder transaction.
+   `PluginLoaderTest` updated to match the new signature.
+
+## Deferred (non-blocking — acknowledged in Codex 121)
+
+- `PluginLoader.android()` minting a fresh
+  connection/router/dispatcher per call. No production callers
+  yet — this factory is wiring scaffolding. Hilt module will
+  enforce singleton when that lands.
+- `auditLogger.denied(pluginId, "webview_error_$code", message)`
+  shape — fine for the current `AuditLogger` API (reason +
+  detail text only). A structured field would be cleaner; not
+  blocking.
+
+## Files
+
+- `android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt`
+- `android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt`
+- `android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt`
+
+## Test status
+
+- `:feature:plugin-host:testDebugUnitTest` passes (`PluginLoaderTest`
+  updated for the new signature).
+- `:feature:plugin-sandbox:testDebugUnitTest` passes.
+- `:app:assembleDebug` succeeds.
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on the fixups: GREEN / YELLOW / RED + items.
+2. Anything still missing before Phase 10b closes.
+3. Anything new.
+
+If dual-GREEN, Phase 10 (multi-process plugin host) is done.
+Next track is Phase 11 (native Kotlin runtime) or Phase 9
+(per-device envelope encryption).
+
+**Reply text only. Do NOT call any write/mutation tool. Do not commit, edit, or stage anything.**
+
+codex
+I’ll review this read-only against the three named files and the commit state, focusing on whether the stale-token eviction and manifest threading really close the prior issues.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline --decorate --name-only 4624533' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --find-renames --find-copies --unified=80 --no-ext-diff 4624533 -- android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt' in D:\Projects\syncler\android
+ succeeded in 314ms:
+?? ../.triad/122-codex-log.txt
+?? ../.triad/122-gemini-log.txt
+?? ../.triad/122-phase10b-step6-fixups-prompt.md
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 328ms:
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 335ms:
+4624533 (HEAD -> master) phase 10b step 6 fixups: triad 121 generation fence + diagnostic JSON
+.triad/121-codex-log.txt
+.triad/121-gemini-log.txt
+.triad/121-phase10b-step6-review-prompt.md
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt
+android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The first pass confirms `4624533` is HEAD and I’m ignoring the untracked `.triad` logs/prompts. The diff command came back empty for the scoped paths, so I’m re-reading the files directly and checking the commit parent diff with repo-relative paths.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt' in D:\Projects\syncler\android\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff --unified=80 4624533''^ 4624533 -- feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt' in D:\Projects\syncler\android\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt' in D:\Projects\syncler\android\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt' in D:\Projects\syncler\android\android
+2026-05-25T20:50:33.535531Z ERROR codex_core::exec: exec error: windows sandbox: CreateProcessAsUserW failed: 267
+2026-05-25T20:50:33.538630Z ERROR codex_core::exec: exec error: windows sandbox: CreateProcessAsUserW failed: 267
+ exited -1 in 0ms:
+execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+ exited -1 in 0ms:
+execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+2026-05-25T20:50:33.539965Z ERROR codex_core::exec: exec error: windows sandbox: CreateProcessAsUserW failed: 267
+2026-05-25T20:50:33.540115Z ERROR codex_core::tools::router: error=execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+2026-05-25T20:50:33.542097Z ERROR codex_core::exec: exec error: windows sandbox: CreateProcessAsUserW failed: 267
+ exited -1 in 0ms:
+execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+ exited -1 in 0ms:
+execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+2026-05-25T20:50:33.635558Z ERROR codex_core::tools::router: error=execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+2026-05-25T20:50:33.635572Z ERROR codex_core::tools::router: error=execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+2026-05-25T20:50:33.635634Z ERROR codex_core::tools::router: error=execution error: Io(Custom { kind: Other, error: "windows sandbox: CreateProcessAsUserW failed: 267" })
+codex
+The workspace root is the outer `android` directory from the environment, not a nested `android/android`; I hit an invalid working directory on that read. I’m correcting the path assumption and continuing read-only.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Name' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git rev-parse --show-toplevel' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff --unified=80 4624533''^ 4624533 -- android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt' in D:\Projects\syncler\android
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git rev-parse --show-toplevel'` rejected: blocked by policy
+2026-05-25T20:50:42.908486Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git rev-parse --show-toplevel'` rejected: blocked by policy
+ succeeded in 306ms:
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 332ms:
+.gradle
+.gradle-user-home
+.kotlin
+app
+build
+core
+feature
+gradle
+.gitignore
+build.gradle.kts
+gradle.properties
+gradlew
+gradlew.bat
+local.properties
+settings.gradle.kts
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff --unified=80 4624533''^ 4624533 -- feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt' in D:\Projects\syncler\android
+ succeeded in 375ms:
+diff --git a/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt b/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt
+index 1dbae10..b848e01 100644
+--- a/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt
++++ b/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt
+@@ -1,317 +1,336 @@
+ package app.syncler.android.pluginhost
+ 
+ import android.content.Context
+ import androidx.security.crypto.EncryptedFile
+ import androidx.security.crypto.MasterKey
+ import app.syncler.android.pluginhost.capabilities.CameraBridge
+ import app.syncler.android.pluginhost.capabilities.FileBridge
+ import app.syncler.android.pluginhost.capabilities.GalleryBridge
+ import app.syncler.android.pluginhost.capabilities.LocationBridge
+ import app.syncler.android.pluginhost.capabilities.MessageBridge
+ import app.syncler.android.pluginhost.capabilities.NetworkBridge
+ import app.syncler.android.pluginhost.capabilities.NotificationBridge
+ import app.syncler.android.pluginhost.capabilities.StorageBridge
+ import app.syncler.android.pluginhost.sandbox.PluginSandboxConnection
+ import app.syncler.android.pluginhost.sandbox.SandboxBridgeDelivery
+ import app.syncler.android.pluginhost.sandbox.SandboxBridgeDispatcher
+ import app.syncler.android.pluginhost.sandbox.SandboxRouter
+ import app.syncler.core.crypto.toHex
+ import app.syncler.core.pluginaidl.PluginLoadParcel
+ import com.squareup.moshi.JsonAdapter
+ import com.squareup.moshi.Moshi
+ import com.squareup.moshi.Types
+ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+ import java.io.File
+ import java.security.MessageDigest
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ import okhttp3.CacheControl
+ import okhttp3.ConnectionSpec
+ import okhttp3.CookieJar
+ import okhttp3.OkHttpClient
+ import okhttp3.Request
+ import okhttp3.HttpUrl.Companion.toHttpUrl
+ 
+ class PluginLoader(
+     private val httpClient: OkHttpClient,
+     private val manifestAdapter: JsonAdapter<PluginManifest> = defaultMoshi.adapter(PluginManifest::class.java),
+     private val rawManifestAdapter: JsonAdapter<Map<String, Any?>> = defaultMoshi.adapter<Map<String, Any?>>(
+         Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java),
+     ),
+     private val verifier: PluginSignatureVerifier,
+     private val permissionReader: (String) -> Set<String>,
+     private val bundleStore: PluginBundleStore,
+     private val instanceFactory: PluginInstanceFactory,
+     private val auditLogger: AuditLogger = AuditLogger(),
+ ) {
+     suspend fun load(manifestUrl: String, expectedSenderPublicKey: ByteArray): Result<PluginInstance> =
+         withContext(Dispatchers.IO) {
+             runCatching {
+                 requireHttps(manifestUrl)
+                 val manifestJson = fetchNoCache(manifestUrl)
+                 val rawManifest = rawManifestAdapter.fromJson(manifestJson)
+                     ?: throw IllegalArgumentException("manifest JSON is empty")
+                 verifier.verify(rawManifest, expectedSenderPublicKey).getOrThrow()
+ 
+                 val manifest = manifestAdapter.fromJson(manifestJson)
+                     ?: throw IllegalArgumentException("manifest JSON is empty")
+                 val bundleUrl = manifest.bundleUrlOrNull(rawManifest)
+                     ?: throw IllegalArgumentException("manifest signed_bundle_url is missing")
+                 if (bundleUrl.startsWith("http://") || bundleUrl.startsWith("https://")) {
+                     requireHttps(bundleUrl)
+                 }
+                 val resolvedBundleUrl = manifestUrl.toHttpUrl().resolve(bundleUrl)?.toString()
+                     ?: throw IllegalArgumentException("signed_bundle_url is invalid")
+                 val bundleBytes = fetchBytesNoCache(resolvedBundleUrl)
+                 val actualHash = MessageDigest.getInstance("SHA-256").digest(bundleBytes).toHex()
+                 if (!actualHash.equals(manifest.bundleHash, ignoreCase = true)) {
+                     auditLogger.denied(manifest.id, "bundle_hash_mismatch", actualHash)
+                     throw SecurityException("plugin bundle hash mismatch")
+                 }
+ 
+                 val stored = bundleStore.write(manifest.id, bundleBytes)
+                 val grantedCapabilities = permissionReader(manifest.id).intersect(manifest.declaredCapabilities.toSet())
+-                instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes)
++                instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes, manifestJson)
+                     .also(PluginRegistry::put)
+             }.onFailure {
+                 auditLogger.denied(null, "plugin_load_failed", it.message)
+             }
+         }
+ 
+     private fun fetchNoCache(url: String): String = fetchBytesNoCache(url).toString(Charsets.UTF_8)
+ 
+     private fun fetchBytesNoCache(url: String): ByteArray {
+         requireHttps(url)
+         val request = Request.Builder()
+             .url(url)
+             .cacheControl(CacheControl.Builder().noCache().noStore().build())
+             .build()
+         httpClient.newCall(request).execute().use { response ->
+             if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code} fetching $url")
+             return response.body?.bytes() ?: ByteArray(0)
+         }
+     }
+ 
+     private fun requireHttps(url: String) {
+         // Debug builds accept any HTTP origin so devs can host bundles on their
+         // LAN/dev box without TLS. Release builds require HTTPS unconditionally.
+         require(url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))) {
+             "plugin URLs must use HTTPS (got $url)"
+         }
+     }
+ 
+     companion object {
+         private val defaultMoshi: Moshi = Moshi.Builder()
+             .add(KotlinJsonAdapterFactory())
+             .build()
+ 
+         private fun buildPluginHttpClient(): OkHttpClient = OkHttpClient.Builder()
+             .cookieJar(CookieJar.NO_COOKIES)
+             .connectionSpecs(
+                 if (BuildConfig.DEBUG) {
+                     listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+                 } else {
+                     listOf(ConnectionSpec.MODERN_TLS)
+                 },
+             )
+             .build()
+ 
+         fun android(context: Context, scope: CoroutineScope): PluginLoader {
+             val appContext = context.applicationContext
+             val auditLogger = AuditLogger(appContext)
+             // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
+             // — neither permits cleartext, so http:// URLs fail at the
+             // connection layer even when requireHttps() lets them through
+             // for debug builds. Mirror NetworkBridge / InboxRepository:
+             // release stays HTTPS-only; debug allows LAN HTTP for dev boxes.
+             val networkBridge = NetworkBridge(buildPluginHttpClient(), auditLogger)
+             val sandboxConnection = PluginSandboxConnection(appContext)
+             val bridgeDispatcher = SandboxBridgeDispatcher()
+             val sandboxRouter = SandboxRouter(sandboxConnection, bridgeDispatcher)
+             return PluginLoader(
+                 httpClient = buildPluginHttpClient(),
+                 verifier = PluginSignatureVerifier(auditLogger),
+                 permissionReader = PluginPermissionStore(appContext)::grantedCapabilities,
+                 bundleStore = AndroidEncryptedBundleStore(appContext),
+                 instanceFactory = SandboxedPluginInstanceFactory(
+                     scope = scope,
+                     auditLogger = auditLogger,
+                     sandboxRouter = sandboxRouter,
+                     bridgeDispatcher = bridgeDispatcher,
+                     networkBridge = networkBridge,
+                     storageBridge = StorageBridge(appContext, auditLogger),
+                     notificationBridge = NotificationBridge(appContext),
+                     cameraBridge = CameraBridge(),
+                     galleryBridge = GalleryBridge(),
+                     fileBridge = FileBridge(),
+                     locationBridge = LocationBridge(appContext),
+                     messageBridge = MessageBridge(auditLogger),
+                 ),
+                 auditLogger = auditLogger,
+             )
+         }
+     }
+ }
+ 
+ interface PluginBundleStore {
+     fun write(pluginId: String, bundleBytes: ByteArray): File
+ }
+ 
+ class AndroidEncryptedBundleStore(context: Context) : PluginBundleStore {
+     private val appContext = context.applicationContext
+     private val masterKey = MasterKey.Builder(appContext)
+         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+         .build()
+ 
+     override fun write(pluginId: String, bundleBytes: ByteArray): File {
+         val pluginDir = File(appContext.noBackupFilesDir, "pluginhost/bundles/${sanitize(pluginId)}").apply { mkdirs() }
+         val encryptedFile = File(pluginDir, "plugin.bundle.js.enc")
+         if (encryptedFile.exists()) encryptedFile.delete()
+         EncryptedFile.Builder(
+             appContext,
+             encryptedFile,
+             masterKey,
+             EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB,
+         ).build().openFileOutput().use { output ->
+             output.write(bundleBytes)
+         }
+         return encryptedFile
+     }
+ 
+     private fun sanitize(pluginId: String): String =
+         pluginId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+ }
+ 
+ interface PluginInstanceFactory {
+     suspend fun create(
+         manifest: PluginManifest,
+         grantedCapabilities: Set<String>,
+         bundleFilePath: String,
+         bundleBytes: ByteArray,
++        manifestJson: String,
+     ): PluginInstance
+ }
+ 
+ /**
+  * Phase 10b step 6 production factory: stages the bundle, mints a
+  * `sandboxToken`, registers the per-token [PluginBridge] +
+  * lifecycle listener with [SandboxBridgeDispatcher], then asks
+  * [SandboxRouter] to fire the AIDL `loadPlugin`. The returned
+  * [PluginInstance] holds the resulting [SandboxHandle] for
+  * dispatch / teardown — the actual JS lives in `:plugin`.
+  */
+ class SandboxedPluginInstanceFactory(
+     private val scope: CoroutineScope,
+     private val auditLogger: AuditLogger,
+     private val sandboxRouter: SandboxRouter,
+     private val bridgeDispatcher: SandboxBridgeDispatcher,
+     private val networkBridge: NetworkBridge,
+     private val storageBridge: StorageBridge,
+     private val notificationBridge: NotificationBridge,
+     private val cameraBridge: CameraBridge,
+     private val galleryBridge: GalleryBridge,
+     private val fileBridge: FileBridge,
+     private val locationBridge: LocationBridge,
+     private val messageBridge: MessageBridge,
+ ) : PluginInstanceFactory {
+ 
+     override suspend fun create(
+         manifest: PluginManifest,
+         grantedCapabilities: Set<String>,
+         bundleFilePath: String,
+         bundleBytes: ByteArray,
++        manifestJson: String,
+     ): PluginInstance {
+         val sandboxToken = sandboxRouter.allocateToken()
+         val instance = PluginInstance(
+             manifest = manifest,
+             grantedCapabilities = grantedCapabilities,
+             bundleFilePath = bundleFilePath,
+         )
+         val delivery = SandboxBridgeDelivery(
+             sandboxToken = sandboxToken,
+             routerProvider = { sandboxRouter },
+             scope = scope,
+         )
+         val bridge = PluginBridge(
+             plugin = instance,
+             delivery = delivery,
+             scope = scope,
+             networkBridge = networkBridge,
+             storageBridge = storageBridge,
+             notificationBridge = notificationBridge,
+             cameraBridge = cameraBridge,
+             galleryBridge = galleryBridge,
+             fileBridge = fileBridge,
+             locationBridge = locationBridge,
+             messageBridge = messageBridge,
+             auditLogger = auditLogger,
+         )
+         bridgeDispatcher.registerBridge(sandboxToken, bridge)
+         bridgeDispatcher.registerLifecycleListener(
+             sandboxToken,
+-            RegistryUnloadListener(manifest.id),
++            RegistryUnloadListener(manifest.id, sandboxToken),
+         )
+ 
+         val bundleHashHex = MessageDigest.getInstance("SHA-256")
+             .digest(bundleBytes)
+             .toHex()
+         val parcel = PluginLoadParcel(
+             sandboxToken = sandboxToken,
+             pluginId = manifest.id,
+             pluginIdentifier = manifest.id,
+             version = manifest.version,
+             renderer = "script",
+             bundleFilePath = bundleFilePath,
+             bundleHashHex = bundleHashHex,
+             declaredCapabilities = manifest.declaredCapabilities,
+             declaredEndpoints = manifest.declaredEndpoints,
+             dismissBehavior = manifest.dismissBehavior.orEmpty(),
+             timeoutMillis = DEFAULT_TIMEOUT_MS,
+-            diagnosticManifestJson = "",
++            // 64KB cap mirrors PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP.
++            // The wire layer truncates too; this is belt-and-suspenders so we
++            // don't ship a giant payload that won't fit in the Binder
++            // transaction.
++            diagnosticManifestJson = manifestJson.take(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP),
+         )
+ 
+         val handle = try {
+             sandboxRouter.loadPlugin(parcel)
+         } catch (exc: Throwable) {
+             // Sandbox refused the load. Tear down the bridge
+             // registration so the next attempt with the same
+             // pluginId gets a clean slot.
+             bridgeDispatcher.unregisterBridge(sandboxToken)
+             throw exc
+         }
+         // Reflect the handle into the same instance the bridge
+         // was constructed with — we deliberately keep one
+         // [PluginInstance] alive for the load lifecycle so
+         // bridge.plugin and the registry entry are identical.
+         instance.sandboxHandle = handle
+         instance.bridge = bridge
+         return instance
+     }
+ 
+     /**
+      * Lifecycle listener that removes the plugin from
+      * [PluginRegistry] when the sandbox reports crashed or
+      * unloaded. Without this the host registry would hold a
+      * dangling instance whose sandbox-side coordinator has
+      * already gone away.
++     *
++     * Triad 121 generation fence: routes through
++     * [PluginRegistry.handleSandboxTerminated] keyed by
++     * [sandboxToken], not [PluginRegistry.unload] keyed only by
++     * `pluginId`. On reload of the same plugin, a late callback
++     * from the predecessor token finds the registry's current
++     * entry pointing at the new token and skips eviction.
++     *
++     * Also skips the AIDL `unloadPlugin` round-trip — the
++     * sandbox is already torn down by the time we get here, so
++     * re-acquiring the connection just to send a redundant
++     * unload would waste a bind + ref-count.
+      */
+     private inner class RegistryUnloadListener(
+         private val pluginId: String,
++        private val sandboxToken: Int,
+     ) : SandboxBridgeDispatcher.LifecycleListener {
+         override fun onPluginReady() = Unit
+         override fun onWebViewError(code: String, message: String) {
+             auditLogger.denied(pluginId, "webview_error_$code", message)
+         }
+         override fun onPluginCrashed(reason: String) {
+             auditLogger.denied(pluginId, "plugin_crashed", reason)
+-            PluginRegistry.unload(pluginId)
++            PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+         }
+         override fun onPluginUnloaded() {
+-            PluginRegistry.unload(pluginId)
++            PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+         }
+     }
+ 
+     companion object {
+         private const val DEFAULT_TIMEOUT_MS: Long = 30_000L
+     }
+ }
+diff --git a/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt b/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt
+index 91257b6..d477c43 100644
+--- a/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt
++++ b/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt
+@@ -1,23 +1,56 @@
+ package app.syncler.android.pluginhost
+ 
+ import java.util.concurrent.ConcurrentHashMap
+ 
+ object PluginRegistry {
+     private val instances = ConcurrentHashMap<String, PluginInstance>()
+ 
+     fun put(instance: PluginInstance) {
+         instances[instance.manifest.id]?.destroy()
+         instances[instance.manifest.id] = instance
+     }
+ 
+     fun get(pluginId: String): PluginInstance? = instances[pluginId]
+ 
++    /**
++     * Host-initiated unload. Removes the instance from the
++     * registry AND fires `destroy()` so the sandbox-side
++     * coordinator gets the AIDL `unloadPlugin` call. Use this
++     * when the host wants to tear down a plugin (settings UI,
++     * permission revocation, app shutdown).
++     *
++     * For sandbox-originated terminal events
++     * (`onPluginCrashed` / `onPluginUnloaded`), call
++     * [handleSandboxTerminated] instead — that path knows the
++     * sandbox is already torn down and doesn't re-acquire the
++     * AIDL connection just to issue a redundant unload.
++     */
+     fun unload(pluginId: String) {
+         instances.remove(pluginId)?.destroy()
+     }
+ 
++    /**
++     * Sandbox-originated terminal event for [sandboxToken].
++     * Phase 10b step 6 generation fence (triad 121 Codex RED):
++     * removes the instance from the registry IFF its handle
++     * still matches [sandboxToken]. A late callback from a
++     * predecessor load won't evict the new instance.
++     *
++     * The matched instance's handle is nulled so any subsequent
++     * `destroy()` (e.g. from `PluginRegistry.clear()` at app
++     * shutdown) no-ops the AIDL leg — the sandbox side is
++     * already torn down by the time this fires.
++     */
++    fun handleSandboxTerminated(pluginId: String, sandboxToken: Int) {
++        val current = instances[pluginId] ?: return
++        if (current.sandboxHandle?.sandboxToken != sandboxToken) return
++        // Null the handle FIRST so any racing destroy() is a no-op.
++        current.sandboxHandle = null
++        instances.remove(pluginId, current)
++    }
++
+     fun clear() {
+         instances.values.forEach(PluginInstance::destroy)
+         instances.clear()
+     }
+ }
+diff --git a/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt b/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt
+index 56a5eb2..ff3a57e 100644
+--- a/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt
++++ b/android/feature/plugin-host/src/test/kotlin/app/syncler/android/pluginhost/PluginLoaderTest.kt
+@@ -11,105 +11,106 @@ import okhttp3.mockwebserver.MockResponse
+ import okhttp3.mockwebserver.MockWebServer
+ import org.junit.After
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertFalse
+ import org.junit.Assert.assertTrue
+ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.rules.TemporaryFolder
+ 
+ class PluginLoaderTest {
+     @get:Rule
+     val temp = TemporaryFolder()
+ 
+     private val server = MockWebServer()
+     private val seed = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100".let { hex ->
+         hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+     }
+     private val publicKey = Signing.publicKeyFromSeed(seed)
+     private val verifier = PluginSignatureVerifier()
+ 
+     @After
+     fun tearDown() {
+         server.shutdown()
+     }
+ 
+     @Test
+     fun roundTripSignVerifyAndLoadTinyPlugin() = runTest {
+         val bundle = minimalPluginBundle()
+         val manifestJson = signedManifestJson(bundle)
+         server.enqueue(MockResponse().setResponseCode(200).setBody(manifestJson))
+         server.enqueue(MockResponse().setResponseCode(200).setBody(bundle))
+ 
+         val result = loader().load(server.url("/manifest.json").toString(), publicKey)
+ 
+         assertTrue(result.isSuccess)
+         val instance = result.getOrThrow()
+         assertEquals("app.syncler.testplugin", instance.manifest.id)
+         assertEquals(setOf("network", "storage"), instance.grantedCapabilities)
+         assertTrue(File(instance.bundleFilePath).readText() == bundle)
+     }
+ 
+     @Test
+     fun rejectsTamperedManifestBeforeBundleDownload() = runTest {
+         val bundle = minimalPluginBundle()
+         val tampered = signedManifestJson(bundle).replace("\"version\":\"1.0.0\"", "\"version\":\"1.0.1\"")
+         server.enqueue(MockResponse().setResponseCode(200).setBody(tampered))
+ 
+         val result = loader().load(server.url("/manifest.json").toString(), publicKey)
+ 
+         assertFalse(result.isSuccess)
+         assertEquals(1, server.requestCount)
+     }
+ 
+     @Test
+     fun rejectsBundleHashMismatch() = runTest {
+         val signedFor = "expected bundle"
+         val served = "tampered bundle"
+         server.enqueue(MockResponse().setResponseCode(200).setBody(signedManifestJson(signedFor)))
+         server.enqueue(MockResponse().setResponseCode(200).setBody(served))
+ 
+         val result = loader().load(server.url("/manifest.json").toString(), publicKey)
+ 
+         assertFalse(result.isSuccess)
+         assertEquals(2, server.requestCount)
+     }
+ 
+     private fun loader(): PluginLoader = PluginLoader(
+         httpClient = OkHttpClient(),
+         verifier = verifier,
+         permissionReader = { setOf("network", "storage", "camera") },
+         bundleStore = object : PluginBundleStore {
+             override fun write(pluginId: String, bundleBytes: ByteArray): File =
+                 temp.newFile("$pluginId.bundle.js").also { it.writeBytes(bundleBytes) }
+         },
+         instanceFactory = object : PluginInstanceFactory {
+             override suspend fun create(
+                 manifest: PluginManifest,
+                 grantedCapabilities: Set<String>,
+                 bundleFilePath: String,
+                 bundleBytes: ByteArray,
++                manifestJson: String,
+             ): PluginInstance = PluginInstance(manifest, grantedCapabilities, bundleFilePath)
+         },
+     )
+ 
+     private fun signedManifestJson(bundle: String): String {
+         val hash = MessageDigest.getInstance("SHA-256").digest(bundle.toByteArray()).toHex()
+         val unsigned = linkedMapOf<String, Any?>(
+             "id" to "app.syncler.testplugin",
+             "name" to "Tiny Test Plugin",
+             "version" to "1.0.0",
+             "senderId" to "sender-alpha",
+             "bundleHash" to hash,
+             "declaredCapabilities" to listOf("network", "storage"),
+             "declaredEndpoints" to listOf("https://api.example.com/v1/*"),
+             "dismissBehavior" to "dismiss_local_only",
+             "minPlatformVersion" to "1.0.0",
+             "signed_bundle_url" to server.url("/plugin.bundle.js").toString(),
+         )
+         val signature = Signing.signWithSeed(seed, verifier.canonicalManifestForSigning(unsigned)).toHex()
+         return Moshi.Builder().build().adapter(Map::class.java).toJson(unsigned + ("signature" to signature))
+     }
+ 
+     private fun minimalPluginBundle(): String =
+         checkNotNull(javaClass.getResource("/minimal-plugin.bundle.js")).readText()
+ }
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 383ms:
+package app.syncler.android.pluginhost
+
+import app.syncler.core.crypto.Signing
+import app.syncler.core.crypto.toHex
+import com.squareup.moshi.Moshi
+import java.io.File
+import java.security.MessageDigest
+import kotlinx.coroutines.test.runTest
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+
+class PluginLoaderTest {
+    @get:Rule
+    val temp = TemporaryFolder()
+
+    private val server = MockWebServer()
+    private val seed = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100".let { hex ->
+        hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
+    private val publicKey = Signing.publicKeyFromSeed(seed)
+    private val verifier = PluginSignatureVerifier()
+
+    @After
+    fun tearDown() {
+        server.shutdown()
+    }
+
+    @Test
+    fun roundTripSignVerifyAndLoadTinyPlugin() = runTest {
+        val bundle = minimalPluginBundle()
+        val manifestJson = signedManifestJson(bundle)
+        server.enqueue(MockResponse().setResponseCode(200).setBody(manifestJson))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(bundle))
+
+        val result = loader().load(server.url("/manifest.json").toString(), publicKey)
+
+        assertTrue(result.isSuccess)
+        val instance = result.getOrThrow()
+        assertEquals("app.syncler.testplugin", instance.manifest.id)
+        assertEquals(setOf("network", "storage"), instance.grantedCapabilities)
+        assertTrue(File(instance.bundleFilePath).readText() == bundle)
+    }
+
+    @Test
+    fun rejectsTamperedManifestBeforeBundleDownload() = runTest {
+        val bundle = minimalPluginBundle()
+        val tampered = signedManifestJson(bundle).replace("\"version\":\"1.0.0\"", "\"version\":\"1.0.1\"")
+        server.enqueue(MockResponse().setResponseCode(200).setBody(tampered))
+
+        val result = loader().load(server.url("/manifest.json").toString(), publicKey)
+
+        assertFalse(result.isSuccess)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun rejectsBundleHashMismatch() = runTest {
+        val signedFor = "expected bundle"
+        val served = "tampered bundle"
+        server.enqueue(MockResponse().setResponseCode(200).setBody(signedManifestJson(signedFor)))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(served))
+
+        val result = loader().load(server.url("/manifest.json").toString(), publicKey)
+
+        assertFalse(result.isSuccess)
+        assertEquals(2, server.requestCount)
+    }
+
+    private fun loader(): PluginLoader = PluginLoader(
+        httpClient = OkHttpClient(),
+        verifier = verifier,
+        permissionReader = { setOf("network", "storage", "camera") },
+        bundleStore = object : PluginBundleStore {
+            override fun write(pluginId: String, bundleBytes: ByteArray): File =
+                temp.newFile("$pluginId.bundle.js").also { it.writeBytes(bundleBytes) }
+        },
+        instanceFactory = object : PluginInstanceFactory {
+            override suspend fun create(
+                manifest: PluginManifest,
+                grantedCapabilities: Set<String>,
+                bundleFilePath: String,
+                bundleBytes: ByteArray,
+                manifestJson: String,
+            ): PluginInstance = PluginInstance(manifest, grantedCapabilities, bundleFilePath)
+        },
+    )
+
+    private fun signedManifestJson(bundle: String): String {
+        val hash = MessageDigest.getInstance("SHA-256").digest(bundle.toByteArray()).toHex()
+        val unsigned = linkedMapOf<String, Any?>(
+            "id" to "app.syncler.testplugin",
+            "name" to "Tiny Test Plugin",
+            "version" to "1.0.0",
+            "senderId" to "sender-alpha",
+            "bundleHash" to hash,
+            "declaredCapabilities" to listOf("network", "storage"),
+            "declaredEndpoints" to listOf("https://api.example.com/v1/*"),
+            "dismissBehavior" to "dismiss_local_only",
+            "minPlatformVersion" to "1.0.0",
+            "signed_bundle_url" to server.url("/plugin.bundle.js").toString(),
+        )
+        val signature = Signing.signWithSeed(seed, verifier.canonicalManifestForSigning(unsigned)).toHex()
+        return Moshi.Builder().build().adapter(Map::class.java).toJson(unsigned + ("signature" to signature))
+    }
+
+    private fun minimalPluginBundle(): String =
+        checkNotNull(javaClass.getResource("/minimal-plugin.bundle.js")).readText()
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 381ms:
+package app.syncler.android.pluginhost
+
+import android.content.Context
+import androidx.security.crypto.EncryptedFile
+import androidx.security.crypto.MasterKey
+import app.syncler.android.pluginhost.capabilities.CameraBridge
+import app.syncler.android.pluginhost.capabilities.FileBridge
+import app.syncler.android.pluginhost.capabilities.GalleryBridge
+import app.syncler.android.pluginhost.capabilities.LocationBridge
+import app.syncler.android.pluginhost.capabilities.MessageBridge
+import app.syncler.android.pluginhost.capabilities.NetworkBridge
+import app.syncler.android.pluginhost.capabilities.NotificationBridge
+import app.syncler.android.pluginhost.capabilities.StorageBridge
+import app.syncler.android.pluginhost.sandbox.PluginSandboxConnection
+import app.syncler.android.pluginhost.sandbox.SandboxBridgeDelivery
+import app.syncler.android.pluginhost.sandbox.SandboxBridgeDispatcher
+import app.syncler.android.pluginhost.sandbox.SandboxRouter
+import app.syncler.core.crypto.toHex
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import com.squareup.moshi.JsonAdapter
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import java.io.File
+import java.security.MessageDigest
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.CacheControl
+import okhttp3.ConnectionSpec
+import okhttp3.CookieJar
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrl
+
+class PluginLoader(
+    private val httpClient: OkHttpClient,
+    private val manifestAdapter: JsonAdapter<PluginManifest> = defaultMoshi.adapter(PluginManifest::class.java),
+    private val rawManifestAdapter: JsonAdapter<Map<String, Any?>> = defaultMoshi.adapter<Map<String, Any?>>(
+        Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java),
+    ),
+    private val verifier: PluginSignatureVerifier,
+    private val permissionReader: (String) -> Set<String>,
+    private val bundleStore: PluginBundleStore,
+    private val instanceFactory: PluginInstanceFactory,
+    private val auditLogger: AuditLogger = AuditLogger(),
+) {
+    suspend fun load(manifestUrl: String, expectedSenderPublicKey: ByteArray): Result<PluginInstance> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                requireHttps(manifestUrl)
+                val manifestJson = fetchNoCache(manifestUrl)
+                val rawManifest = rawManifestAdapter.fromJson(manifestJson)
+                    ?: throw IllegalArgumentException("manifest JSON is empty")
+                verifier.verify(rawManifest, expectedSenderPublicKey).getOrThrow()
+
+                val manifest = manifestAdapter.fromJson(manifestJson)
+                    ?: throw IllegalArgumentException("manifest JSON is empty")
+                val bundleUrl = manifest.bundleUrlOrNull(rawManifest)
+                    ?: throw IllegalArgumentException("manifest signed_bundle_url is missing")
+                if (bundleUrl.startsWith("http://") || bundleUrl.startsWith("https://")) {
+                    requireHttps(bundleUrl)
+                }
+                val resolvedBundleUrl = manifestUrl.toHttpUrl().resolve(bundleUrl)?.toString()
+                    ?: throw IllegalArgumentException("signed_bundle_url is invalid")
+                val bundleBytes = fetchBytesNoCache(resolvedBundleUrl)
+                val actualHash = MessageDigest.getInstance("SHA-256").digest(bundleBytes).toHex()
+                if (!actualHash.equals(manifest.bundleHash, ignoreCase = true)) {
+                    auditLogger.denied(manifest.id, "bundle_hash_mismatch", actualHash)
+                    throw SecurityException("plugin bundle hash mismatch")
+                }
+
+                val stored = bundleStore.write(manifest.id, bundleBytes)
+                val grantedCapabilities = permissionReader(manifest.id).intersect(manifest.declaredCapabilities.toSet())
+                instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes, manifestJson)
+                    .also(PluginRegistry::put)
+            }.onFailure {
+                auditLogger.denied(null, "plugin_load_failed", it.message)
+            }
+        }
+
+    private fun fetchNoCache(url: String): String = fetchBytesNoCache(url).toString(Charsets.UTF_8)
+
+    private fun fetchBytesNoCache(url: String): ByteArray {
+        requireHttps(url)
+        val request = Request.Builder()
+            .url(url)
+            .cacheControl(CacheControl.Builder().noCache().noStore().build())
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code} fetching $url")
+            return response.body?.bytes() ?: ByteArray(0)
+        }
+    }
+
+    private fun requireHttps(url: String) {
+        // Debug builds accept any HTTP origin so devs can host bundles on their
+        // LAN/dev box without TLS. Release builds require HTTPS unconditionally.
+        require(url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))) {
+            "plugin URLs must use HTTPS (got $url)"
+        }
+    }
+
+    companion object {
+        private val defaultMoshi: Moshi = Moshi.Builder()
+            .add(KotlinJsonAdapterFactory())
+            .build()
+
+        private fun buildPluginHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .connectionSpecs(
+                if (BuildConfig.DEBUG) {
+                    listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+                } else {
+                    listOf(ConnectionSpec.MODERN_TLS)
+                },
+            )
+            .build()
+
+        fun android(context: Context, scope: CoroutineScope): PluginLoader {
+            val appContext = context.applicationContext
+            val auditLogger = AuditLogger(appContext)
+            // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
+            // ‚?" neither permits cleartext, so http:// URLs fail at the
+            // connection layer even when requireHttps() lets them through
+            // for debug builds. Mirror NetworkBridge / InboxRepository:
+            // release stays HTTPS-only; debug allows LAN HTTP for dev boxes.
+            val networkBridge = NetworkBridge(buildPluginHttpClient(), auditLogger)
+            val sandboxConnection = PluginSandboxConnection(appContext)
+            val bridgeDispatcher = SandboxBridgeDispatcher()
+            val sandboxRouter = SandboxRouter(sandboxConnection, bridgeDispatcher)
+            return PluginLoader(
+                httpClient = buildPluginHttpClient(),
+                verifier = PluginSignatureVerifier(auditLogger),
+                permissionReader = PluginPermissionStore(appContext)::grantedCapabilities,
+                bundleStore = AndroidEncryptedBundleStore(appContext),
+                instanceFactory = SandboxedPluginInstanceFactory(
+                    scope = scope,
+                    auditLogger = auditLogger,
+                    sandboxRouter = sandboxRouter,
+                    bridgeDispatcher = bridgeDispatcher,
+                    networkBridge = networkBridge,
+                    storageBridge = StorageBridge(appContext, auditLogger),
+                    notificationBridge = NotificationBridge(appContext),
+                    cameraBridge = CameraBridge(),
+                    galleryBridge = GalleryBridge(),
+                    fileBridge = FileBridge(),
+                    locationBridge = LocationBridge(appContext),
+                    messageBridge = MessageBridge(auditLogger),
+                ),
+                auditLogger = auditLogger,
+            )
+        }
+    }
+}
+
+interface PluginBundleStore {
+    fun write(pluginId: String, bundleBytes: ByteArray): File
+}
+
+class AndroidEncryptedBundleStore(context: Context) : PluginBundleStore {
+    private val appContext = context.applicationContext
+    private val masterKey = MasterKey.Builder(appContext)
+        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+        .build()
+
+    override fun write(pluginId: String, bundleBytes: ByteArray): File {
+        val pluginDir = File(appContext.noBackupFilesDir, "pluginhost/bundles/${sanitize(pluginId)}").apply { mkdirs() }
+        val encryptedFile = File(pluginDir, "plugin.bundle.js.enc")
+        if (encryptedFile.exists()) encryptedFile.delete()
+        EncryptedFile.Builder(
+            appContext,
+            encryptedFile,
+            masterKey,
+            EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB,
+        ).build().openFileOutput().use { output ->
+            output.write(bundleBytes)
+        }
+        return encryptedFile
+    }
+
+    private fun sanitize(pluginId: String): String =
+        pluginId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+}
+
+interface PluginInstanceFactory {
+    suspend fun create(
+        manifest: PluginManifest,
+        grantedCapabilities: Set<String>,
+        bundleFilePath: String,
+        bundleBytes: ByteArray,
+        manifestJson: String,
+    ): PluginInstance
+}
+
+/**
+ * Phase 10b step 6 production factory: stages the bundle, mints a
+ * `sandboxToken`, registers the per-token [PluginBridge] +
+ * lifecycle listener with [SandboxBridgeDispatcher], then asks
+ * [SandboxRouter] to fire the AIDL `loadPlugin`. The returned
+ * [PluginInstance] holds the resulting [SandboxHandle] for
+ * dispatch / teardown ‚?" the actual JS lives in `:plugin`.
+ */
+class SandboxedPluginInstanceFactory(
+    private val scope: CoroutineScope,
+    private val auditLogger: AuditLogger,
+    private val sandboxRouter: SandboxRouter,
+    private val bridgeDispatcher: SandboxBridgeDispatcher,
+    private val networkBridge: NetworkBridge,
+    private val storageBridge: StorageBridge,
+    private val notificationBridge: NotificationBridge,
+    private val cameraBridge: CameraBridge,
+    private val galleryBridge: GalleryBridge,
+    private val fileBridge: FileBridge,
+    private val locationBridge: LocationBridge,
+    private val messageBridge: MessageBridge,
+) : PluginInstanceFactory {
+
+    override suspend fun create(
+        manifest: PluginManifest,
+        grantedCapabilities: Set<String>,
+        bundleFilePath: String,
+        bundleBytes: ByteArray,
+        manifestJson: String,
+    ): PluginInstance {
+        val sandboxToken = sandboxRouter.allocateToken()
+        val instance = PluginInstance(
+            manifest = manifest,
+            grantedCapabilities = grantedCapabilities,
+            bundleFilePath = bundleFilePath,
+        )
+        val delivery = SandboxBridgeDelivery(
+            sandboxToken = sandboxToken,
+            routerProvider = { sandboxRouter },
+            scope = scope,
+        )
+        val bridge = PluginBridge(
+            plugin = instance,
+            delivery = delivery,
+            scope = scope,
+            networkBridge = networkBridge,
+            storageBridge = storageBridge,
+            notificationBridge = notificationBridge,
+            cameraBridge = cameraBridge,
+            galleryBridge = galleryBridge,
+            fileBridge = fileBridge,
+            locationBridge = locationBridge,
+            messageBridge = messageBridge,
+            auditLogger = auditLogger,
+        )
+        bridgeDispatcher.registerBridge(sandboxToken, bridge)
+        bridgeDispatcher.registerLifecycleListener(
+            sandboxToken,
+            RegistryUnloadListener(manifest.id, sandboxToken),
+        )
+
+        val bundleHashHex = MessageDigest.getInstance("SHA-256")
+            .digest(bundleBytes)
+            .toHex()
+        val parcel = PluginLoadParcel(
+            sandboxToken = sandboxToken,
+            pluginId = manifest.id,
+            pluginIdentifier = manifest.id,
+            version = manifest.version,
+            renderer = "script",
+            bundleFilePath = bundleFilePath,
+            bundleHashHex = bundleHashHex,
+            declaredCapabilities = manifest.declaredCapabilities,
+            declaredEndpoints = manifest.declaredEndpoints,
+            dismissBehavior = manifest.dismissBehavior.orEmpty(),
+            timeoutMillis = DEFAULT_TIMEOUT_MS,
+            // 64KB cap mirrors PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP.
+            // The wire layer truncates too; this is belt-and-suspenders so we
+            // don't ship a giant payload that won't fit in the Binder
+            // transaction.
+            diagnosticManifestJson = manifestJson.take(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP),
+        )
+
+        val handle = try {
+            sandboxRouter.loadPlugin(parcel)
+        } catch (exc: Throwable) {
+            // Sandbox refused the load. Tear down the bridge
+            // registration so the next attempt with the same
+            // pluginId gets a clean slot.
+            bridgeDispatcher.unregisterBridge(sandboxToken)
+            throw exc
+        }
+        // Reflect the handle into the same instance the bridge
+        // was constructed with ‚?" we deliberately keep one
+        // [PluginInstance] alive for the load lifecycle so
+        // bridge.plugin and the registry entry are identical.
+        instance.sandboxHandle = handle
+        instance.bridge = bridge
+        return instance
+    }
+
+    /**
+     * Lifecycle listener that removes the plugin from
+     * [PluginRegistry] when the sandbox reports crashed or
+     * unloaded. Without this the host registry would hold a
+     * dangling instance whose sandbox-side coordinator has
+     * already gone away.
+     *
+     * Triad 121 generation fence: routes through
+     * [PluginRegistry.handleSandboxTerminated] keyed by
+     * [sandboxToken], not [PluginRegistry.unload] keyed only by
+     * `pluginId`. On reload of the same plugin, a late callback
+     * from the predecessor token finds the registry's current
+     * entry pointing at the new token and skips eviction.
+     *
+     * Also skips the AIDL `unloadPlugin` round-trip ‚?" the
+     * sandbox is already torn down by the time we get here, so
+     * re-acquiring the connection just to send a redundant
+     * unload would waste a bind + ref-count.
+     */
+    private inner class RegistryUnloadListener(
+        private val pluginId: String,
+        private val sandboxToken: Int,
+    ) : SandboxBridgeDispatcher.LifecycleListener {
+        override fun onPluginReady() = Unit
+        override fun onWebViewError(code: String, message: String) {
+            auditLogger.denied(pluginId, "webview_error_$code", message)
+        }
+        override fun onPluginCrashed(reason: String) {
+            auditLogger.denied(pluginId, "plugin_crashed", reason)
+            PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+        }
+        override fun onPluginUnloaded() {
+            PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+        }
+    }
+
+    companion object {
+        private const val DEFAULT_TIMEOUT_MS: Long = 30_000L
+    }
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 407ms:
+package app.syncler.android.pluginhost
+
+import java.util.concurrent.ConcurrentHashMap
+
+object PluginRegistry {
+    private val instances = ConcurrentHashMap<String, PluginInstance>()
+
+    fun put(instance: PluginInstance) {
+        instances[instance.manifest.id]?.destroy()
+        instances[instance.manifest.id] = instance
+    }
+
+    fun get(pluginId: String): PluginInstance? = instances[pluginId]
+
+    /**
+     * Host-initiated unload. Removes the instance from the
+     * registry AND fires `destroy()` so the sandbox-side
+     * coordinator gets the AIDL `unloadPlugin` call. Use this
+     * when the host wants to tear down a plugin (settings UI,
+     * permission revocation, app shutdown).
+     *
+     * For sandbox-originated terminal events
+     * (`onPluginCrashed` / `onPluginUnloaded`), call
+     * [handleSandboxTerminated] instead ‚?" that path knows the
+     * sandbox is already torn down and doesn't re-acquire the
+     * AIDL connection just to issue a redundant unload.
+     */
+    fun unload(pluginId: String) {
+        instances.remove(pluginId)?.destroy()
+    }
+
+    /**
+     * Sandbox-originated terminal event for [sandboxToken].
+     * Phase 10b step 6 generation fence (triad 121 Codex RED):
+     * removes the instance from the registry IFF its handle
+     * still matches [sandboxToken]. A late callback from a
+     * predecessor load won't evict the new instance.
+     *
+     * The matched instance's handle is nulled so any subsequent
+     * `destroy()` (e.g. from `PluginRegistry.clear()` at app
+     * shutdown) no-ops the AIDL leg ‚?" the sandbox side is
+     * already torn down by the time this fires.
+     */
+    fun handleSandboxTerminated(pluginId: String, sandboxToken: Int) {
+        val current = instances[pluginId] ?: return
+        if (current.sandboxHandle?.sandboxToken != sandboxToken) return
+        // Null the handle FIRST so any racing destroy() is a no-op.
+        current.sandboxHandle = null
+        instances.remove(pluginId, current)
+    }
+
+    fun clear() {
+        instances.values.forEach(PluginInstance::destroy)
+        instances.clear()
+    }
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The core generation fence is present and token-based. I’m checking the surrounding teardown path now, because correctness depends on what `destroy()`, `SandboxHandle`, and dispatcher unregister semantics actually do.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw core/pluginaidl/src/main/kotlin/app/syncler/core/pluginaidl/PluginLoadParcel.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "class PluginInstance|data class PluginInstance|fun destroy|class SandboxHandle|data class SandboxHandle|unregisterBridge|registerLifecycleListener|onPluginUnloaded|onPluginCrashed|DIAGNOSTIC_MANIFEST_BYTES_CAP|diagnosticManifestJson" feature core app -S' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt' in D:\Projects\syncler\android
+ succeeded in 409ms:
+feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:144:        diagnosticManifestJson = "{}",
+feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:172:    override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:175:    override fun onPluginUnloaded(sandboxToken: Int) {
+feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:195:    override fun destroy() {
+core\plugin-aidl\src\test\kotlin\app\syncler\core\pluginaidl\PluginLoadParcelTest.kt:35:        diagnosticManifestJson = "{\"id\":\"plugin-abc\"}",
+core\plugin-aidl\src\test\kotlin\app\syncler\core\pluginaidl\PluginLoadParcelTest.kt:55:        assertEquals(64 * 1024, PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP)
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:20:    fun onPluginCrashed(sandboxToken: Int, reason: String)
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:21:    fun onPluginUnloaded(sandboxToken: Int)
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxState.kt:24:     * sandbox fires `IPluginHostCallback.onPluginUnloaded`.
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:51:     * The sandbox fires `onPluginUnloaded` AFTER this returns.
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:53:    fun destroy()
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:48:        // the host's onPluginUnloaded fires for each. (The host
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:160:        if (request.diagnosticManifestJson.length > PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:207:            override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:208:                runCatching { callback.onPluginCrashed(sandboxToken, reason) }
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:209:                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginCrashed failed") }
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:211:            override fun onPluginUnloaded(sandboxToken: Int) {
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:212:                runCatching { callback.onPluginUnloaded(sandboxToken) }
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:213:                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginUnloaded failed") }
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:250:    override fun destroy() {
+feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:96:            diagnosticManifestJson = "x".repeat(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP + 1),
+feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:161:            "onPluginUnloaded did not fire within timeout",
+feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:207:        diagnosticManifestJson: String = "{}",
+feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:220:        diagnosticManifestJson = diagnosticManifestJson,
+feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:269:        override fun onPluginCrashed(sandboxToken: Int, reason: String?) {
+feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:274:        override fun onPluginUnloaded(sandboxToken: Int) {
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:181:     * destroys the WebView, fires `onPluginUnloaded(sandboxToken)`,
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:211:        callback.onPluginUnloaded(sandboxToken)
+feature\inbox\src\main\kotlin\app\syncler\feature\inbox\CardBridge.kt:67:    fun destroy() {
+feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:251:    override fun destroy() {
+core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:29:    // IPluginHostCallback.onPluginUnloaded(sandboxToken) when the
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:18: * ships the normalized fields here. [diagnosticManifestJson] is
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:22: * via [DIAGNOSTIC_MANIFEST_BYTES_CAP] and surfaces
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:41:    val diagnosticManifestJson: String,
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:60:        val safe = if (diagnosticManifestJson.length > DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:61:            diagnosticManifestJson.substring(0, DIAGNOSTIC_MANIFEST_BYTES_CAP)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:63:            diagnosticManifestJson
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:83:        const val DIAGNOSTIC_MANIFEST_BYTES_CAP = 64 * 1024
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:105:                        diagnosticManifestJson = source.readString().orEmpty(),
+core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:19:    oneway void onPluginCrashed(int sandboxToken, String reason);
+core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:26:    oneway void onPluginUnloaded(int sandboxToken);
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:252:        bridgeDispatcher.registerLifecycleListener(
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:272:            // 64KB cap mirrors PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP.
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:276:            diagnosticManifestJson = manifestJson.take(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP),
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:285:            bridgeDispatcher.unregisterBridge(sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:324:        override fun onPluginCrashed(reason: String) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:328:        override fun onPluginUnloaded() {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:68:        // idempotent so a late `onPluginUnloaded` from the sandbox's
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:88:            // onPluginUnloaded after this, releaseHandle's
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:97:     * Begin unload. Sandbox fires `onPluginUnloaded` when the
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:108:            // fires when onPluginUnloaded comes back.
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:143:     * A stray `onPluginUnloaded` for an unknown token (e.g. from
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:173:     * the (now-impossible) `onPluginUnloaded`. We MUST release each
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:179:     * dance wasn't atomic against in-flight `onPluginUnloaded` /
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:180:     * `onPluginCrashed` from coroutines that had already started.
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:189:        // racing onPluginUnloaded that lost the remove emits
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:195:                bridgeDispatcher.onPluginCrashed(removed.sandboxToken, "process_died")
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:252:        override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:260:                scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:264:        override fun onPluginUnloaded(sandboxToken: Int) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:265:            // Same generation fence as onPluginCrashed.
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:267:                scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:282:class SandboxHandle internal constructor(
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:306:    suspend fun onPluginCrashed(sandboxToken: Int, reason: String)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:307:    suspend fun onPluginUnloaded(sandboxToken: Int)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:21:class PluginInstance(
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:44:     * `onPluginUnloaded`; the registry's lifecycle listener
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:47:    fun destroy() {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:23:     * (`onPluginCrashed` / `onPluginUnloaded`), call
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\PluginSandboxConnection.kt:32: *   token's `onPluginCrashed` handler.
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\PluginSandboxConnection.kt:59:     * and fire `onPluginCrashed("process_died")`.
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:41:    fun unregisterBridge(sandboxToken: Int) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:52:    fun registerLifecycleListener(sandboxToken: Int, listener: LifecycleListener) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:85:    override suspend fun onPluginCrashed(sandboxToken: Int, reason: String) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:86:        lifecycleListeners[sandboxToken]?.onPluginCrashed(reason)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:87:        unregisterBridge(sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:90:    override suspend fun onPluginUnloaded(sandboxToken: Int) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:91:        lifecycleListeners[sandboxToken]?.onPluginUnloaded()
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:92:        unregisterBridge(sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:98:        fun onPluginCrashed(reason: String)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:99:        fun onPluginUnloaded()
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 436ms:
+package app.syncler.android.pluginhost.sandbox
+
+import app.syncler.android.pluginhost.BridgeDelivery
+import app.syncler.android.pluginhost.PluginBridge
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Host-side adapter from sandbox-originated events to the
+ * existing `PluginBridge` capability dispatch. Phase 10b step 5b.
+ *
+ * `SandboxRouter` calls into this dispatcher whenever the sandbox
+ * emits a `bridgeCall` or a lifecycle event. The dispatcher
+ * routes via the per-token bridge map (one [PluginBridge] per
+ * active plugin) ‚?" capability dispatch happens in the host
+ * process exactly the same way the in-process path did.
+ *
+ * Bridge results flow back to the sandbox via
+ * [SandboxBridgeDelivery], which the per-plugin [PluginBridge]
+ * was constructed with.
+ */
+class SandboxBridgeDispatcher : BridgeDispatcher {
+
+    private val bridges = ConcurrentHashMap<Int, PluginBridge>()
+    private val lifecycleListeners = ConcurrentHashMap<Int, LifecycleListener>()
+
+    /**
+     * Register the [PluginBridge] for a freshly-loaded sandbox
+     * token. Caller (the rewired loader) MUST do this before
+     * the sandbox's `onPluginReady` arrives ‚?" race-free because
+     * we register synchronously before `SandboxRouter.loadPlugin`
+     * returns (the host-side loader controls the order).
+     */
+    fun registerBridge(sandboxToken: Int, bridge: PluginBridge) {
+        bridges[sandboxToken] = bridge
+    }
+
+    /** Remove the bridge mapping for [sandboxToken]. Idempotent. */
+    fun unregisterBridge(sandboxToken: Int) {
+        bridges.remove(sandboxToken)
+        lifecycleListeners.remove(sandboxToken)
+    }
+
+    /**
+     * Hook a per-token lifecycle listener (e.g. the
+     * `PluginRegistry`'s "this plugin is now ready" /
+     * "this plugin crashed" handlers). Optional ‚?" null entry
+     * means we just no-op on lifecycle events for that token.
+     */
+    fun registerLifecycleListener(sandboxToken: Int, listener: LifecycleListener) {
+        lifecycleListeners[sandboxToken] = listener
+    }
+
+    override suspend fun bridgeCall(
+        sandboxToken: Int,
+        method: String,
+        argsJson: String,
+        callbackId: String,
+    ) {
+        val bridge = bridges[sandboxToken] ?: run {
+            Timber.tag(TAG).w(
+                "bridgeCall for unknown token=%d method=%s ‚?" dropping",
+                sandboxToken, method,
+            )
+            return
+        }
+        // PluginBridge.call is the same entry point the in-process
+        // JavascriptInterface used. It runs the capability logic on
+        // its own CoroutineScope and delivers the result via the
+        // BridgeDelivery the bridge was constructed with ‚?" which is
+        // a SandboxBridgeDelivery wired to this sandboxToken.
+        bridge.call(method, argsJson, callbackId)
+    }
+
+    override suspend fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+        lifecycleListeners[sandboxToken]?.onWebViewError(code, message)
+    }
+
+    override suspend fun onPluginReady(sandboxToken: Int) {
+        lifecycleListeners[sandboxToken]?.onPluginReady()
+    }
+
+    override suspend fun onPluginCrashed(sandboxToken: Int, reason: String) {
+        lifecycleListeners[sandboxToken]?.onPluginCrashed(reason)
+        unregisterBridge(sandboxToken)
+    }
+
+    override suspend fun onPluginUnloaded(sandboxToken: Int) {
+        lifecycleListeners[sandboxToken]?.onPluginUnloaded()
+        unregisterBridge(sandboxToken)
+    }
+
+    interface LifecycleListener {
+        fun onPluginReady()
+        fun onWebViewError(code: String, message: String)
+        fun onPluginCrashed(reason: String)
+        fun onPluginUnloaded()
+    }
+
+    companion object {
+        private const val TAG = "SandboxBridgeDispatch"
+    }
+}
+
+/**
+ * [BridgeDelivery] that ships a capability result back to a
+ * sandboxed plugin via `SandboxRouter.deliverBridgeResult`. The
+ * per-plugin [PluginBridge] is constructed with one of these so
+ * its `deliver(callbackId, json)` path no longer touches a
+ * WebView directly.
+ */
+class SandboxBridgeDelivery(
+    private val sandboxToken: Int,
+    private val routerProvider: () -> SandboxRouter?,
+    private val scope: CoroutineScope,
+) : BridgeDelivery {
+    override fun deliver(callbackId: String, resultJson: String) {
+        val router = routerProvider() ?: run {
+            Timber.tag(TAG).w(
+                "deliver for token=%d callback=%s ‚?" router gone, dropping",
+                sandboxToken, callbackId,
+            )
+            return
+        }
+        // Fire-and-forget ‚?" the BridgeDelivery contract is no-await.
+        // Launch on the SandboxBridgeDispatcher's scope so a slow
+        // AIDL call doesn't pin the coroutine the bridge's
+        // capability work ran on.
+        scope.launch {
+            runCatching {
+                router.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+            }.onFailure {
+                Timber.tag(TAG).w(it, "deliverBridgeResult threw (token=%d)", sandboxToken)
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "SandboxBridgeDelivery"
+    }
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 442ms:
+package app.syncler.android.pluginhost.sandbox
+
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Host-side counterpart to the sandbox's `PluginTokenCoordinator`.
+ *
+ * - Allocates `sandboxToken` (process-local monotonic int).
+ * - Receives `IPluginHostCallback` calls from the sandbox and
+ *   routes them to the appropriate per-token handler.
+ * - Owns the host-side pending-callback map for bridge calls so
+ *   capability results land back at the right `callbackId`.
+ * - Provides the high-level entry points
+ *   [loadPlugin] / [unload] / [dispatchHook] /
+ *   [deliverBridgeResult] that the rest of the host calls ‚?" they
+ *   round-trip through [PluginSandboxConnection] to the sandbox
+ *   AIDL.
+ *
+ * Step 4 ships scaffolding only ‚?" step 5 wires it into
+ * `PluginBridge` and the e2e test. The class is thread-safe via
+ * [tokenMutex] + atomic counters; AIDL callbacks land on Binder
+ * threads and dispatch to `bridgeDispatcher` on its own coroutine
+ * scope so the Binder thread doesn't block on capability work.
+ */
+class SandboxRouter(
+    private val connection: PluginSandboxConnection,
+    private val bridgeDispatcher: BridgeDispatcher,
+    private val scope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) {
+
+    private val nextToken = AtomicInteger(1)
+    private val handles = java.util.concurrent.ConcurrentHashMap<Int, SandboxHandle>()
+
+    init {
+        connection.onSandboxDeath = ::handleSandboxDeath
+    }
+
+    /**
+     * Allocate a fresh `sandboxToken`. Use this BEFORE staging the
+     * bundle so the staged path can include it. The token isn't
+     * registered with [PluginSandboxConnection] until [loadPlugin]
+     * succeeds ‚?" caller can throw away the value without leaking
+     * state.
+     */
+    fun allocateToken(): Int = nextToken.getAndIncrement()
+
+    /**
+     * Bind the sandbox (if not bound), invoke `loadPlugin`, and
+     * return a [SandboxHandle] the caller uses for hook dispatch
+     * and unload. Suspends until the sandbox acknowledges
+     * load ‚?" on failure the AIDL `IllegalStateException` (with a
+     * structured failure code) propagates.
+     */
+    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+        val sandbox = connection.acquire()
+        // Triad 117: pre-register the handle BEFORE the AIDL call so
+        // a synchronous-or-oneway callback firing mid-load doesn't
+        // arrive at the stub with no handle visible. On failure we
+        // remove the handle in the catch ‚?" `releaseHandle` is
+        // idempotent so a late `onPluginUnloaded` from the sandbox's
+        // synchronous load-fail teardown won't double-release.
+        val handle = SandboxHandle(
+            sandboxToken = parcel.sandboxToken,
+            pluginId = parcel.pluginId,
+            router = this,
+        )
+        handles[parcel.sandboxToken] = handle
+        try {
+            val callback = PluginHostCallbackStub(parcel.sandboxToken)
+            val returnedToken = sandbox.loadPlugin(parcel, callback)
+            check(returnedToken == parcel.sandboxToken) {
+                "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
+                    "${parcel.sandboxToken} ‚?" fatal sandbox bug"
+            }
+            return handle
+        } catch (exc: Throwable) {
+            // bindService succeeded but loadPlugin failed ‚?" undo
+            // the pre-registration + release the connection ref.
+            // If the sandbox's load-fail teardown fires a oneway
+            // onPluginUnloaded after this, releaseHandle's
+            // remove-returns-null guard skips the spurious release.
+            handles.remove(parcel.sandboxToken)
+            connection.release()
+            throw exc
+        }
+    }
+
+    /**
+     * Begin unload. Sandbox fires `onPluginUnloaded` when the
+     * teardown completes; the host then releases the connection
+     * ref via [releaseHandle].
+     */
+    suspend fun unload(handle: SandboxHandle) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.unloadPlugin(handle.sandboxToken)
+        } finally {
+            // We just paid an extra acquire to do the call; release
+            // it. The release that pairs with loadPlugin's acquire
+            // fires when onPluginUnloaded comes back.
+            connection.release()
+        }
+    }
+
+    suspend fun dispatchHook(
+        handle: SandboxHandle,
+        hook: String,
+        payloadJson: String,
+        callbackId: String,
+    ) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+        } finally {
+            connection.release()
+        }
+    }
+
+    suspend fun deliverBridgeResult(
+        sandboxToken: Int,
+        callbackId: String,
+        resultJson: String,
+    ) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+        } finally {
+            connection.release()
+        }
+    }
+
+    /**
+     * Idempotent release. Triad 117 finding (Codex #3, Gemini #3):
+     * only release when the handle is actually present in the map.
+     * A stray `onPluginUnloaded` for an unknown token (e.g. from
+     * the sandbox's sync load-fail teardown after the host catch
+     * block already cleaned up) must not over-release the
+     * connection ref count.
+     *
+     * Returns `true` if this call won the race for the token ‚?"
+     * lets the caller gate any *additional* per-token work
+     * (lifecycle dispatch, log lines) on the same atomic remove.
+     * Triad 118 finding: the release was idempotent but the
+     * lifecycle dispatch wasn't, so a load-fail teardown could
+     * still emit bogus crash/unload signals to the dispatcher.
+     */
+    private fun releaseHandle(sandboxToken: Int): Boolean {
+        val removed = handles.remove(sandboxToken)
+        return if (removed != null) {
+            scope.launch { connection.release() }
+            true
+        } else {
+            Timber.tag(TAG).w(
+                "releaseHandle for unknown token=%d ‚?" skipping release (idempotent guard)",
+                sandboxToken,
+            )
+            false
+        }
+    }
+
+    /**
+     * Sandbox process died ‚?" `ServiceConnection.onServiceDisconnected`
+     * fired. Triad 117 (Codex #2, Gemini CRITICAL): every active
+     * handle leaked an `acquire()` that will never be balanced by
+     * the (now-impossible) `onPluginUnloaded`. We MUST release each
+     * one explicitly here, otherwise the ref count stays > 0 forever
+     * and the idle-unbind path can never fire on a future
+     * load ‚+' unload cycle.
+     *
+     * Triad 118 finding (Codex #1): the previous snapshot+clear
+     * dance wasn't atomic against in-flight `onPluginUnloaded` /
+     * `onPluginCrashed` from coroutines that had already started.
+     * If both paths called `release()` for the same token, the ref
+     * count over-decremented. Per-token `handles.remove(token) !=
+     * null` gating closes the race ‚?" only whoever wins the remove
+     * does the release + lifecycle dispatch.
+     */
+    private fun handleSandboxDeath() {
+        // Snapshot keys (cheap copy) then iterate. The atomic
+        // remove gates both the release AND the dispatch, so a
+        // racing onPluginUnloaded that lost the remove emits
+        // nothing additional.
+        val tokens = handles.keys.toList()
+        tokens.forEach { token ->
+            val removed = handles.remove(token) ?: return@forEach
+            scope.launch {
+                bridgeDispatcher.onPluginCrashed(removed.sandboxToken, "process_died")
+                connection.release()
+            }
+        }
+    }
+
+    /**
+     * AIDL stub the sandbox calls into. Routes every event to
+     * [bridgeDispatcher] or to the per-handle bookkeeping.
+     */
+    private inner class PluginHostCallbackStub(
+        private val expectedToken: Int,
+    ) : IPluginHostCallback.Stub() {
+
+        override fun bridgeCall(
+            sandboxToken: Int,
+            method: String,
+            argsJson: String,
+            callbackId: String,
+        ) {
+            // Generation-fence ‚?" drop calls whose token doesn't
+            // match an active handle (e.g. stale callbacks from a
+            // sandboxed plugin that we've already unloaded).
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "bridgeCall for stale token=%d (expected=%d) ‚?" dropping",
+                    sandboxToken, expectedToken,
+                )
+                return
+            }
+            scope.launch {
+                bridgeDispatcher.bridgeCall(sandboxToken, method, argsJson, callbackId)
+            }
+        }
+
+        override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onWebViewError for stale token=%d ‚?" dropping",
+                    sandboxToken,
+                )
+                return
+            }
+            scope.launch { bridgeDispatcher.onWebViewError(sandboxToken, code, message) }
+        }
+
+        override fun onPluginReady(sandboxToken: Int) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onPluginReady for stale token=%d ‚?" dropping",
+                    sandboxToken,
+                )
+                return
+            }
+            scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
+        }
+
+        override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+            // Triad 118 (Codex #2): gate dispatch on releaseHandle
+            // winning the atomic remove. A stale crash from a
+            // load-fail teardown (after the host catch already
+            // cleaned up) loses the remove and we emit nothing ‚?"
+            // otherwise the dispatcher would see a bogus crash
+            // signal for a plugin it already cleaned up.
+            if (releaseHandle(sandboxToken)) {
+                scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+            }
+        }
+
+        override fun onPluginUnloaded(sandboxToken: Int) {
+            // Same generation fence as onPluginCrashed.
+            if (releaseHandle(sandboxToken)) {
+                scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "SandboxRouter"
+    }
+}
+
+/**
+ * Handle the host uses to address a loaded plugin in the sandbox.
+ * Opaque from outside the router; the bridge holds one per active
+ * plugin instance.
+ */
+class SandboxHandle internal constructor(
+    val sandboxToken: Int,
+    val pluginId: String,
+    private val router: SandboxRouter,
+) {
+    suspend fun unload() = router.unload(this)
+    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        router.dispatchHook(this, hook, payloadJson, callbackId)
+    }
+    suspend fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        router.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+    }
+}
+
+/**
+ * The dispatcher contract the [SandboxRouter] uses to surface
+ * sandbox events into host code. Step 5 will provide a real
+ * implementation that adapts to the existing `PluginBridge`
+ * capability dispatch + the `PluginInstance` lifecycle hooks.
+ */
+interface BridgeDispatcher {
+    suspend fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String)
+    suspend fun onWebViewError(sandboxToken: Int, code: String, message: String)
+    suspend fun onPluginReady(sandboxToken: Int)
+    suspend fun onPluginCrashed(sandboxToken: Int, reason: String)
+    suspend fun onPluginUnloaded(sandboxToken: Int)
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ exited 1 in 466ms:
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+Get-Content : Cannot find path 
+'D:\Projects\syncler\android\core\pluginaidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt' because 
+it does not exist.
+At line:2 char:1
++ Get-Content -Raw core/pluginaidl/src/main/kotlin/app/syncler/core/plu ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\Projects\syn...inLoadParcel.kt:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+
+2026-05-25T20:50:58.485670Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.5 seconds
+Output:
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+Get-Content : Cannot find path 
+'D:\Projects\syncler\android\core\pluginaidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt' because 
+it does not exist.
+At line:2 char:1
++ Get-Content -Raw core/pluginaidl/src/main/kotlin/app/syncler/core/plu ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\Projects\syn...inLoadParcel.kt:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw core/plugin-aidl/src/test/kotlin/app/syncler/core/pluginaidl/PluginLoadParcelTest.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginInstance.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginSandboxService.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw core/plugin-aidl/src/main/kotlin/app/syncler/core/pluginaidl/PluginLoadParcel.kt' in D:\Projects\syncler\android
+ succeeded in 352ms:
+package app.syncler.android.pluginhost
+
+import app.syncler.android.pluginhost.sandbox.SandboxHandle
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Phase 10b step 6: in-process WebView gone. A [PluginInstance]
+ * now refers to its loaded plugin only through a [SandboxHandle]
+ * ‚?" the actual JS runs in the `:plugin` subprocess and is
+ * addressed via [app.syncler.android.pluginhost.sandbox.SandboxRouter].
+ *
+ * Both [sandboxHandle] and [bridge] are nullable so unit tests can
+ * construct a bare instance for fields-only assertions
+ * ([PluginLoaderTest]) without standing up the full sandbox
+ * machinery. Production loaders always pass both.
+ */
+class PluginInstance(
+    val manifest: PluginManifest,
+    val grantedCapabilities: Set<String>,
+    val bundleFilePath: String,
+    var sandboxHandle: SandboxHandle? = null,
+    var bridge: PluginBridge? = null,
+) {
+    /**
+     * Fire-and-forget hook dispatch. Matches the legacy in-process
+     * shape (callers don't `await`). Failures are swallowed +
+     * logged; the sandbox-side coordinator's per-token serial
+     * queue handles ordering / state-gating.
+     */
+    fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        val handle = sandboxHandle ?: return
+        instanceScope.launch {
+            runCatching { handle.dispatchHook(hook, payloadJson, callbackId) }
+                .onFailure { Timber.tag(TAG).w(it, "dispatchHook threw (token=%d)", handle.sandboxToken) }
+        }
+    }
+
+    /**
+     * Fire-and-forget unload. Sandbox confirms via
+     * `onPluginUnloaded`; the registry's lifecycle listener
+     * removes this instance once that arrives.
+     */
+    fun destroy() {
+        val handle = sandboxHandle ?: return
+        instanceScope.launch {
+            runCatching { handle.unload() }
+                .onFailure { Timber.tag(TAG).w(it, "unload threw (token=%d)", handle.sandboxToken) }
+        }
+    }
+
+    private val instanceScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    companion object {
+        private const val TAG = "PluginInstance"
+    }
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 351ms:
+package app.syncler.core.pluginaidl
+
+import android.os.Parcel
+import android.os.Parcelable
+
+/**
+ * Host-allocated session-keyed plugin load payload (Phase 10a v4).
+ *
+ * The host's `PluginRegistry` allocates [sandboxToken] BEFORE staging
+ * the bundle. The token flows verbatim into the sandbox via this
+ * parcel and is adopted as the AIDL routing key for the lifecycle of
+ * the load. Successive loads of the same [pluginId] get DIFFERENT
+ * tokens ‚?" Phase 10's generation fence.
+ *
+ * Grant authority lives in [declaredCapabilities] + [declaredEndpoints]
+ * ‚?" the host parses the signed manifest once with the existing
+ * [app.syncler.android.pluginhost.PluginManifest] validator, then
+ * ships the normalized fields here. [diagnosticManifestJson] is
+ * carried for telemetry only and MUST NOT be consulted for grant
+ * decisions (see docs/plugin-host-multi-process.md "Manifest grant
+ * source"). The sandbox-side load path enforces a 64 KB cap on it
+ * via [DIAGNOSTIC_MANIFEST_BYTES_CAP] and surfaces
+ * `diagnostic_field_oversize` if exceeded.
+ *
+ * Stable-shape Parcelable: any field additions go at the end with
+ * versioned read/write so old apk/sandbox combinations don't crash
+ * (V0.1 doesn't actually need this, but it's free to set up).
+ */
+data class PluginLoadParcel(
+    val sandboxToken: Int,
+    val pluginId: String,
+    val pluginIdentifier: String,
+    val version: String,
+    val renderer: String,
+    val bundleFilePath: String,
+    val bundleHashHex: String,
+    val declaredCapabilities: List<String>,
+    val declaredEndpoints: List<String>,
+    val dismissBehavior: String,
+    val timeoutMillis: Long,
+    val diagnosticManifestJson: String,
+) : Parcelable {
+
+    override fun writeToParcel(dest: Parcel, flags: Int) {
+        dest.writeInt(WIRE_VERSION)
+        dest.writeInt(sandboxToken)
+        dest.writeString(pluginId)
+        dest.writeString(pluginIdentifier)
+        dest.writeString(version)
+        dest.writeString(renderer)
+        dest.writeString(bundleFilePath)
+        dest.writeString(bundleHashHex)
+        dest.writeStringList(declaredCapabilities)
+        dest.writeStringList(declaredEndpoints)
+        dest.writeString(dismissBehavior)
+        dest.writeLong(timeoutMillis)
+        // Enforce the 64 KB cap on the wire too. Senders SHOULD have
+        // already truncated; we double-check so a buggy host can't
+        // blow the Binder transaction.
+        val safe = if (diagnosticManifestJson.length > DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+            diagnosticManifestJson.substring(0, DIAGNOSTIC_MANIFEST_BYTES_CAP)
+        } else {
+            diagnosticManifestJson
+        }
+        dest.writeString(safe)
+    }
+
+    override fun describeContents(): Int = 0
+
+    companion object {
+        /**
+         * Wire format version. Bump only when reordering / removing
+         * fields; new fields go at the end with a length-prefixed
+         * appendix so old readers can ignore them.
+         */
+        const val WIRE_VERSION = 1
+
+        /**
+         * 64 KB cap per Phase 10a v3 IPC payload-caps decision. Binder
+         * transaction limit is ~1 MB; this leaves room for the other
+         * fields + the AIDL framing.
+         */
+        const val DIAGNOSTIC_MANIFEST_BYTES_CAP = 64 * 1024
+
+        @JvmField
+        val CREATOR: Parcelable.Creator<PluginLoadParcel> =
+            object : Parcelable.Creator<PluginLoadParcel> {
+                override fun createFromParcel(source: Parcel): PluginLoadParcel {
+                    val version = source.readInt()
+                    require(version == WIRE_VERSION) {
+                        "PluginLoadParcel wire version $version not supported by reader $WIRE_VERSION"
+                    }
+                    return PluginLoadParcel(
+                        sandboxToken = source.readInt(),
+                        pluginId = source.readString().orEmpty(),
+                        pluginIdentifier = source.readString().orEmpty(),
+                        version = source.readString().orEmpty(),
+                        renderer = source.readString().orEmpty(),
+                        bundleFilePath = source.readString().orEmpty(),
+                        bundleHashHex = source.readString().orEmpty(),
+                        declaredCapabilities = mutableListOf<String>().also(source::readStringList).toList(),
+                        declaredEndpoints = mutableListOf<String>().also(source::readStringList).toList(),
+                        dismissBehavior = source.readString().orEmpty(),
+                        timeoutMillis = source.readLong(),
+                        diagnosticManifestJson = source.readString().orEmpty(),
+                    )
+                }
+
+                override fun newArray(size: Int): Array<PluginLoadParcel?> = arrayOfNulls(size)
+            }
+    }
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 352ms:
+package app.syncler.feature.pluginsandbox
+
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.IPluginSandbox
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import timber.log.Timber
+
+/**
+ * Phase 10 multi-process plugin host: the `:plugin` subprocess
+ * service. Declared in this module's AndroidManifest with
+ * `android:process=":plugin"`.
+ *
+ * The service binds host clients via [IPluginSandbox.Stub], routes
+ * AIDL calls to the right [PluginTokenCoordinator], and owns the
+ * shared [PluginTokenRegistry]. Per-token work happens on
+ * coroutines owned by each coordinator; the service's own scope
+ * is short-lived bookkeeping only.
+ *
+ * Step 2 ships the wiring + state machine. The actual
+ * [PluginWebViewHost] implementation is supplied by
+ * [PluginWebViewHostFactory], which today returns a no-op stub ‚?"
+ * step 5 of Phase 10b will land the real WebView implementation
+ * once connectedAndroidTest is wired up.
+ */
+class PluginSandboxService : Service() {
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val registry = PluginTokenRegistry()
+    // Phase 10b step 5: the production factory builds real
+    // WebView-backed sandbox hosts using this Service as Context.
+    // Tests can override via WebViewHostFactoryOverride (step 5's
+    // connectedAndroidTest harness).
+    private val webViewHostFactory: PluginWebViewHostFactory by lazy {
+        WebViewHostFactoryOverride.get() ?: RealPluginWebViewHostFactory(applicationContext)
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onDestroy() {
+        // Process is going away. Tear down every active token so
+        // the host's onPluginUnloaded fires for each. (The host
+        // also handles ServiceConnection.onServiceDisconnected as
+        // the authoritative crash path; this is a best-effort
+        // graceful cleanup.)
+        registry.all().forEach { coordinator ->
+            runCatching { coordinator.unload() }
+                .onFailure { Timber.tag(TAG).w(it, "graceful unload failed") }
+        }
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    private val binder = object : IPluginSandbox.Stub() {
+
+        override fun loadPlugin(
+            request: PluginLoadParcel,
+            callback: IPluginHostCallback,
+        ): Int {
+            validateParcel(request)
+            // Same-token re-load is a host bug ‚?" we treat it as
+            // CONCURRENT_LOAD_IN_PROGRESS to match the state-machine
+            // table's "loadPlugin while loading" row.
+            registry[request.sandboxToken]?.let { existing ->
+                Timber.tag(TAG).w(
+                    "loadPlugin token=%d already in state %s",
+                    request.sandboxToken, existing.state,
+                )
+                throw IllegalStateException(LoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS)
+            }
+
+            val host = webViewHostFactory.create(request)
+            val coordinator = PluginTokenCoordinator(
+                sandboxToken = request.sandboxToken,
+                pluginId = request.pluginId,
+                callback = adaptCallback(callback),
+                webViewHost = host,
+                parentScope = serviceScope,
+            )
+            registry.put(coordinator)
+            try {
+                coordinator.startLoad(request)
+            } catch (exc: Exception) {
+                // Load threw ‚?" coordinator never reaches READY; we
+                // drop it from the registry and rethrow over Binder.
+                registry.remove(request.sandboxToken)
+                runCatching { coordinator.unload() }
+                throw exc
+            }
+            return request.sandboxToken
+        }
+
+        override fun unloadPlugin(sandboxToken: Int) {
+            val coordinator = registry[sandboxToken]
+            if (coordinator == null) {
+                Timber.tag(TAG).w("unloadPlugin unknown token %d", sandboxToken)
+                return
+            }
+            // Run on the coordinator's own dispatch (well, just
+            // here on the Binder thread ‚?" unload is mostly state
+            // updates + a WebView destroy that the impl can
+            // marshal to main if needed).
+            coordinator.unload()
+            registry.remove(sandboxToken)
+            maybeWipeProcessWebViewState()
+        }
+
+        override fun dispatchHook(
+            sandboxToken: Int,
+            hook: String,
+            payloadJson: String,
+            callbackId: String,
+        ) {
+            val coordinator = registry[sandboxToken] ?: run {
+                Timber.tag(TAG).w("dispatchHook unknown token %d", sandboxToken)
+                return
+            }
+            coordinator.submitHook(hook, payloadJson, callbackId)
+        }
+
+        override fun deliverBridgeResult(
+            sandboxToken: Int,
+            callbackId: String,
+            resultJson: String,
+        ) {
+            val coordinator = registry[sandboxToken] ?: run {
+                Timber.tag(TAG).w("deliverBridgeResult unknown token %d", sandboxToken)
+                return
+            }
+            coordinator.submitBridgeResult(callbackId, resultJson)
+        }
+
+        override fun querySandboxState(sandboxToken: Int): String {
+            val coordinator = registry[sandboxToken]
+            return coordinator?.state?.wire ?: "unknown"
+        }
+    }
+
+    /**
+     * Validate [PluginLoadParcel] shape before instantiating a
+     * coordinator. Per Phase 10a v4 error semantics, throws
+     * [IllegalStateException] with a [LoadFailureCodes] code.
+     *
+     * Bundle hash re-verification + renderer support check happen
+     * inside the [PluginWebViewHost.startLoad] impl (where they
+     * have access to the actual file + the renderer registry).
+     */
+    private fun validateParcel(request: PluginLoadParcel) {
+        if (request.pluginId.isBlank() || request.bundleFilePath.isBlank() ||
+            request.bundleHashHex.isBlank()
+        ) {
+            throw IllegalStateException(LoadFailureCodes.PARCEL_MALFORMED)
+        }
+        if (request.diagnosticManifestJson.length > PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+            throw IllegalStateException(LoadFailureCodes.DIAGNOSTIC_FIELD_OVERSIZE)
+        }
+    }
+
+    /**
+     * Process-global WebView state wipe per Phase 10a v4: ONLY
+     * fired when zero tokens are in `READY`/`LOADING`. We don't
+     * actually call `WebStorage.deleteAllData()` /
+     * `CookieManager.removeAllCookies()` here in step 2 ‚?" those
+     * need the real WebView impl. Stub left as a hook.
+     */
+    private fun maybeWipeProcessWebViewState() {
+        if (registry.activeReadyOrLoadingCount() == 0) {
+            Timber.tag(TAG).i(
+                "no active plugins remain ‚?" WebView state wipe hook fires (step 5 impl)",
+            )
+            // step 5: WebStorage.getInstance().deleteAllData()
+            //         CookieManager.getInstance().removeAllCookies(null)
+        }
+    }
+
+    /**
+     * Adapt an incoming AIDL [IPluginHostCallback] (a binder proxy
+     * to the host process) into the plain Kotlin
+     * [PluginHostCallbackLocal] the coordinator uses. Keeps AIDL
+     * types out of the coordinator's signature so unit tests can
+     * substitute a fake without touching `android.os.Binder`.
+     *
+     * `RemoteException` from any callback method gets swallowed
+     * + logged ‚?" the host process may be dead, in which case our
+     * service's `onDestroy` will fire shortly and clean up.
+     */
+    private fun adaptCallback(callback: IPluginHostCallback): PluginHostCallbackLocal =
+        object : PluginHostCallbackLocal {
+            override fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String) {
+                runCatching { callback.bridgeCall(sandboxToken, method, argsJson, callbackId) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.bridgeCall failed") }
+            }
+            override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+                runCatching { callback.onWebViewError(sandboxToken, code, message) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onWebViewError failed") }
+            }
+            override fun onPluginReady(sandboxToken: Int) {
+                runCatching { callback.onPluginReady(sandboxToken) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginReady failed") }
+            }
+            override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+                runCatching { callback.onPluginCrashed(sandboxToken, reason) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginCrashed failed") }
+            }
+            override fun onPluginUnloaded(sandboxToken: Int) {
+                runCatching { callback.onPluginUnloaded(sandboxToken) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginUnloaded failed") }
+            }
+        }
+
+    companion object {
+        private const val TAG = "PluginSandbox"
+    }
+}
+
+/**
+ * Factory the service uses to mint [PluginWebViewHost] per load.
+ * Step 2 ships a no-op factory; step 5 will swap in the real
+ * `WebView`-touching impl.
+ */
+fun interface PluginWebViewHostFactory {
+    fun create(parcel: PluginLoadParcel): PluginWebViewHost
+}
+
+internal object NoopPluginWebViewHostFactory : PluginWebViewHostFactory {
+    override fun create(parcel: PluginLoadParcel): PluginWebViewHost =
+        NoopPluginWebViewHost
+}
+
+private object NoopPluginWebViewHost : PluginWebViewHost {
+    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+        // No-op ‚?" the real impl evaluates JS in a WebView. Tests
+        // substitute a recording double.
+    }
+
+    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        // No-op.
+    }
+
+    override fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        // No-op.
+    }
+
+    override fun destroy() {
+        // No-op.
+    }
+}
+
+/**
+ * Step 5 test hook: connectedAndroidTest sets a recording factory
+ * BEFORE binding the service so the e2e test can assert on
+ * sandbox-side behavior without instantiating a real WebView (the
+ * test harness can't always start a WebView on an emulator).
+ *
+ * Setting the override after the service has been instantiated has
+ * no effect ‚?" the factory is resolved on first use via the
+ * service's `lazy` delegate. Tests that need to swap mid-run
+ * should kill the `:plugin` process between scenarios.
+ */
+object WebViewHostFactoryOverride {
+    @Volatile
+    private var override: PluginWebViewHostFactory? = null
+
+    fun set(factory: PluginWebViewHostFactory?) {
+        override = factory
+    }
+
+    internal fun get(): PluginWebViewHostFactory? = override
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 357ms:
+package app.syncler.core.pluginaidl
+
+import android.os.Parcel
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Ignore
+import org.junit.Test
+
+/**
+ * Parcelable round-trip ‚?" host writes, sandbox reads via Parcel.
+ *
+ * Marked @Ignore because the parcel-round-trip needs an actual
+ * Android `Parcel` instance (host APIs are Android-only) ‚?" this
+ * test ships with the module so it can run under
+ * `connectedAndroidTest` in Phase 10b step 5, but unit-test
+ * scope on the JVM can't instantiate Parcel.
+ *
+ * Kept here as the contract assertion: any field reordering /
+ * removal MUST keep this test passing.
+ */
+class PluginLoadParcelTest {
+
+    private val sample = PluginLoadParcel(
+        sandboxToken = 42,
+        pluginId = "plugin-abc",
+        pluginIdentifier = "com.example.weather",
+        version = "1.2.3",
+        renderer = "script",
+        bundleFilePath = "/data/.../plugin-sandbox/plugin-abc_42/bundle.js",
+        bundleHashHex = "deadbeef".repeat(8),
+        declaredCapabilities = listOf("network", "storage"),
+        declaredEndpoints = listOf("https://example.com/*"),
+        dismissBehavior = "ack",
+        timeoutMillis = 5_000L,
+        diagnosticManifestJson = "{\"id\":\"plugin-abc\"}",
+    )
+
+    @Test
+    @Ignore("requires android.os.Parcel ‚?" runs under connectedAndroidTest in Phase 10b step 5")
+    fun roundTripPreservesEveryField() {
+        val parcel = Parcel.obtain()
+        try {
+            sample.writeToParcel(parcel, 0)
+            parcel.setDataPosition(0)
+            val restored = PluginLoadParcel.CREATOR.createFromParcel(parcel)
+            assertEquals(sample, restored)
+        } finally {
+            parcel.recycle()
+        }
+    }
+
+    @Test
+    fun diagnosticManifestCapIsAReasonableSize() {
+        // Sanity that the documented cap matches the constant.
+        assertEquals(64 * 1024, PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP)
+        assertTrue(PluginLoadParcel.WIRE_VERSION >= 1)
+    }
+}
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+I’m not running Gradle because the review instruction forbids mutation, and test tasks would write build outputs. The remaining question is whether there is a production blocker in the changed logic; so far I don’t see one.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt -Pattern "onPluginCrashed|onPluginUnloaded|unregisterBridge|lifecycleListeners"' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt -Pattern "instanceFactory.create|manifestJson: String|RegistryUnloadListener|diagnosticManifestJson|handleSandboxTerminated|registerLifecycleListener"' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path core/plugin-aidl/src/main/kotlin/app/syncler/core/pluginaidl/PluginLoadParcel.kt -Pattern "DIAGNOSTIC_MANIFEST_BYTES_CAP|diagnosticManifestJson.length|substring|writeString"' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt -Pattern "fun put|fun unload|fun handleSandboxTerminated|current.sandboxHandle|instances.remove"' in D:\Projects\syncler\android
+ succeeded in 412ms:
+
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:22: * via 
+[DIAGNOSTIC_MANIFEST_BYTES_CAP] and surfaces
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:47:        dest.writeString(pluginId)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:48:        
+dest.writeString(pluginIdentifier)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:49:        dest.writeString(version)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:50:        dest.writeString(renderer)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:51:        
+dest.writeString(bundleFilePath)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:52:        
+dest.writeString(bundleHashHex)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:53:        
+dest.writeStringList(declaredCapabilities)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:54:        
+dest.writeStringList(declaredEndpoints)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:55:        
+dest.writeString(dismissBehavior)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:60:        val safe = if 
+(diagnosticManifestJson.length > DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:61:            
+diagnosticManifestJson.substring(0, DIAGNOSTIC_MANIFEST_BYTES_CAP)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:65:        dest.writeString(safe)
+core\plugin-aidl\src\main\kotlin\app\syncler\core\pluginaidl\PluginLoadParcel.kt:83:        const val 
+DIAGNOSTIC_MANIFEST_BYTES_CAP = 64 * 1024
+
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 413ms:
+
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:75:                
+instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes, manifestJson)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:192:        manifestJson: String,
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:224:        manifestJson: String,
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:252:        
+bridgeDispatcher.registerLifecycleListener(
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:254:            
+RegistryUnloadListener(manifest.id, sandboxToken),
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:276:            
+diagnosticManifestJson = manifestJson.take(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP),
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:305:     * 
+[PluginRegistry.handleSandboxTerminated] keyed by
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:316:    private inner class 
+RegistryUnloadListener(
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:326:            
+PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:329:            
+PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 411ms:
+
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:8:    fun put(instance: 
+PluginInstance) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:28:    fun unload(pluginId: 
+String) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:29:        
+instances.remove(pluginId)?.destroy()
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:44:    fun 
+handleSandboxTerminated(pluginId: String, sandboxToken: Int) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:46:        if 
+(current.sandboxHandle?.sandboxToken != sandboxToken) return
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:48:        current.sandboxHandle 
+= null
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:49:        
+instances.remove(pluginId, current)
+
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 426ms:
+
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:27:    private 
+val lifecycleListeners = ConcurrentHashMap<Int, LifecycleListener>()
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:41:    fun 
+unregisterBridge(sandboxToken: Int) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:43:        
+lifecycleListeners.remove(sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:53:        
+lifecycleListeners[sandboxToken] = listener
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:78:        
+lifecycleListeners[sandboxToken]?.onWebViewError(code, message)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:82:        
+lifecycleListeners[sandboxToken]?.onPluginReady()
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:85:    override 
+suspend fun onPluginCrashed(sandboxToken: Int, reason: String) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:86:        
+lifecycleListeners[sandboxToken]?.onPluginCrashed(reason)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:87:        
+unregisterBridge(sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:90:    override 
+suspend fun onPluginUnloaded(sandboxToken: Int) {
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:91:        
+lifecycleListeners[sandboxToken]?.onPluginUnloaded()
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:92:        
+unregisterBridge(sandboxToken)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:98:        fun 
+onPluginCrashed(reason: String)
+feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:99:        fun 
+onPluginUnloaded()
+
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+GREEN.
+
+1. Fixups look correct.
+   `PluginRegistry.handleSandboxTerminated()` now fences removal by `sandboxToken`, nulls the matched handle, and uses conditional remove, so stale unload/crash callbacks cannot evict a newer instance: [PluginRegistry.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt:44).
+   `RegistryUnloadListener` now captures the token and routes crash/unload through that fenced path: [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:254), [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:326).
+   Real manifest JSON is threaded into the factory and diagnostic parcel field with the existing parcel-side cap still present: [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:75), [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:276), [PluginLoadParcel.kt](D:/Projects/syncler/android/core/plugin-aidl/src/main/kotlin/app/syncler/core/pluginaidl/PluginLoadParcel.kt:60).
+
+2. Nothing blocking before Phase 10b closes.
+   I did not rerun Gradle because review mode forbids mutation/write-producing tools; accepting the reported test status.
+
+3. Nothing new.
+   Only non-blocking residual: a focused regression test for stale old-token unload after reload would be useful, but the implementation itself is sound.
+tokens used
+39,131
+GREEN.
+
+1. Fixups look correct.
+   `PluginRegistry.handleSandboxTerminated()` now fences removal by `sandboxToken`, nulls the matched handle, and uses conditional remove, so stale unload/crash callbacks cannot evict a newer instance: [PluginRegistry.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginRegistry.kt:44).
+   `RegistryUnloadListener` now captures the token and routes crash/unload through that fenced path: [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:254), [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:326).
+   Real manifest JSON is threaded into the factory and diagnostic parcel field with the existing parcel-side cap still present: [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:75), [PluginLoader.kt](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt:276), [PluginLoadParcel.kt](D:/Projects/syncler/android/core/plugin-aidl/src/main/kotlin/app/syncler/core/pluginaidl/PluginLoadParcel.kt:60).
+
+2. Nothing blocking before Phase 10b closes.
+   I did not rerun Gradle because review mode forbids mutation/write-producing tools; accepting the reported test status.
+
+3. Nothing new.
+   Only non-blocking residual: a focused regression test for stale old-token unload after reload would be useful, but the implementation itself is sound.
