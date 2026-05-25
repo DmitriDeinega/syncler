@@ -1,0 +1,3675 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e5cbe-44c6-7210-b960-a6e5e89952fa
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — READ THIS BEFORE DOING ANYTHING ELSE
+
+You are in REVIEW MODE. Reply with text only. You are FORBIDDEN
+from any write/mutation tool (no git commit, no file writes,
+no shell mutation, no pip/npm install). You MAY read files,
+grep, and inspect git history read-only.
+=================================================================
+
+# Consultation 96 — Phase 7 code review (durable nonce-replay)
+
+Phase 7 plan reached dual-GREEN at consult 95. This consultation
+reviews the actual code.
+
+## Files changed
+
+### New / replaced
+
+- **`server/alembic/versions/0009_nonce_replay.py`** — migration
+  creates `nonce_replay` table. Composite PK
+  `(sender_id, nonce)`, FK `sender_id -> senders.id ON DELETE
+  CASCADE`, CHECK `octet_length(nonce) = 12`, index on
+  `seen_at`. Downgrade drops both.
+- **`server/app/models.py`** — new `NonceReplay` ORM class
+  matching the migration shape.
+- **`server/app/services/nonce_replay.py`** (NEW) — owns the
+  public surface:
+  - `record_nonce_or_reject(db, sender_id, nonce) -> bool` —
+    INSERT ON CONFLICT DO NOTHING. Returns True if newly
+    inserted (not a replay). Doc-string explains the
+    transactional coupling (insert lives in caller's session;
+    commits with `store_message` / `upsert_live_card`).
+  - `_cleanup_expired(db) -> int` — DELETE older than
+    `NONCE_REPLAY_TTL` (30 days).
+  - `cleanup_expired_with_lock(db) -> int` — wraps the cleanup
+    in `pg_try_advisory_lock` so multi-worker retention jobs
+    don't fight; returns -1 if lock contended.
+  - Best-effort on-write cleanup with 0.001 probability — every
+    ~1000 successful inserts also runs a DELETE.
+- **`server/app/crypto/nonce.py`** — `NonceRegistry`,
+  `get_global_registry`, `reset_global_registry` ALL DELETED.
+  Only `NONCE_BYTES` constant and `generate_nonce()` helper
+  remain. Module doc-string points at the new service.
+
+### Updated
+
+- **`server/app/routers/messages.py`** — `has() + mark()` pair
+  replaced with one `record_nonce_or_reject(...)` call BEFORE
+  `store_message`. The legacy "mark after store" pattern is
+  gone — the insert commits with `store_message`'s commit.
+- **`server/app/routers/cards.py`** — same change applied to
+  the upsert handler. Card-delete is OUT OF SCOPE per
+  consultation 95 (tracked as a separate security item — no
+  nonce / expiry / sequence on that envelope at all).
+- **`server/app/jobs/retention.py`** — `prune_expired` now also
+  calls `cleanup_expired_with_lock`. The summary dict gains a
+  `nonce_replay` count.
+- **`docs/crypto-spec.md §7`** — replaced the V1 LRU language
+  with the V1.5 durable registry description. Explicit call-out
+  that card-delete remains a replay gap.
+- **`docs/ROADMAP.md`** V1.5 #5 — marked shipped with the
+  durable-registry summary.
+
+### Tests
+
+- **`server/tests/test_nonce_replay.py`** (NEW) — 7 cases:
+  - `test_first_insert_returns_true`
+  - `test_replay_returns_false`
+  - `test_isolates_senders`
+  - `test_rejects_non_12_byte_nonce`
+  - `test_cleanup_removes_only_expired_rows` (manually backdates
+    seen_at via UPDATE to avoid waiting 30 days)
+  - `test_concurrent_inserts_via_separate_sessions` (Codex 95
+    missing-test — fires two `asyncio.gather`'d workers, each
+    in its own `AsyncSession` bound to the engine; asserts
+    exactly one returns True)
+  - `test_cleanup_with_advisory_lock_runs_once`
+- **`server/tests/test_crypto.py`** —
+  `test_nonce_registry_detects_replay_and_isolates_senders`
+  replaced with a tiny `test_generate_nonce_yields_12_bytes`
+  since the legacy registry is gone.
+- **`server/tests/test_messages.py`** + **`server/tests/test_phase3.py`**
+  — `_reset_nonce_registry` autouse fixtures removed (the test
+  DB fixture in conftest handles per-test isolation; each test
+  uses distinct nonces / senders anyway). The existing
+  `test_send_rejects_replayed_nonce` exercises the full
+  POST→DB→POST→409 path against the new registry.
+
+## Transactional lifecycle (Codex 95 concern)
+
+The session lifecycle in `app/db.py:get_db()` is `async with
+session_factory() as session: yield session`. SQLAlchemy
+`AsyncSession.__aexit__` calls `close()` which rolls back any
+uncommitted pending writes. `store_message` calls
+`await db.commit()` at the end of its happy path. So:
+
+- Replay attempt → `record_nonce_or_reject` returns False →
+  handler 409s → session close rolls back the no-op (no row
+  was inserted).
+- Newly recorded nonce → `record_nonce_or_reject` returns True
+  → `store_message` validates → validation raises (e.g.
+  `PairingMissingError`) → exception bubbles out → session
+  close rolls back the pending nonce insert. Sender can retry.
+- Newly recorded nonce → `store_message` reaches its
+  `await db.commit()` → both nonce row AND message row commit
+  atomically.
+
+The same applies to cards.py / `upsert_live_card`.
+
+## Open questions
+
+1. **Cards-delete replay gap.** Codex 95 flagged this as worse
+   than upsert (no nonce, no expiry, no sequence). Tracked as
+   backlog item, NOT fixed in Phase 7. Confirm this is the
+   right scoping decision and not a release-blocker.
+
+2. **On-write cleanup probability.** 1/1000 = ~one DELETE per
+   1k message+card writes. Idle deployments rely on
+   `app/jobs/retention.py`. Acceptable?
+
+3. **Advisory lock key.** `0x4E4F4E43455F524C` (b'NONCE_RL').
+   Arbitrary 64-bit constant. Any collision risk with other
+   advisory locks in the codebase, present or planned?
+
+4. **Test DB metadata vs alembic parity.** `test_migration.py`
+   asserts `alembic_tables == Base.metadata.tables`. The new
+   `NonceReplay` model + the new migration both add the same
+   table — should pass. Did not run pytest in this dev env
+   (Postgres isn't running here), so this is unverified. Flag
+   if you spot an obvious metadata/migration mismatch.
+
+## Output
+
+Per reviewer, per file area (model + migration, service, routers,
+retention, docs, tests):
+1. GREEN / YELLOW / RED.
+2. Anything missing from the consult 95 plan.
+3. Anything new (security, footgun, performance).
+4. Commit-readiness vote.
+
+Reply text only. Do NOT call any write/mutation tool.
+
+codex
+I’ll stay in review mode and only inspect files/history read-only. I’m going to compare the migration, model, service, router transaction flow, retention hook, docs, and tests against the described behavior.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff -- server/alembic/versions/0009_nonce_replay.py server/app/models.py server/app/services/nonce_replay.py server/app/crypto/nonce.py server/app/routers/messages.py server/app/routers/cards.py server/app/jobs/retention.py docs/crypto-spec.md docs/ROADMAP.md server/tests/test_nonce_replay.py server/tests/test_crypto.py server/tests/test_messages.py server/tests/test_phase3.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path server/app,server/alembic/versions,server/tests,docs -Recurse -File | Select-Object -ExpandProperty FullName' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+ succeeded in 274ms:
+ M docs/ROADMAP.md
+ M docs/crypto-spec.md
+ M server/app/crypto/nonce.py
+ M server/app/jobs/retention.py
+ M server/app/models.py
+ M server/app/routers/cards.py
+ M server/app/routers/messages.py
+ M server/tests/test_crypto.py
+ M server/tests/test_messages.py
+ M server/tests/test_phase3.py
+?? .triad/95-codex-log.txt
+?? .triad/95-codex.txt
+?? .triad/95-gemini-log.txt
+?? .triad/95-phase7-plan-prompt.md
+?? .triad/96-codex-log.txt
+?? .triad/96-gemini-log.txt
+?? .triad/96-phase7-review-prompt.md
+?? server/alembic/versions/0009_nonce_replay.py
+?? server/app/services/nonce_replay.py
+?? server/tests/test_nonce_replay.py
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 307ms:
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index fbf690b..7c2b94a 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -21,7 +21,7 @@ This file is the public roadmap. Internal implementation phases (Phase 0 / 1 / 2
+ 2. **Native Kotlin plugin runtime (out-of-process).** A second plugin format alongside the JS bundle: a signed AAR loaded into the isolated process. Performance + platform-API parity for plugin authors who want a native experience, with the IPC boundary preventing in-process ClassLoader poisoning.
+ 3. **Master-key rotation.** UX + protocol for rotating the user's 32-byte master key without losing access to historical state. Required before per-device encryption (#4) lands.
+ 4. **Per-device envelope encryption.** Senders encrypt the payload separately for each of the user's enrolled devices, keyed by per-device public keys instead of the shared user master key. Enables forward secrecy and immediate per-device revocation without rotating user-wide keys.
+-5. **Durable nonce-replay protection.** Move the per-sender nonce registry from in-memory to Postgres so a worker restart can't accept a replayed envelope.
++5. ~~**Durable nonce-replay protection.**~~ **Shipped.** Per-sender nonce registry moved from in-memory LRU to a Postgres `nonce_replay` table (composite PK on `(sender_id, nonce)`, atomic INSERT ON CONFLICT DO NOTHING). The replay row commits transactionally with `store_message` / `upsert_live_card` so a failed downstream write rolls back the nonce burn and the sender can retry. Retention pruning (30 days, matching `MAX_RETENTION`) runs hybrid: best-effort on-write batch plus a periodic pass in `app/jobs/retention.py` under a Postgres advisory lock for multi-worker safety. Card-upsert scoped in (defense-in-depth on top of sequence-number CAS). Spec: `docs/crypto-spec.md §7`. Shipped in Phase 7.
+ 
+ ## V1.5 — Developer experience (shipped)
+ 
+diff --git a/docs/crypto-spec.md b/docs/crypto-spec.md
+index 8c9244c..f272c16 100644
+--- a/docs/crypto-spec.md
++++ b/docs/crypto-spec.md
+@@ -215,7 +215,9 @@ public_key = private_key.public_key().public_bytes(
+ 
+ Never reuse an AES-GCM nonce with the same key. Clients must generate 12-byte nonces with a CSPRNG.
+ 
+-The V1 server performs a per-sender in-memory LRU replay check for the last 100,000 nonces. This protects the current server process only. A Redis or database-backed replay check is planned for V1.5.
++The V1.5 server enforces replay protection via a durable per-sender registry backed by the `nonce_replay` Postgres table (composite PK on `(sender_id, nonce)`, atomic INSERT ON CONFLICT DO NOTHING). The previous V1 in-memory LRU registry was process-local and lost state on worker restart; the durable registry survives restarts and synchronizes across multiple uvicorn workers. Rows are pruned by `app/jobs/retention.py` after 30 days (matching the upper bound on accepted envelope lifetime — envelopes older than that already fail the `expires_at` check at the service layer, so the registry can safely forget them).
++
++The same registry is shared by `POST /v1/messages/send` and `POST /v1/cards/upsert`. Cards-upsert was scoped in even though sequence-number CAS already mitigates most replay scenarios — defense-in-depth against resurrecting deleted cards with an old sequence. **The card delete envelope (`POST /v1/cards/delete`) does not currently carry a nonce or expiry**, so a captured delete can be replayed indefinitely against a current card with the same `(sender_id, user_id, card_key)`; this gap is tracked separately as a V2 follow-up.
+ 
+ ## 8. Live Cards (Phase 3b)
+ 
+diff --git a/server/app/crypto/nonce.py b/server/app/crypto/nonce.py
+index 5001661..6194a3b 100644
+--- a/server/app/crypto/nonce.py
++++ b/server/app/crypto/nonce.py
+@@ -1,88 +1,25 @@
+-"""Nonce generation and in-memory replay detection."""
++"""Nonce generation.
++
++Phase 7 — the durable nonce-replay registry lives in
++`server/app/services/nonce_replay.py` (Postgres-backed,
++multi-worker-safe). The previous in-memory `NonceRegistry`
++implementation was removed because it lost state on worker restart
++and didn't synchronize across multiple uvicorn workers.
++
++This module now only owns the constants and the random-nonce
++generator. Callers that need replay detection use
++`services.nonce_replay.record_nonce_or_reject`.
++"""
+ 
+ from __future__ import annotations
+ 
+ import secrets
+-from collections import OrderedDict, defaultdict
+ from typing import Final
+ 
+ NONCE_BYTES: Final[int] = 12
+-NONCE_REGISTRY_WINDOW: Final[int] = 100_000
+ 
+ 
+ def generate_nonce() -> bytes:
+     """Generate a 96-bit AES-GCM nonce."""
+ 
+     return secrets.token_bytes(NONCE_BYTES)
+-
+-
+-class NonceRegistry:
+-    """Per-sender LRU replay detector for recently seen nonces."""
+-
+-    def __init__(self, window: int = NONCE_REGISTRY_WINDOW) -> None:
+-        if window <= 0:
+-            raise ValueError("window must be positive")
+-        self._window = window
+-        self._nonces_by_sender: defaultdict[bytes, OrderedDict[bytes, None]] = defaultdict(OrderedDict)
+-
+-    def seen(self, sender_id: bytes, nonce: bytes) -> bool:
+-        """Return True if the nonce was already seen, and mark it as seen otherwise.
+-
+-        Legacy API. Prefer ``has()`` + ``mark()`` for code paths that need
+-        atomic check-then-store coupled to durable commit success.
+-        """
+-
+-        if len(nonce) != NONCE_BYTES:
+-            raise ValueError("nonce must be 12 bytes")
+-
+-        sender_nonces = self._nonces_by_sender[sender_id]
+-        if nonce in sender_nonces:
+-            sender_nonces.move_to_end(nonce)
+-            return True
+-
+-        sender_nonces[nonce] = None
+-        if len(sender_nonces) > self._window:
+-            sender_nonces.popitem(last=False)
+-        return False
+-
+-    def has(self, sender_id: bytes, nonce: bytes) -> bool:
+-        """Return True if the nonce was previously marked seen for this sender."""
+-
+-        if len(nonce) != NONCE_BYTES:
+-            raise ValueError("nonce must be 12 bytes")
+-        sender_nonces = self._nonces_by_sender.get(sender_id)
+-        return sender_nonces is not None and nonce in sender_nonces
+-
+-    def mark(self, sender_id: bytes, nonce: bytes) -> None:
+-        """Record the nonce as seen for this sender."""
+-
+-        if len(nonce) != NONCE_BYTES:
+-            raise ValueError("nonce must be 12 bytes")
+-        sender_nonces = self._nonces_by_sender[sender_id]
+-        sender_nonces[nonce] = None
+-        sender_nonces.move_to_end(nonce)
+-        if len(sender_nonces) > self._window:
+-            sender_nonces.popitem(last=False)
+-
+-
+-_global_registry: NonceRegistry | None = None
+-
+-
+-def get_global_registry() -> NonceRegistry:
+-    """Process-wide nonce registry.
+-
+-    V1 is process-local; M11 / V1.5 migrates to a DB-backed registry so
+-    multi-worker deployments share state and replay protection survives
+-    restarts.
+-    """
+-    global _global_registry
+-    if _global_registry is None:
+-        _global_registry = NonceRegistry()
+-    return _global_registry
+-
+-
+-def reset_global_registry() -> None:
+-    """Test helper — drop the global registry."""
+-    global _global_registry
+-    _global_registry = None
+-
+diff --git a/server/app/jobs/retention.py b/server/app/jobs/retention.py
+index c7c8ffe..0f853b8 100644
+--- a/server/app/jobs/retention.py
++++ b/server/app/jobs/retention.py
+@@ -6,7 +6,11 @@ from sqlalchemy import delete
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.db import dispose_engine, get_db, init_engine
+-from app.models import LiveCard, Message, Pairing, RateLimitEvent
++from app.models import LiveCard, Message, NonceReplay, Pairing, RateLimitEvent
++from app.services.nonce_replay import (
++    NONCE_REPLAY_TTL,
++    cleanup_expired_with_lock,
++)
+ 
+ 
+ async def prune_expired(session: AsyncSession) -> dict[str, int]:
+@@ -23,6 +27,11 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
+     rate_limit_events = await session.execute(
+         delete(RateLimitEvent).where(RateLimitEvent.window_start < now - timedelta(days=7))
+     )
++    # Phase 7: durable nonce-replay registry cleanup. Uses a Postgres
++    # advisory lock so multi-worker deployments don't all run the same
++    # DELETE concurrently. Returns -1 if another worker held the lock
++    # (no-op for this invocation); we surface that as 0 in the summary.
++    nonce_replay = await cleanup_expired_with_lock(session)
+     await session.commit()
+ 
+     return {
+@@ -30,6 +39,7 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
+         "live_cards": live_cards.rowcount or 0,
+         "pairings": pairings.rowcount or 0,
+         "rate_limit_events": rate_limit_events.rowcount or 0,
++        "nonce_replay": max(nonce_replay, 0),
+     }
+ 
+ 
+diff --git a/server/app/models.py b/server/app/models.py
+index 21ceb9e..ef59751 100644
+--- a/server/app/models.py
++++ b/server/app/models.py
+@@ -271,6 +271,44 @@ class PendingPairing(Base):
+     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+ 
+ 
++class NonceReplay(Base):
++    """Phase 7 — durable per-sender nonce-replay registry.
++
++    Each row records one (sender_id, nonce) pair that has been
++    successfully envelope-decrypted. Insertion uses INSERT ON
++    CONFLICT DO NOTHING on the composite PK so concurrent workers
++    racing the same nonce will see exactly one accept and N-1
++    rejections.
++
++    Replaces the legacy in-memory NonceRegistry (server/app/crypto/nonce.py),
++    which lost state on worker restart and did not synchronize
++    across multiple uvicorn workers.
++
++    Retention: rows are pruned after `MAX_RETENTION` (30 days) since
++    `seen_at`; envelopes older than that would already be rejected
++    by the message-expiry / card-expiry checks, so the replay
++    registry can safely forget them. See
++    `server/app/jobs/retention.py` for the periodic cleanup task
++    and `server/app/services/nonce_replay.py` for the best-effort
++    on-write cleanup.
++    """
++
++    __tablename__ = "nonce_replay"
++
++    sender_id: Mapped[UUID] = mapped_column(
++        UUID_TYPE,
++        ForeignKey("senders.id", ondelete="CASCADE"),
++        primary_key=True,
++    )
++    nonce: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
++    seen_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True),
++        nullable=False,
++        server_default=func.now(),
++        index=True,
++    )
++
++
+ class RateLimitEvent(Base):
+     __tablename__ = "rate_limit_events"
+     __table_args__ = (
+diff --git a/server/app/routers/cards.py b/server/app/routers/cards.py
+index 8296838..b01cd29 100644
+--- a/server/app/routers/cards.py
++++ b/server/app/routers/cards.py
+@@ -29,6 +29,7 @@ from app.services.cards import (
+     upsert_live_card,
+ )
+ from app.services.events import get_event_bus
++from app.services.nonce_replay import record_nonce_or_reject
+ from app.services.senders import (
+     SenderNotFoundError,
+     SenderRevokedError,
+@@ -94,6 +95,16 @@ async def upsert(
+     from app.middleware.rate_limit_config import RATE_LIMITS
+     await check_rate_limit(db, request, RATE_LIMITS["card_upsert"])
+ 
++    # Phase 7: replay protection for live-card upserts. Sequence-number
++    # CAS in upsert_live_card defends against most replay scenarios, but
++    # nothing prevents resurrecting a card with an older sequence after
++    # the current row is deleted. The shared nonce registry closes that
++    # gap. Same transactional semantics as messages.py — the insert
++    # commits with upsert_live_card's commit, or rolls back together.
++    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
++    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
++        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
++
+     try:
+         card = await upsert_live_card(
+             db,
+@@ -102,7 +113,7 @@ async def upsert(
+             plugin_id=payload.plugin_id,
+             card_key=payload.card_key,
+             encrypted_payload=decode_base64(payload.encrypted_payload, field_name="encrypted_payload", minimum=16),
+-            nonce=decode_base64(payload.nonce, field_name="nonce", exact=12),
++            nonce=nonce_bytes,
+             sequence_number=payload.sequence_number,
+             expires_at=payload.expires_at,
+         )
+diff --git a/server/app/routers/messages.py b/server/app/routers/messages.py
+index a057832..dbbeac5 100644
+--- a/server/app/routers/messages.py
++++ b/server/app/routers/messages.py
+@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.auth import AuthContext, current_auth_context
+ from app.crypto.aead import assemble_envelope
+-from app.crypto.nonce import get_global_registry
++from app.services.nonce_replay import record_nonce_or_reject
+ from app.crypto.signatures import verify_message_envelope
+ from app.db import get_db
+ from app.middleware.rate_limit import rate_limit
+@@ -112,13 +112,12 @@ async def send_message(
+     await check_rate_limit(db, request, RATE_LIMITS["message_send_user_hour"])
+ 
+     # Replay check AFTER signature verification (so attackers can't OOM the
+-    # nonce registry by spamming junk). We check first to short-circuit,
+-    # then re-mark after successful store_message so failed stores don't
+-    # burn the nonce.
++    # nonce table by spamming junk envelopes). Phase 7: durable
++    # Postgres-backed registry. The insert lives in the same session as
++    # store_message — they commit together atomically, so a failed
++    # store_message rolls back the nonce burn and the sender can retry.
+     nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+-    registry = get_global_registry()
+-    sender_key = str(payload.sender_id).encode("utf-8")
+-    if registry.has(sender_key, nonce_bytes):
++    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+ 
+     try:
+@@ -144,10 +143,6 @@ async def send_message(
+     except NonceReplayError as exc:
+         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
+ 
+-    # Mark nonce as seen ONLY after store_message succeeds; failed stores
+-    # don't burn the nonce.
+-    registry.mark(sender_key, nonce_bytes)
+-
+     await push_message_to_user_devices(db, message=message)
+     # SSE hint: nudge any device the recipient has in foreground to pull
+     # /v1/messages/inbox now. Devices in background rely on the FCM
+diff --git a/server/tests/test_crypto.py b/server/tests/test_crypto.py
+index 3ec14b4..5d1412e 100644
+--- a/server/tests/test_crypto.py
++++ b/server/tests/test_crypto.py
+@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+ from app.crypto.aead import assemble_aad, assemble_envelope, decrypt_message_body
+ from app.crypto.argon2 import ARGON2_PARAMS_V1, params_for_version, verify_auth_key_hash
+ from app.crypto.hkdf import derive_pairing_key
+-from app.crypto.nonce import NonceRegistry, generate_nonce
++from app.crypto.nonce import generate_nonce
+ from app.crypto.signatures import canonical_manifest_for_signing, verify_message_envelope, verify_plugin_bundle
+ from app.crypto.wire import pack_message, unpack_message
+ 
+@@ -205,18 +205,13 @@ def test_assemble_envelope_canonical_and_validation() -> None:
+         assemble_envelope(ENVELOPE_FIELDS | {"unrelated": "x"})
+ 
+ 
+-def test_nonce_registry_detects_replay_and_isolates_senders() -> None:
+-    registry = NonceRegistry(window=2)
++def test_generate_nonce_yields_12_bytes() -> None:
++    # Phase 7: the in-memory NonceRegistry was deleted (durable replay
++    # detection now lives in app.services.nonce_replay against
++    # Postgres). The integration tests for the DB-backed flow live in
++    # `test_nonce_replay.py`.
+     nonce = generate_nonce()
+-
+     assert len(nonce) == 12
+-    assert not registry.seen(b"sender-a", nonce)
+-    assert registry.seen(b"sender-a", nonce)
+-    assert not registry.seen(b"sender-b", nonce)
+-
+-    assert not registry.seen(b"sender-a", b"111111111111")
+-    assert not registry.seen(b"sender-a", b"222222222222")
+-    assert not registry.seen(b"sender-a", nonce)
+ 
+ 
+ def test_wire_pack_unpack_round_trip() -> None:
+diff --git a/server/tests/test_messages.py b/server/tests/test_messages.py
+index 9726559..4da1425 100644
+--- a/server/tests/test_messages.py
++++ b/server/tests/test_messages.py
+@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+ from httpx import AsyncClient
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+-from app.crypto.nonce import reset_global_registry
+ from app.models import Pairing, Plugin
+ 
+ 
+@@ -29,11 +28,10 @@ def _iso(dt: datetime) -> str:
+     return dt.isoformat().replace("+00:00", "Z")
+ 
+ 
+-@pytest.fixture(autouse=True)
+-def _reset_nonce_registry():
+-    reset_global_registry()
+-    yield
+-    reset_global_registry()
++# Phase 7: the in-memory nonce registry was removed; replay detection
++# now uses the durable `nonce_replay` table. The test DB is recreated
++# per test session via conftest, and individual tests use distinct
++# senders / nonces, so no autouse reset fixture is needed.
+ 
+ 
+ async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com") -> tuple[uuid.UUID, str]:
+diff --git a/server/tests/test_phase3.py b/server/tests/test_phase3.py
+index 9852e3f..1152422 100644
+--- a/server/tests/test_phase3.py
++++ b/server/tests/test_phase3.py
+@@ -25,7 +25,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+ from httpx import AsyncClient
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+-from app.crypto.nonce import reset_global_registry
+ from app.models import LiveCard, Pairing, Plugin
+ 
+ 
+@@ -45,11 +44,9 @@ def _iso(dt: datetime) -> str:
+     return dt.isoformat().replace("+00:00", "Z")
+ 
+ 
+-@pytest.fixture(autouse=True)
+-def _reset_nonce_registry():
+-    reset_global_registry()
+-    yield
+-    reset_global_registry()
++# Phase 7: in-memory nonce registry deleted; replay detection now
++# uses the durable nonce_replay table. See test_messages.py for the
++# rationale on removing the autouse reset fixture.
+ 
+ 
+ # ---------- shared bootstrap helpers ------------------------------------
+warning: in the working copy of 'docs/ROADMAP.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/app/crypto/nonce.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/tests/test_crypto.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/tests/test_messages.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/tests/test_phase3.py', LF will be replaced by CRLF the next time Git touches it
+
+ succeeded in 371ms:
+D:\Projects\syncler\server\app\auth.py
+D:\Projects\syncler\server\app\config.py
+D:\Projects\syncler\server\app\db.py
+D:\Projects\syncler\server\app\main.py
+D:\Projects\syncler\server\app\models.py
+D:\Projects\syncler\server\app\schemas.py
+D:\Projects\syncler\server\app\__init__.py
+D:\Projects\syncler\server\app\crypto\aead.py
+D:\Projects\syncler\server\app\crypto\argon2.py
+D:\Projects\syncler\server\app\crypto\hkdf.py
+D:\Projects\syncler\server\app\crypto\nonce.py
+D:\Projects\syncler\server\app\crypto\signatures.py
+D:\Projects\syncler\server\app\crypto\wire.py
+D:\Projects\syncler\server\app\crypto\__init__.py
+D:\Projects\syncler\server\app\crypto\__pycache__\aead.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\aead.cpython-312.pyc.1256913378912
+D:\Projects\syncler\server\app\crypto\__pycache__\aead.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\aead.cpython-312.pyc.2077454425472
+D:\Projects\syncler\server\app\crypto\__pycache__\aead.cpython-314.pyc.2772660452384
+D:\Projects\syncler\server\app\crypto\__pycache__\argon2.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\argon2.cpython-312.pyc.1256913824176
+D:\Projects\syncler\server\app\crypto\__pycache__\argon2.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\argon2.cpython-312.pyc.2077463178544
+D:\Projects\syncler\server\app\crypto\__pycache__\argon2.cpython-314.pyc.2772661243568
+D:\Projects\syncler\server\app\crypto\__pycache__\hkdf.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\hkdf.cpython-312.pyc.1256913380144
+D:\Projects\syncler\server\app\crypto\__pycache__\hkdf.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\hkdf.cpython-312.pyc.2077454426704
+D:\Projects\syncler\server\app\crypto\__pycache__\hkdf.cpython-314.pyc.2772661373280
+D:\Projects\syncler\server\app\crypto\__pycache__\nonce.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\nonce.cpython-312.pyc.1256913380368
+D:\Projects\syncler\server\app\crypto\__pycache__\nonce.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\nonce.cpython-312.pyc.2077454426928
+D:\Projects\syncler\server\app\crypto\__pycache__\signatures.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\signatures.cpython-312.pyc.1256913827632
+D:\Projects\syncler\server\app\crypto\__pycache__\signatures.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\signatures.cpython-312.pyc.2077463170992
+D:\Projects\syncler\server\app\crypto\__pycache__\signatures.cpython-314.pyc.2772661246256
+D:\Projects\syncler\server\app\crypto\__pycache__\wire.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\wire.cpython-312.pyc.1256913380368
+D:\Projects\syncler\server\app\crypto\__pycache__\wire.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\wire.cpython-312.pyc.2077454426928
+D:\Projects\syncler\server\app\crypto\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\app\crypto\__pycache__\__init__.cpython-312.pyc.1256913818288
+D:\Projects\syncler\server\app\crypto\__pycache__\__init__.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\app\crypto\__pycache__\__init__.cpython-312.pyc.2077462921904
+D:\Projects\syncler\server\app\crypto\__pycache__\__init__.cpython-314.pyc.2772661242928
+D:\Projects\syncler\server\app\jobs\retention.py
+D:\Projects\syncler\server\app\jobs\__init__.py
+D:\Projects\syncler\server\app\jobs\__pycache__\retention.cpython-312.pyc
+D:\Projects\syncler\server\app\jobs\__pycache__\retention.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\jobs\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\app\jobs\__pycache__\__init__.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\middleware\rate_limit.py
+D:\Projects\syncler\server\app\middleware\rate_limit_config.py
+D:\Projects\syncler\server\app\middleware\__init__.py
+D:\Projects\syncler\server\app\middleware\__pycache__\rate_limit.cpython-312.pyc
+D:\Projects\syncler\server\app\middleware\__pycache__\rate_limit.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\middleware\__pycache__\rate_limit_config.cpython-312.pyc
+D:\Projects\syncler\server\app\middleware\__pycache__\rate_limit_config.cpython-312.pyc.2029808661344
+D:\Projects\syncler\server\app\middleware\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\app\middleware\__pycache__\__init__.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\routers\auth.py
+D:\Projects\syncler\server\app\routers\cards.py
+D:\Projects\syncler\server\app\routers\devices.py
+D:\Projects\syncler\server\app\routers\events.py
+D:\Projects\syncler\server\app\routers\messages.py
+D:\Projects\syncler\server\app\routers\pairing.py
+D:\Projects\syncler\server\app\routers\plugins.py
+D:\Projects\syncler\server\app\routers\senders.py
+D:\Projects\syncler\server\app\routers\state.py
+D:\Projects\syncler\server\app\routers\__init__.py
+D:\Projects\syncler\server\app\routers\__pycache__\auth.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\auth.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\routers\__pycache__\auth.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\routers\__pycache__\cards.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\devices.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\devices.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\routers\__pycache__\devices.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\routers\__pycache__\events.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\messages.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\messages.cpython-312.pyc.1672399251376
+D:\Projects\syncler\server\app\routers\__pycache__\pairing.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\plugins.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\senders.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\state.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\app\routers\__pycache__\__init__.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\routers\__pycache__\__init__.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\services\cards.py
+D:\Projects\syncler\server\app\services\devices.py
+D:\Projects\syncler\server\app\services\events.py
+D:\Projects\syncler\server\app\services\messages.py
+D:\Projects\syncler\server\app\services\nonce_replay.py
+D:\Projects\syncler\server\app\services\pairing.py
+D:\Projects\syncler\server\app\services\plugins.py
+D:\Projects\syncler\server\app\services\push.py
+D:\Projects\syncler\server\app\services\senders.py
+D:\Projects\syncler\server\app\services\state.py
+D:\Projects\syncler\server\app\services\users.py
+D:\Projects\syncler\server\app\services\__init__.py
+D:\Projects\syncler\server\app\services\__pycache__\cards.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\devices.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\devices.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\services\__pycache__\devices.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\services\__pycache__\events.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\messages.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\nonce_replay.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\pairing.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\plugins.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\push.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\senders.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\state.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\users.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\users.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\services\__pycache__\users.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\services\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\app\services\__pycache__\__init__.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\services\__pycache__\__init__.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\__pycache__\auth.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\auth.cpython-312.pyc.2029809001824
+D:\Projects\syncler\server\app\__pycache__\auth.cpython-312.pyc.2950668051168
+D:\Projects\syncler\server\app\__pycache__\config.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\config.cpython-312.pyc.2029809001824
+D:\Projects\syncler\server\app\__pycache__\config.cpython-312.pyc.2325781700704
+D:\Projects\syncler\server\app\__pycache__\config.cpython-312.pyc.2950668051168
+D:\Projects\syncler\server\app\__pycache__\db.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\db.cpython-312.pyc.2029809001824
+D:\Projects\syncler\server\app\__pycache__\db.cpython-312.pyc.2180670221520
+D:\Projects\syncler\server\app\__pycache__\db.cpython-312.pyc.2325781700704
+D:\Projects\syncler\server\app\__pycache__\db.cpython-312.pyc.2360082553792
+D:\Projects\syncler\server\app\__pycache__\db.cpython-312.pyc.2950668051168
+D:\Projects\syncler\server\app\__pycache__\main.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\main.cpython-312.pyc.2029809001824
+D:\Projects\syncler\server\app\__pycache__\main.cpython-312.pyc.2180647081600
+D:\Projects\syncler\server\app\__pycache__\main.cpython-312.pyc.2325781700704
+D:\Projects\syncler\server\app\__pycache__\main.cpython-312.pyc.2360076059904
+D:\Projects\syncler\server\app\__pycache__\main.cpython-312.pyc.2950668051168
+D:\Projects\syncler\server\app\__pycache__\models.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\models.cpython-312.pyc.2029809001824
+D:\Projects\syncler\server\app\__pycache__\models.cpython-312.pyc.2325781700704
+D:\Projects\syncler\server\app\__pycache__\models.cpython-312.pyc.2950668051168
+D:\Projects\syncler\server\app\__pycache__\schemas.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\schemas.cpython-312.pyc.2029809155760
+D:\Projects\syncler\server\app\__pycache__\schemas.cpython-312.pyc.2950668051168
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.1256913378688
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.2077454425248
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.2180647081712
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.2325779216016
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.2360076060016
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\app\__pycache__\__init__.cpython-314.pyc.2772660452160
+D:\Projects\syncler\server\alembic\versions\0001_initial_schema.py
+D:\Projects\syncler\server\alembic\versions\0002_pending_pairings.py
+D:\Projects\syncler\server\alembic\versions\0003_pairing_partial_unique.py
+D:\Projects\syncler\server\alembic\versions\0004_plugin_identifier.py
+D:\Projects\syncler\server\alembic\versions\0005_plugin_revocation_reason.py
+D:\Projects\syncler\server\alembic\versions\0006_plugin_renderer_template.py
+D:\Projects\syncler\server\alembic\versions\0007_live_cards.py
+D:\Projects\syncler\server\alembic\versions\0008_sender_bootstrap_key_and_pending_pairing_broker.py
+D:\Projects\syncler\server\alembic\versions\0009_nonce_replay.py
+D:\Projects\syncler\server\alembic\versions\__pycache__\0001_initial_schema.cpython-312.pyc
+D:\Projects\syncler\server\alembic\versions\__pycache__\0001_initial_schema.cpython-312.pyc.2325779264464
+D:\Projects\syncler\server\alembic\versions\__pycache__\0002_pending_pairings.cpython-312.pyc
+D:\Projects\syncler\server\alembic\versions\__pycache__\0003_pairing_partial_unique.cpython-312.pyc
+D:\Projects\syncler\server\alembic\versions\__pycache__\0004_plugin_identifier.cpython-312.pyc
+D:\Projects\syncler\server\alembic\versions\__pycache__\0005_plugin_revocation_reason.cpython-312.pyc
+D:\Projects\syncler\server\tests\conftest.py
+D:\Projects\syncler\server\tests\test_auth.py
+D:\Projects\syncler\server\tests\test_crypto.py
+D:\Projects\syncler\server\tests\test_db.py
+D:\Projects\syncler\server\tests\test_devices.py
+D:\Projects\syncler\server\tests\test_events.py
+D:\Projects\syncler\server\tests\test_health.py
+D:\Projects\syncler\server\tests\test_integration_auth_devices.py
+D:\Projects\syncler\server\tests\test_integration_rate_limit.py
+D:\Projects\syncler\server\tests\test_integration_retention.py
+D:\Projects\syncler\server\tests\test_messages.py
+D:\Projects\syncler\server\tests\test_migration.py
+D:\Projects\syncler\server\tests\test_nonce_replay.py
+D:\Projects\syncler\server\tests\test_pairing.py
+D:\Projects\syncler\server\tests\test_phase3.py
+D:\Projects\syncler\server\tests\test_phase5d_validators.py
+D:\Projects\syncler\server\tests\test_phase5_bootstrap.py
+D:\Projects\syncler\server\tests\test_plugins.py
+D:\Projects\syncler\server\tests\test_rate_limit.py
+D:\Projects\syncler\server\tests\test_retention.py
+D:\Projects\syncler\server\tests\test_state.py
+D:\Projects\syncler\server\tests\__init__.py
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.11780
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.12268
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.1732
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.22516
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.27324
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.28496
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.28976
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-8.4.2.pyc.8868
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312-pytest-9.0.3.pyc.26616
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-312.pyc.1396489532496
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.10280
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.11864
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.16664
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.22852
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.25676
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.26056
+D:\Projects\syncler\server\tests\__pycache__\conftest.cpython-314-pytest-9.0.3.pyc.6712
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312-pytest-8.4.2.pyc.10132
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312-pytest-8.4.2.pyc.25624
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312-pytest-8.4.2.pyc.2768
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312-pytest-8.4.2.pyc.37000
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312-pytest-8.4.2.pyc.40568
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\test_auth.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\tests\__pycache__\test_crypto.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_crypto.cpython-312-pytest-8.4.2.pyc.21956
+D:\Projects\syncler\server\tests\__pycache__\test_crypto.cpython-312-pytest-8.4.2.pyc.23176
+D:\Projects\syncler\server\tests\__pycache__\test_crypto.cpython-312.pyc.1909856433808
+D:\Projects\syncler\server\tests\__pycache__\test_db.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_db.cpython-312-pytest-8.4.2.pyc.1152
+D:\Projects\syncler\server\tests\__pycache__\test_db.cpython-312-pytest-8.4.2.pyc.41852
+D:\Projects\syncler\server\tests\__pycache__\test_db.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\test_db.cpython-312.pyc.2325779216016
+D:\Projects\syncler\server\tests\__pycache__\test_db.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312-pytest-8.4.2.pyc.10132
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312-pytest-8.4.2.pyc.10776
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312-pytest-8.4.2.pyc.25624
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312-pytest-8.4.2.pyc.2768
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312-pytest-8.4.2.pyc.40568
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\test_devices.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\tests\__pycache__\test_events.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_health.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_health.cpython-312-pytest-8.4.2.pyc.1152
+D:\Projects\syncler\server\tests\__pycache__\test_health.cpython-312-pytest-8.4.2.pyc.41852
+D:\Projects\syncler\server\tests\__pycache__\test_health.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\test_health.cpython-312.pyc.2325779216016
+D:\Projects\syncler\server\tests\__pycache__\test_health.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\tests\__pycache__\test_integration_auth_devices.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_integration_rate_limit.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_integration_retention.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_messages.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_messages.cpython-312-pytest-8.3.5.pyc.6792
+D:\Projects\syncler\server\tests\__pycache__\test_migration.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_pairing.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_phase3.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_phase3.cpython-312.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_phase3a_template.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_phase5d_validators.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_phase5d_validators.cpython-312-pytest-8.3.5.pyc.34560
+D:\Projects\syncler\server\tests\__pycache__\test_phase5d_validators.cpython-312.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_phase5_bootstrap.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_plugins.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_rate_limit.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_rate_limit.cpython-312-pytest-8.4.2.pyc.37000
+D:\Projects\syncler\server\tests\__pycache__\test_rate_limit.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\test_retention.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\test_retention.cpython-312-pytest-8.4.2.pyc.37000
+D:\Projects\syncler\server\tests\__pycache__\test_retention.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\test_state.cpython-312-pytest-8.3.5.pyc
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.1256904461984
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.1579495497312
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.1865602410384
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.1977094163232
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2029808613008
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2077454110144
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2180634040832
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2325779216016
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2360062877840
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2405940962768
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2469589181008
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2631803528880
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2835927463536
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.2950667662992
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-312.pyc.3074959253088
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.1610386071472
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.1676286254912
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.2010506649072
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.2335480979264
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.2410378878112
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.2581578211136
+D:\Projects\syncler\server\tests\__pycache__\__init__.cpython-314.pyc.2832584564544
+D:\Projects\syncler\docs\crypto-spec.md
+D:\Projects\syncler\docs\integration-guide.md
+D:\Projects\syncler\docs\ROADMAP.md
+
+codex
+The high-level diff matches the described scope. I’m going deeper on the new untracked files and exact SQLAlchemy/Alembic parity, because those are where small mismatches usually hide.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/services/nonce_replay.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/alembic/versions/0009_nonce_replay.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/tests/test_nonce_replay.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/tests/test_migration.py' in D:\Projects\syncler
+ succeeded in 307ms:
+import asyncio
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import inspect, text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.config import Settings
+from app.models import Base
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+async def _reset_public_schema(database_url: str) -> None:
+    engine = create_async_engine(database_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            await connection.execute(text("CREATE SCHEMA public"))
+    finally:
+        await engine.dispose()
+
+
+async def _table_names(database_url: str) -> set[str]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            names = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
+    finally:
+        await engine.dispose()
+    return set(names)
+
+
+def _alembic_config() -> Config:
+    return Config(str(PROJECT_ROOT / "alembic.ini"))
+
+
+def test_alembic_upgrade_head_and_downgrade_base(test_settings: Settings) -> None:
+    asyncio.run(_reset_public_schema(test_settings.database_url))
+
+    config = _alembic_config()
+    command.upgrade(config, "head")
+
+    created_tables = asyncio.run(_table_names(test_settings.database_url))
+    assert created_tables - {"alembic_version"} == set(Base.metadata.tables.keys())
+
+    command.downgrade(config, "base")
+
+    remaining_tables = asyncio.run(_table_names(test_settings.database_url))
+    assert remaining_tables - {"alembic_version"} == set()
+
+ succeeded in 324ms:
+"""Phase 7 ג€” durable per-sender nonce-replay registry.
+
+Replaces the in-memory `NonceRegistry` (`app/crypto/nonce.py`) with a
+Postgres-backed implementation that survives worker restarts and
+synchronizes across multiple uvicorn workers.
+
+The public surface is one async function, `record_nonce_or_reject`,
+which performs an atomic INSERT ON CONFLICT DO NOTHING against the
+`nonce_replay` table. Callers replace the legacy ``has() + mark()``
+pair with a single call:
+
+    if not await record_nonce_or_reject(db, sender_id, nonce):
+        raise HTTPException(409, "nonce already used")
+
+Transaction lifecycle (critical ג€” see consultation 95):
+- The insert lives in the *same* AsyncSession the caller passes in.
+- ``store_message`` / ``store_card`` commit the session internally
+  when they succeed, so the nonce row commits ALONGSIDE the message
+  / card row in one atomic step.
+- If the caller's downstream operation raises before that commit,
+  FastAPI's request-scoped session lifecycle (``app/db.py:get_db``)
+  closes the session on the way out, rolling back the pending nonce
+  insert. The sender can then retry the same nonce on the next
+  request ג€” replay protection is only "real" once the surrounding
+  message / card actually persists.
+
+Retention:
+- Hard TTL = `MAX_RETENTION` (30 days). Envelopes older than that
+  would already be rejected by the message / card expiry checks,
+  so the registry can safely forget them.
+- Cleanup is hybrid: best-effort on-write batch in this module
+  (cheap, traffic-driven) plus a periodic task in
+  ``app/jobs/retention.py`` (covers idle deployments and runs
+  under a Postgres advisory lock so multi-worker deployments
+  don't fight over the DELETE).
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+from datetime import UTC, datetime, timedelta
+from typing import Final
+from uuid import UUID
+
+from sqlalchemy import delete, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.crypto.nonce import NONCE_BYTES
+from app.models import NonceReplay
+
+_log = logging.getLogger(__name__)
+
+# Tied to message + card MAX_RETENTION (30 days). See
+# `services/messages.py:MAX_RETENTION` and `services/cards.py:MAX_TTL`
+# ג€” the latter is 48h, the former is the upper bound on accepted
+# envelope lifetime. 30 days is mathematically safe for both since
+# any envelope older than `now - 30d` would already fail the
+# `expires_at <= now` check at the service layer.
+NONCE_REPLAY_TTL: Final[timedelta] = timedelta(days=30)
+
+# Probability that any given successful insert also runs an on-write
+# cleanup of expired nonces. 1/1000 = ~one DELETE per 1k writes,
+# which is enough to keep the table from growing unboundedly on
+# active deployments without forcing an HTTP request to absorb the
+# latency of a bulk DELETE every time.
+_ONWRITE_CLEANUP_PROBABILITY: Final[float] = 0.001
+
+
+class NonceReplayError(Exception):
+    """Raised by ``record_nonce_or_reject`` is the caller wants an
+    exception instead of a False return; not currently used in the
+    routers (they prefer the boolean form for tighter HTTP mapping)."""
+
+
+async def record_nonce_or_reject(
+    db: AsyncSession,
+    sender_id: UUID,
+    nonce: bytes,
+) -> bool:
+    """Atomically record a (sender_id, nonce) pair if it's not already
+    present. Returns True if the row was newly inserted (i.e. NOT a
+    replay); False if the (sender_id, nonce) pair was already in the
+    registry.
+
+    The insert is added to the caller's session but NOT committed ג€”
+    the caller's surrounding flow (``store_message``, ``store_card``,
+    etc.) commits the session along with its own writes. This couples
+    nonce persistence to the actual side effect, so a failed-after-
+    nonce-recorded scenario rolls back the nonce too and the sender
+    can legitimately retry.
+
+    Raises:
+        ValueError: if ``nonce`` is not exactly 12 bytes (the
+            AES-GCM nonce length the rest of the system uses).
+    """
+    if len(nonce) != NONCE_BYTES:
+        raise ValueError(f"nonce must be {NONCE_BYTES} bytes, got {len(nonce)}")
+
+    stmt = (
+        pg_insert(NonceReplay)
+        .values(sender_id=sender_id, nonce=nonce)
+        .on_conflict_do_nothing(index_elements=["sender_id", "nonce"])
+    )
+    result = await db.execute(stmt)
+    inserted = (result.rowcount or 0) > 0
+
+    # Best-effort on-write cleanup. Fire under low probability so we
+    # don't penalize every request with a DELETE. Idle deployments
+    # rely on the retention job (`app/jobs/retention.py`).
+    if inserted and random.random() < _ONWRITE_CLEANUP_PROBABILITY:
+        try:
+            await _cleanup_expired(db)
+        except Exception as exc:
+            # Cleanup is opportunistic ג€” never let a delete failure
+            # kill the request that just recorded a legitimate nonce.
+            _log.warning("on-write nonce_replay cleanup failed: %s", exc)
+
+    return inserted
+
+
+async def _cleanup_expired(db: AsyncSession) -> int:
+    """Delete `nonce_replay` rows older than NONCE_REPLAY_TTL.
+    Returns the number of rows deleted. Safe to call concurrently
+    across workers ג€” each invocation operates on a distinct snapshot
+    via ``ix_nonce_replay_seen_at``.
+    """
+    cutoff = datetime.now(UTC) - NONCE_REPLAY_TTL
+    stmt = delete(NonceReplay).where(NonceReplay.seen_at < cutoff)
+    result = await db.execute(stmt)
+    deleted = result.rowcount or 0
+    if deleted:
+        _log.info("nonce_replay cleanup: deleted %d expired rows", deleted)
+    return deleted
+
+
+# Postgres advisory-lock key for the retention job. Arbitrary 64-bit
+# integer; needs to be stable across workers so they all try the
+# same lock. Use a hash of the constant name so it's distinct from
+# whatever other advisory locks the codebase grows.
+_RETENTION_ADVISORY_LOCK_KEY: Final[int] = 0x4E4F4E43455F524C  # b'NONCE_RL'
+
+
+async def cleanup_expired_with_lock(db: AsyncSession) -> int:
+    """Periodic cleanup entry point for ``app/jobs/retention.py``.
+
+    Acquires a Postgres advisory lock so only one worker runs the
+    DELETE per invocation (other workers no-op). Returns the number
+    of rows deleted, or -1 if another worker held the lock.
+
+    Multi-worker safe: pg_try_advisory_lock returns False without
+    blocking when contended. Advisory locks are released on session
+    close (transaction-level) or on explicit pg_advisory_unlock.
+    """
+    result = await db.execute(
+        text("SELECT pg_try_advisory_lock(:k)"),
+        {"k": _RETENTION_ADVISORY_LOCK_KEY},
+    )
+    got_lock = bool(result.scalar())
+    if not got_lock:
+        return -1
+    try:
+        return await _cleanup_expired(db)
+    finally:
+        await db.execute(
+            text("SELECT pg_advisory_unlock(:k)"),
+            {"k": _RETENTION_ADVISORY_LOCK_KEY},
+        )
+
+ succeeded in 330ms:
+"""Phase 7: durable per-sender nonce-replay registry
+
+Creates the `nonce_replay` table ג€” composite PK on (sender_id, nonce)
+so concurrent inserts race-safely via INSERT ON CONFLICT DO NOTHING.
+Replaces the in-memory `NonceRegistry` (which was process-local and
+lost state on worker restart).
+
+Schema:
+  - sender_id UUID, FK to senders.id ON DELETE CASCADE
+  - nonce BYTEA (always exactly 12 bytes ג€” AES-GCM requirement;
+    enforced by app layer + a CHECK constraint here)
+  - seen_at TIMESTAMPTZ DEFAULT NOW(), indexed for the retention
+    cleanup query
+
+Retention: pruned after MAX_RETENTION (30 days) by
+`server/app/jobs/retention.py`. Plus best-effort on-write cleanup
+in `server/app/services/nonce_replay.py`.
+
+Plan: V1.5 ROADMAP item #5. Triad consult 95.
+"""
+
+from __future__ import annotations
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "0009_nonce_replay"
+down_revision = "0008_sender_bootstrap_key_and_pending_pairing_broker"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "nonce_replay",
+        sa.Column(
+            "sender_id",
+            sa.Uuid(),
+            sa.ForeignKey("senders.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("nonce", sa.LargeBinary(), nullable=False),
+        sa.Column(
+            "seen_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.PrimaryKeyConstraint("sender_id", "nonce", name="pk_nonce_replay"),
+        sa.CheckConstraint(
+            "octet_length(nonce) = 12",
+            name="ck_nonce_replay_nonce_length",
+        ),
+    )
+    op.create_index(
+        "ix_nonce_replay_seen_at",
+        "nonce_replay",
+        ["seen_at"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_nonce_replay_seen_at", table_name="nonce_replay")
+    op.drop_table("nonce_replay")
+
+ succeeded in 327ms:
+"""Phase 7 ג€” durable per-sender nonce-replay registry tests.
+
+Schema-level + concurrency tests for the new Postgres-backed
+nonce-replay table. The end-to-end replay rejection through
+`POST /v1/messages/send` is covered by
+`test_messages.py::test_send_rejects_replayed_nonce`; this file
+focuses on the storage primitive itself.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from app.models import NonceReplay, Sender
+from app.services.nonce_replay import (
+    NONCE_REPLAY_TTL,
+    _cleanup_expired,
+    cleanup_expired_with_lock,
+    record_nonce_or_reject,
+)
+
+
+async def _make_sender(db: AsyncSession) -> uuid.UUID:
+    """Create a minimal sender row so the FK constraint on
+    nonce_replay.sender_id resolves."""
+    sender = Sender(
+        id=uuid.uuid4(),
+        name="Nonce Test",
+        public_key=b"\x00" * 32,
+    )
+    db.add(sender)
+    await db.flush()
+    return sender.id
+
+
+@pytest.mark.asyncio
+async def test_first_insert_returns_true(db_session: AsyncSession) -> None:
+    sender_id = await _make_sender(db_session)
+    assert await record_nonce_or_reject(db_session, sender_id, b"a" * 12) is True
+    row = await db_session.scalar(
+        select(NonceReplay).where(NonceReplay.sender_id == sender_id),
+    )
+    assert row is not None
+    assert row.nonce == b"a" * 12
+
+
+@pytest.mark.asyncio
+async def test_replay_returns_false(db_session: AsyncSession) -> None:
+    sender_id = await _make_sender(db_session)
+    nonce = b"b" * 12
+    assert await record_nonce_or_reject(db_session, sender_id, nonce) is True
+    # Same (sender, nonce) ג†’ ON CONFLICT DO NOTHING returns rowcount 0.
+    assert await record_nonce_or_reject(db_session, sender_id, nonce) is False
+
+
+@pytest.mark.asyncio
+async def test_isolates_senders(db_session: AsyncSession) -> None:
+    sender_a = await _make_sender(db_session)
+    sender_b = await _make_sender(db_session)
+    nonce = b"c" * 12
+    assert await record_nonce_or_reject(db_session, sender_a, nonce) is True
+    # Same nonce, different sender ג†’ not a replay.
+    assert await record_nonce_or_reject(db_session, sender_b, nonce) is True
+
+
+@pytest.mark.asyncio
+async def test_rejects_non_12_byte_nonce(db_session: AsyncSession) -> None:
+    sender_id = await _make_sender(db_session)
+    with pytest.raises(ValueError, match="12 bytes"):
+        await record_nonce_or_reject(db_session, sender_id, b"short")
+    with pytest.raises(ValueError, match="12 bytes"):
+        await record_nonce_or_reject(db_session, sender_id, b"a" * 16)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_only_expired_rows(db_session: AsyncSession) -> None:
+    sender_id = await _make_sender(db_session)
+    # Insert one fresh + one stale row. Manually backdate the stale
+    # row's seen_at past NONCE_REPLAY_TTL via UPDATE so we don't have
+    # to wait 30 days.
+    await record_nonce_or_reject(db_session, sender_id, b"f" * 12)
+    await record_nonce_or_reject(db_session, sender_id, b"o" * 12)
+    stale_cutoff = datetime.now(UTC) - NONCE_REPLAY_TTL - timedelta(hours=1)
+    from sqlalchemy import update
+    await db_session.execute(
+        update(NonceReplay)
+        .where(NonceReplay.nonce == b"o" * 12)
+        .values(seen_at=stale_cutoff),
+    )
+    await db_session.flush()
+
+    deleted = await _cleanup_expired(db_session)
+    assert deleted == 1
+
+    remaining = await db_session.scalars(
+        select(NonceReplay).where(NonceReplay.sender_id == sender_id),
+    )
+    nonces = [r.nonce for r in remaining]
+    assert b"f" * 12 in nonces
+    assert b"o" * 12 not in nonces
+
+
+@pytest.mark.asyncio
+async def test_concurrent_inserts_via_separate_sessions(
+    engine: AsyncEngine,
+) -> None:
+    """Codex 95 missing-test: prove cross-worker safety. Two
+    independent sessions racing the same (sender, nonce) must produce
+    exactly one True and one False, regardless of which lands first.
+    """
+    # Bootstrap the sender via a third session committed up front so
+    # both racing sessions can FK-reference it.
+    async with AsyncSession(bind=engine, expire_on_commit=False) as setup:
+        sender = Sender(
+            id=uuid.uuid4(),
+            name="Concurrent Test",
+            public_key=b"\x01" * 32,
+        )
+        setup.add(sender)
+        await setup.commit()
+        sender_id = sender.id
+
+    nonce = b"r" * 12
+
+    async def worker() -> bool:
+        async with AsyncSession(bind=engine, expire_on_commit=False) as s:
+            result = await record_nonce_or_reject(s, sender_id, nonce)
+            await s.commit()
+            return result
+
+    # Fire two concurrent workers. The Postgres unique constraint
+    # serializes them ג€” first commit wins; second sees the conflict
+    # and returns False.
+    a, b = await asyncio.gather(worker(), worker())
+    # Exactly one of the two should claim the insert.
+    assert sorted([a, b]) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_with_advisory_lock_runs_once(
+    db_session: AsyncSession,
+) -> None:
+    """Single-session contention test: re-acquiring the same advisory
+    lock from a session that already holds it succeeds (Postgres
+    advisory locks are reentrant per session). The cross-session
+    contention is exercised in concurrent integration smoke; this
+    asserts the lock plumbing returns a real row count, not -1, in
+    the uncontended path.
+    """
+    sender_id = await _make_sender(db_session)
+    await record_nonce_or_reject(db_session, sender_id, b"x" * 12)
+    deleted = await cleanup_expired_with_lock(db_session)
+    # All entries fresh ג†’ 0 deletions, but NOT -1 (which would mean
+    # the lock was contended).
+    assert deleted >= 0
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path server/app/models.py -Pattern "naming_convention|CheckConstraint|UUID_TYPE|class Sender|class LiveCard|__table_args__" -Context 2,4' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Select-String -Path server/app/**/*.py -Pattern \"pg_try_advisory_lock|pg_advisory_lock|record_nonce_or_reject|NonceReplayError|store_message|upsert_live_card|commit\\(\" -Context 1,3" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path server/alembic/versions/*.py -Pattern "pg_try_advisory_lock|pg_advisory_lock|CheckConstraint|octet_length|sa.Uuid|UUID" -Context 1,2' in D:\Projects\syncler
+ succeeded in 362ms:
+
+  server\app\models.py:9:
+  server\app\models.py:10:JSONB_TYPE = JSONB().with_variant(JSON(), "sqlite")
+> server\app\models.py:11:UUID_TYPE = Uuid(as_uuid=True)
+  server\app\models.py:12:
+  server\app\models.py:13:
+  server\app\models.py:14:class Base(DeclarativeBase):
+  server\app\models.py:15:    pass
+  server\app\models.py:18:class User(Base):
+  server\app\models.py:19:    __tablename__ = "users"
+> server\app\models.py:20:    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
+  server\app\models.py:21:
+> server\app\models.py:22:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:23:    email: Mapped[str] = mapped_column(Text, nullable=False)
+  server\app\models.py:24:    auth_key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+  server\app\models.py:25:    encrypted_master_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+  server\app\models.py:26:    auth_salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+  server\app\models.py:32:    __tablename__ = "devices"
+  server\app\models.py:33:
+> server\app\models.py:34:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:35:    user_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:36:        UUID_TYPE,
+  server\app\models.py:37:        ForeignKey("users.id", ondelete="CASCADE"),
+  server\app\models.py:38:        nullable=False,
+  server\app\models.py:39:        index=True,
+  server\app\models.py:40:    )
+  server\app\models.py:46:
+  server\app\models.py:47:
+> server\app\models.py:48:class Sender(Base):
+  server\app\models.py:49:    __tablename__ = "senders"
+> server\app\models.py:50:    __table_args__ = (UniqueConstraint("public_key", name="uq_senders_public_key"),)
+  server\app\models.py:51:
+> server\app\models.py:52:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:53:    public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+  server\app\models.py:54:    name: Mapped[str] = mapped_column(Text, nullable=False)
+  server\app\models.py:55:    contact: Mapped[str | None] = mapped_column(Text)
+  server\app\models.py:56:    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+  server\app\models.py:71:    # The ORM-side Index below mirrors that so Base.metadata.create_all()
+  server\app\models.py:72:    # (used by tests/conftest.py) gets the same enforcement without Alembic.
+> server\app\models.py:73:    __table_args__ = (
+  server\app\models.py:74:        Index(
+  server\app\models.py:75:            "uq_pairings_active_user_sender",
+  server\app\models.py:76:            "user_id",
+  server\app\models.py:77:            "sender_id",
+  server\app\models.py:82:    )
+  server\app\models.py:83:
+> server\app\models.py:84:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:85:    user_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:86:        UUID_TYPE,
+  server\app\models.py:87:        ForeignKey("users.id", ondelete="CASCADE"),
+  server\app\models.py:88:        nullable=False,
+  server\app\models.py:89:        index=True,
+  server\app\models.py:90:    )
+  server\app\models.py:91:    sender_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:92:        UUID_TYPE,
+  server\app\models.py:93:        ForeignKey("senders.id", ondelete="CASCADE"),
+  server\app\models.py:94:        nullable=False,
+  server\app\models.py:95:        index=True,
+  server\app\models.py:96:    )
+  server\app\models.py:102:class Plugin(Base):
+  server\app\models.py:103:    __tablename__ = "plugins"
+> server\app\models.py:104:    __table_args__ = (
+  server\app\models.py:105:        UniqueConstraint(
+  server\app\models.py:106:            "sender_id",
+  server\app\models.py:107:            "plugin_identifier",
+  server\app\models.py:108:            "version",
+  server\app\models.py:112:    )
+  server\app\models.py:113:
+> server\app\models.py:114:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:115:    sender_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:116:        UUID_TYPE,
+  server\app\models.py:117:        ForeignKey("senders.id"),
+  server\app\models.py:118:        nullable=False,
+  server\app\models.py:119:    )
+  server\app\models.py:120:    # Sender-chosen stable identity (e.g. "com.lottery.app"). Decouples
+  server\app\models.py:149:class Message(Base):
+  server\app\models.py:150:    __tablename__ = "messages"
+> server\app\models.py:151:    __table_args__ = (Index("ix_messages_user_id_sent_at_desc", "user_id", text("sent_at 
+DESC")),)
+  server\app\models.py:152:
+> server\app\models.py:153:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:154:    sender_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:155:        UUID_TYPE,
+  server\app\models.py:156:        ForeignKey("senders.id"),
+  server\app\models.py:157:        nullable=False,
+  server\app\models.py:158:    )
+  server\app\models.py:159:    user_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:160:        UUID_TYPE,
+  server\app\models.py:161:        ForeignKey("users.id", ondelete="CASCADE"),
+  server\app\models.py:162:        nullable=False,
+  server\app\models.py:163:    )
+  server\app\models.py:164:    plugin_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:165:        UUID_TYPE,
+  server\app\models.py:166:        ForeignKey("plugins.id"),
+  server\app\models.py:167:        nullable=False,
+  server\app\models.py:168:    )
+  server\app\models.py:169:    encrypted_body_pointer: Mapped[str] = mapped_column(Text, nullable=False)
+  server\app\models.py:177:
+  server\app\models.py:178:    message_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:179:        UUID_TYPE,
+  server\app\models.py:180:        ForeignKey("messages.id", ondelete="CASCADE"),
+  server\app\models.py:181:        primary_key=True,
+  server\app\models.py:182:    )
+  server\app\models.py:183:    device_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:184:        UUID_TYPE,
+  server\app\models.py:185:        ForeignKey("devices.id", ondelete="CASCADE"),
+  server\app\models.py:186:        primary_key=True,
+  server\app\models.py:187:    )
+  server\app\models.py:188:    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+  server\app\models.py:191:
+  server\app\models.py:192:
+> server\app\models.py:193:class LiveCard(Base):
+  server\app\models.py:194:    __tablename__ = "live_cards"
+> server\app\models.py:195:    __table_args__ = (
+  server\app\models.py:196:        UniqueConstraint("sender_id", "user_id", "card_key", 
+name="uq_live_cards_sender_user_key"),
+  server\app\models.py:197:    )
+  server\app\models.py:198:
+> server\app\models.py:199:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:200:    user_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:201:        UUID_TYPE,
+  server\app\models.py:202:        ForeignKey("users.id", ondelete="CASCADE"),
+  server\app\models.py:203:        nullable=False,
+  server\app\models.py:204:        index=True,
+  server\app\models.py:205:    )
+  server\app\models.py:206:    sender_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:207:        UUID_TYPE,
+  server\app\models.py:208:        ForeignKey("senders.id"),
+  server\app\models.py:209:        nullable=False,
+  server\app\models.py:210:        index=True,
+  server\app\models.py:211:    )
+  server\app\models.py:212:    plugin_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:213:        UUID_TYPE,
+  server\app\models.py:214:        ForeignKey("plugins.id"),
+  server\app\models.py:215:        nullable=False,
+  server\app\models.py:216:    )
+  server\app\models.py:217:    card_key: Mapped[str] = mapped_column(Text, nullable=False)
+  server\app\models.py:234:
+  server\app\models.py:235:    user_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:236:        UUID_TYPE,
+  server\app\models.py:237:        ForeignKey("users.id", ondelete="CASCADE"),
+  server\app\models.py:238:        primary_key=True,
+  server\app\models.py:239:    )
+  server\app\models.py:240:    state_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+  server\app\models.py:247:
+  server\app\models.py:248:    __tablename__ = "pending_pairings"
+> server\app\models.py:249:    __table_args__ = (UniqueConstraint("pairing_token", name="uq_pending_pairings_token"),)
+  server\app\models.py:250:
+> server\app\models.py:251:    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+  server\app\models.py:252:    sender_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:253:        UUID_TYPE,
+  server\app\models.py:254:        ForeignKey("senders.id", ondelete="CASCADE"),
+  server\app\models.py:255:        nullable=False,
+  server\app\models.py:256:        index=True,
+  server\app\models.py:257:    )
+  server\app\models.py:297:
+  server\app\models.py:298:    sender_id: Mapped[UUID] = mapped_column(
+> server\app\models.py:299:        UUID_TYPE,
+  server\app\models.py:300:        ForeignKey("senders.id", ondelete="CASCADE"),
+  server\app\models.py:301:        primary_key=True,
+  server\app\models.py:302:    )
+  server\app\models.py:303:    nonce: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+  server\app\models.py:312:class RateLimitEvent(Base):
+  server\app\models.py:313:    __tablename__ = "rate_limit_events"
+> server\app\models.py:314:    __table_args__ = (
+  server\app\models.py:315:        UniqueConstraint(
+  server\app\models.py:316:            "actor_type",
+  server\app\models.py:317:            "actor_id",
+  server\app\models.py:318:            "route",
+
+
+
+ succeeded in 367ms:
+
+  server\alembic\versions\0001_initial_schema.py:22:        "users",
+> server\alembic\versions\0001_initial_schema.py:23:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+  server\alembic\versions\0001_initial_schema.py:24:        sa.Column("email", sa.Text(), nullable=False),
+  server\alembic\versions\0001_initial_schema.py:25:        sa.Column("auth_key_hash", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:34:        "senders",
+> server\alembic\versions\0001_initial_schema.py:35:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+  server\alembic\versions\0001_initial_schema.py:36:        sa.Column("public_key", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:37:        sa.Column("name", sa.Text(), nullable=False),
+  server\alembic\versions\0001_initial_schema.py:45:        "devices",
+> server\alembic\versions\0001_initial_schema.py:46:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0001_initial_schema.py:47:        sa.Column("user_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:48:        sa.Column("public_key", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:49:        sa.Column("fcm_token", sa.Text()),
+  server\alembic\versions\0001_initial_schema.py:58:        "pairings",
+> server\alembic\versions\0001_initial_schema.py:59:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0001_initial_schema.py:60:        sa.Column("user_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+> server\alembic\versions\0001_initial_schema.py:61:        sa.Column("sender_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:62:        sa.Column("encrypted_state", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:63:        sa.Column("revoked_at", 
+postgresql.TIMESTAMP(timezone=True)),
+  server\alembic\versions\0001_initial_schema.py:78:        "plugins",
+> server\alembic\versions\0001_initial_schema.py:79:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0001_initial_schema.py:80:        sa.Column("sender_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:81:        sa.Column("version", sa.Text(), nullable=False),
+  server\alembic\versions\0001_initial_schema.py:82:        sa.Column("manifest_hash", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:95:        "messages",
+> server\alembic\versions\0001_initial_schema.py:96:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0001_initial_schema.py:97:        sa.Column("sender_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+> server\alembic\versions\0001_initial_schema.py:98:        sa.Column("user_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+> server\alembic\versions\0001_initial_schema.py:99:        sa.Column("plugin_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:100:        sa.Column("encrypted_body_pointer", sa.Text(), 
+nullable=False),
+  server\alembic\versions\0001_initial_schema.py:101:        sa.Column("min_plugin_version", sa.Text()),
+  server\alembic\versions\0001_initial_schema.py:112:        "delivery_status",
+> server\alembic\versions\0001_initial_schema.py:113:        sa.Column("message_id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0001_initial_schema.py:114:        sa.Column("device_id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+  server\alembic\versions\0001_initial_schema.py:115:        sa.Column("delivered_at", 
+postgresql.TIMESTAMP(timezone=True)),
+  server\alembic\versions\0001_initial_schema.py:116:        sa.Column("dismissed_at", 
+postgresql.TIMESTAMP(timezone=True)),
+  server\alembic\versions\0001_initial_schema.py:133:        "encrypted_user_state",
+> server\alembic\versions\0001_initial_schema.py:134:        sa.Column("user_id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+  server\alembic\versions\0001_initial_schema.py:135:        sa.Column("state_version", sa.Integer(), nullable=False, 
+server_default="0"),
+  server\alembic\versions\0001_initial_schema.py:136:        sa.Column("encrypted_blob", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0002_pending_pairings.py:26:        "pending_pairings",
+> server\alembic\versions\0002_pending_pairings.py:27:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0002_pending_pairings.py:28:        sa.Column("sender_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+  server\alembic\versions\0002_pending_pairings.py:29:        sa.Column("pairing_token", postgresql.BYTEA(), 
+nullable=False),
+  server\alembic\versions\0002_pending_pairings.py:30:        sa.Column("expires_at", 
+postgresql.TIMESTAMP(timezone=True), nullable=False),
+  server\alembic\versions\0004_plugin_identifier.py:12:(sender_id, plugin_identifier, version) tuple while 
+``plugins.id`` stays
+> server\alembic\versions\0004_plugin_identifier.py:13:the per-row UUID PK that ``messages.plugin_id`` keeps 
+referencing.
+  server\alembic\versions\0004_plugin_identifier.py:14:"""
+  server\alembic\versions\0004_plugin_identifier.py:15:
+  server\alembic\versions\0007_live_cards.py:37:        "live_cards",
+> server\alembic\versions\0007_live_cards.py:38:        sa.Column("id", postgresql.UUID(as_uuid=True), 
+primary_key=True),
+> server\alembic\versions\0007_live_cards.py:39:        sa.Column("user_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+> server\alembic\versions\0007_live_cards.py:40:        sa.Column("sender_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+> server\alembic\versions\0007_live_cards.py:41:        sa.Column("plugin_id", postgresql.UUID(as_uuid=True), 
+nullable=False),
+  server\alembic\versions\0007_live_cards.py:42:        sa.Column("card_key", sa.Text(), nullable=False),
+  server\alembic\versions\0007_live_cards.py:43:        sa.Column("encrypted_payload", sa.LargeBinary(), 
+nullable=False),
+  server\alembic\versions\0009_nonce_replay.py:8:Schema:
+> server\alembic\versions\0009_nonce_replay.py:9:  - sender_id UUID, FK to senders.id ON DELETE CASCADE
+  server\alembic\versions\0009_nonce_replay.py:10:  - nonce BYTEA (always exactly 12 bytes — AES-GCM requirement;
+  server\alembic\versions\0009_nonce_replay.py:11:    enforced by app layer + a CHECK constraint here)
+  server\alembic\versions\0009_nonce_replay.py:38:            "sender_id",
+> server\alembic\versions\0009_nonce_replay.py:39:            sa.Uuid(),
+  server\alembic\versions\0009_nonce_replay.py:40:            sa.ForeignKey("senders.id", ondelete="CASCADE"),
+  server\alembic\versions\0009_nonce_replay.py:41:            nullable=False,
+  server\alembic\versions\0009_nonce_replay.py:50:        sa.PrimaryKeyConstraint("sender_id", "nonce", 
+name="pk_nonce_replay"),
+> server\alembic\versions\0009_nonce_replay.py:51:        sa.CheckConstraint(
+> server\alembic\versions\0009_nonce_replay.py:52:            "octet_length(nonce) = 12",
+  server\alembic\versions\0009_nonce_replay.py:53:            name="ck_nonce_replay_nonce_length",
+  server\alembic\versions\0009_nonce_replay.py:54:        ),
+
+
+
+ succeeded in 382ms:
+
+  server\app\crypto\nonce.py:10:generator. Callers that need replay detection use
+> server\app\crypto\nonce.py:11:`services.nonce_replay.record_nonce_or_reject`.
+  server\app\crypto\nonce.py:12:"""
+  server\app\crypto\nonce.py:13:
+  server\app\crypto\nonce.py:14:from __future__ import annotations
+  server\app\jobs\retention.py:34:    nonce_replay = await cleanup_expired_with_lock(session)
+> server\app\jobs\retention.py:35:    await session.commit()
+  server\app\jobs\retention.py:36:
+  server\app\jobs\retention.py:37:    return {
+  server\app\jobs\retention.py:38:        "messages": messages.rowcount or 0,
+  server\app\middleware\rate_limit.py:35:    )
+> server\app\middleware\rate_limit.py:36:    await db.commit()
+  server\app\middleware\rate_limit.py:37:
+  server\app\middleware\rate_limit.py:38:    if count > config.max_count:
+  server\app\middleware\rate_limit.py:39:        retry_after = max(1, ceil(window_epoch + config.window_seconds - 
+now.timestamp()))
+  server\app\routers\cards.py:28:    delete_live_card,
+> server\app\routers\cards.py:29:    upsert_live_card,
+  server\app\routers\cards.py:30:)
+  server\app\routers\cards.py:31:from app.services.events import get_event_bus
+> server\app\routers\cards.py:32:from app.services.nonce_replay import record_nonce_or_reject
+  server\app\routers\cards.py:33:from app.services.senders import (
+  server\app\routers\cards.py:34:    SenderNotFoundError,
+  server\app\routers\cards.py:35:    SenderRevokedError,
+  server\app\routers\cards.py:98:    # Phase 7: replay protection for live-card upserts. Sequence-number
+> server\app\routers\cards.py:99:    # CAS in upsert_live_card defends against most replay scenarios, but
+  server\app\routers\cards.py:100:    # nothing prevents resurrecting a card with an older sequence after
+  server\app\routers\cards.py:101:    # the current row is deleted. The shared nonce registry closes that
+  server\app\routers\cards.py:102:    # gap. Same transactional semantics as messages.py — the insert
+> server\app\routers\cards.py:103:    # commits with upsert_live_card's commit, or rolls back together.
+  server\app\routers\cards.py:104:    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+> server\app\routers\cards.py:105:    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+  server\app\routers\cards.py:106:        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce 
+already used")
+  server\app\routers\cards.py:107:
+  server\app\routers\cards.py:108:    try:
+> server\app\routers\cards.py:109:        card = await upsert_live_card(
+  server\app\routers\cards.py:110:            db,
+  server\app\routers\cards.py:111:            sender_id=payload.sender_id,
+  server\app\routers\cards.py:112:            user_id=payload.user_id,
+  server\app\routers\messages.py:18:from app.crypto.aead import assemble_envelope
+> server\app\routers\messages.py:19:from app.services.nonce_replay import record_nonce_or_reject
+  server\app\routers\messages.py:20:from app.crypto.signatures import verify_message_envelope
+  server\app\routers\messages.py:21:from app.db import get_db
+  server\app\routers\messages.py:22:from app.middleware.rate_limit import rate_limit
+  server\app\routers\messages.py:39:    NoActiveDeviceWithPluginError,
+> server\app\routers\messages.py:40:    NonceReplayError,
+  server\app\routers\messages.py:41:    PairingMissingError,
+  server\app\routers\messages.py:42:    PluginInactiveError,
+  server\app\routers\messages.py:43:    get_message_for_user,
+  server\app\routers\messages.py:46:    parse_pointer,
+> server\app\routers\messages.py:47:    store_message,
+  server\app\routers\messages.py:48:)
+  server\app\routers\messages.py:49:from app.services.devices import touch_device_last_seen
+  server\app\routers\messages.py:50:from app.services.events import get_event_bus
+  server\app\routers\messages.py:116:    # Postgres-backed registry. The insert lives in the same session as
+> server\app\routers\messages.py:117:    # store_message — they commit together atomically, so a failed
+> server\app\routers\messages.py:118:    # store_message rolls back the nonce burn and the sender can retry.
+  server\app\routers\messages.py:119:    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+> server\app\routers\messages.py:120:    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+  server\app\routers\messages.py:121:        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce 
+already used")
+  server\app\routers\messages.py:122:
+  server\app\routers\messages.py:123:    try:
+> server\app\routers\messages.py:124:        message = await store_message(
+  server\app\routers\messages.py:125:            db,
+  server\app\routers\messages.py:126:            sender_id=payload.sender_id,
+  server\app\routers\messages.py:127:            user_id=payload.user_id,
+  server\app\routers\messages.py:142:        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient 
+has no active devices") from exc
+> server\app\routers\messages.py:143:    except NonceReplayError as exc:
+  server\app\routers\messages.py:144:        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce 
+already used") from exc
+  server\app\routers\messages.py:145:
+  server\app\routers\messages.py:146:    await push_message_to_user_devices(db, message=message)
+  server\app\routers\senders.py:104:    sender.bootstrap_key_signature = bootstrap_sig_raw
+> server\app\routers\senders.py:105:    await db.commit()
+  server\app\routers\senders.py:106:    await db.refresh(sender)
+  server\app\routers\senders.py:107:
+  server\app\routers\senders.py:108:    bootstrap_key_id = hashlib.sha256(bootstrap_key_raw).digest()[:16]
+  server\app\services\cards.py:43:
+> server\app\services\cards.py:44:async def upsert_live_card(
+  server\app\services\cards.py:45:    db: AsyncSession,
+  server\app\services\cards.py:46:    *,
+  server\app\services\cards.py:47:    sender_id: uuid.UUID,
+  server\app\services\cards.py:58:    # expires_at and clamp anything beyond the 48h cap. Mirrors the
+> server\app\services\cards.py:59:    # `store_message` MAX_RETENTION pattern in services/messages.py.
+  server\app\services\cards.py:60:    if expires_at <= now:
+  server\app\services\cards.py:61:        raise ExpiredEnvelopeError("expires_at is not in the future")
+  server\app\services\cards.py:62:    if expires_at > now + MAX_TTL:
+  server\app\services\cards.py:142:
+> server\app\services\cards.py:143:    await db.commit()
+  server\app\services\cards.py:144:    await db.refresh(card)
+  server\app\services\cards.py:145:    return card
+  server\app\services\cards.py:146:
+  server\app\services\cards.py:166:        await db.delete(card)
+> server\app\services\cards.py:167:        await db.commit()
+  server\app\services\cards.py:168:
+  server\app\services\cards.py:169:
+  server\app\services\cards.py:170:async def get_live_cards_for_user(
+  server\app\services\cards.py:195:    if count > 0:
+> server\app\services\cards.py:196:        await db.commit()
+  server\app\services\cards.py:197:    return count
+  server\app\services\devices.py:33:    db.add(device)
+> server\app\services\devices.py:34:    await db.commit()
+  server\app\services\devices.py:35:    await db.refresh(device)
+  server\app\services\devices.py:36:    return device
+  server\app\services\devices.py:37:
+  server\app\services\devices.py:51:    device.last_seen = datetime.now(UTC)
+> server\app\services\devices.py:52:    await db.commit()
+  server\app\services\devices.py:53:
+  server\app\services\devices.py:54:
+  server\app\services\devices.py:55:async def revoke_device(db: AsyncSession, *, user_id: UUID, device_id: UUID) -> 
+None:
+  server\app\services\devices.py:61:    device.revoked_at = datetime.now(UTC)
+> server\app\services\devices.py:62:    await db.commit()
+  server\app\services\devices.py:63:
+  server\app\services\devices.py:64:
+  server\app\services\devices.py:65:async def list_devices(db: AsyncSession, *, user_id: UUID) -> list[Device]:
+  server\app\services\messages.py:37:
+> server\app\services\messages.py:38:class NonceReplayError(MessageError):
+  server\app\services\messages.py:39:    """The (sender_id, nonce) pair was already used."""
+  server\app\services\messages.py:40:
+  server\app\services\messages.py:41:
+  server\app\services\messages.py:92:
+> server\app\services\messages.py:93:async def store_message(
+  server\app\services\messages.py:94:    db: AsyncSession,
+  server\app\services\messages.py:95:    *,
+  server\app\services\messages.py:96:    sender_id: uuid.UUID,
+  server\app\services\messages.py:154:
+> server\app\services\messages.py:155:    await db.commit()
+  server\app\services\messages.py:156:    await db.refresh(message)
+  server\app\services\messages.py:157:    return message
+  server\app\services\messages.py:158:
+  server\app\services\messages.py:257:        status.dismissed_at = datetime.now(UTC)
+> server\app\services\messages.py:258:        await db.commit()
+  server\app\services\messages.py:259:        await db.refresh(status)
+  server\app\services\messages.py:260:    return status
+  server\app\services\messages.py:261:
+  server\app\services\nonce_replay.py:6:
+> server\app\services\nonce_replay.py:7:The public surface is one async function, `record_nonce_or_reject`,
+  server\app\services\nonce_replay.py:8:which performs an atomic INSERT ON CONFLICT DO NOTHING against the
+  server\app\services\nonce_replay.py:9:`nonce_replay` table. Callers replace the legacy ``has() + mark()``
+  server\app\services\nonce_replay.py:10:pair with a single call:
+  server\app\services\nonce_replay.py:11:
+> server\app\services\nonce_replay.py:12:    if not await record_nonce_or_reject(db, sender_id, nonce):
+  server\app\services\nonce_replay.py:13:        raise HTTPException(409, "nonce already used")
+  server\app\services\nonce_replay.py:14:
+  server\app\services\nonce_replay.py:15:Transaction lifecycle (critical — see consultation 95):
+  server\app\services\nonce_replay.py:16:- The insert lives in the *same* AsyncSession the caller passes in.
+> server\app\services\nonce_replay.py:17:- ``store_message`` / ``store_card`` commit the session internally
+  server\app\services\nonce_replay.py:18:  when they succeed, so the nonce row commits ALONGSIDE the message
+  server\app\services\nonce_replay.py:19:  / card row in one atomic step.
+  server\app\services\nonce_replay.py:20:- If the caller's downstream operation raises before that commit,
+  server\app\services\nonce_replay.py:70:
+> server\app\services\nonce_replay.py:71:class NonceReplayError(Exception):
+> server\app\services\nonce_replay.py:72:    """Raised by ``record_nonce_or_reject`` is the caller wants an
+  server\app\services\nonce_replay.py:73:    exception instead of a False return; not currently used in the
+  server\app\services\nonce_replay.py:74:    routers (they prefer the boolean form for tighter HTTP mapping)."""
+  server\app\services\nonce_replay.py:75:
+  server\app\services\nonce_replay.py:76:
+> server\app\services\nonce_replay.py:77:async def record_nonce_or_reject(
+  server\app\services\nonce_replay.py:78:    db: AsyncSession,
+  server\app\services\nonce_replay.py:79:    sender_id: UUID,
+  server\app\services\nonce_replay.py:80:    nonce: bytes,
+  server\app\services\nonce_replay.py:87:    The insert is added to the caller's session but NOT committed —
+> server\app\services\nonce_replay.py:88:    the caller's surrounding flow (``store_message``, ``store_card``,
+  server\app\services\nonce_replay.py:89:    etc.) commits the session along with its own writes. This couples
+  server\app\services\nonce_replay.py:90:    nonce persistence to the actual side effect, so a failed-after-
+  server\app\services\nonce_replay.py:91:    nonce-recorded scenario rolls back the nonce too and the sender
+  server\app\services\nonce_replay.py:151:
+> server\app\services\nonce_replay.py:152:    Multi-worker safe: pg_try_advisory_lock returns False without
+  server\app\services\nonce_replay.py:153:    blocking when contended. Advisory locks are released on session
+  server\app\services\nonce_replay.py:154:    close (transaction-level) or on explicit pg_advisory_unlock.
+  server\app\services\nonce_replay.py:155:    """
+  server\app\services\nonce_replay.py:156:    result = await db.execute(
+> server\app\services\nonce_replay.py:157:        text("SELECT pg_try_advisory_lock(:k)"),
+  server\app\services\nonce_replay.py:158:        {"k": _RETENTION_ADVISORY_LOCK_KEY},
+  server\app\services\nonce_replay.py:159:    )
+  server\app\services\nonce_replay.py:160:    got_lock = bool(result.scalar())
+  server\app\services\pairing.py:85:    db.add(pending)
+> server\app\services\pairing.py:86:    await db.commit()
+  server\app\services\pairing.py:87:    await db.refresh(pending)
+  server\app\services\pairing.py:88:    return pending
+  server\app\services\pairing.py:89:
+  server\app\services\pairing.py:176:    db.add(pairing)
+> server\app\services\pairing.py:177:    await db.commit()
+  server\app\services\pairing.py:178:    await db.refresh(pairing)
+  server\app\services\pairing.py:179:    return pairing, sender, pending
+  server\app\services\pairing.py:180:
+  server\app\services\pairing.py:194:        pairing.revoked_at = datetime.now(UTC)
+> server\app\services\pairing.py:195:        await db.commit()
+  server\app\services\pairing.py:196:        await db.refresh(pairing)
+  server\app\services\pairing.py:197:    return pairing
+  server\app\services\pairing.py:198:
+  server\app\services\plugins.py:170:    try:
+> server\app\services\plugins.py:171:        await db.commit()
+  server\app\services\plugins.py:172:    except IntegrityError as exc:
+  server\app\services\plugins.py:173:        await db.rollback()
+  server\app\services\plugins.py:174:        msg = str(exc.orig) if exc.orig else str(exc)
+  server\app\services\plugins.py:241:    if changed:
+> server\app\services\plugins.py:242:        await db.commit()
+  server\app\services\plugins.py:243:        await db.refresh(plugin)
+  server\app\services\plugins.py:244:    return plugin
+  server\app\services\plugins.py:245:
+  server\app\services\push.py:113:
+> server\app\services\push.py:114:    await db.commit()
+  server\app\services\push.py:115:    return outcomes
+  server\app\services\push.py:116:
+  server\app\services\push.py:117:
+  server\app\services\senders.py:41:    try:
+> server\app\services\senders.py:42:        await db.commit()
+  server\app\services\senders.py:43:    except IntegrityError as exc:
+  server\app\services\senders.py:44:        await db.rollback()
+  server\app\services\senders.py:45:        raise SenderAlreadyExistsError("public key already registered") from exc
+  server\app\services\senders.py:69:        sender.revoked_at = datetime.now(UTC)
+> server\app\services\senders.py:70:        await db.commit()
+  server\app\services\senders.py:71:        await db.refresh(sender)
+  server\app\services\senders.py:72:    return sender
+  server\app\services\state.py:75:        try:
+> server\app\services\state.py:76:            await db.commit()
+  server\app\services\state.py:77:        except IntegrityError:
+  server\app\services\state.py:78:            # Initial-create race: another writer beat us. Convert the DB
+  server\app\services\state.py:79:            # error into a clean 409 with the current state.
+  server\app\services\state.py:121:
+> server\app\services\state.py:122:    await db.commit()
+  server\app\services\state.py:123:    refreshed = await get_state(db, user_id)
+  server\app\services\state.py:124:    # Sanity: refreshed must report the version we wrote (else somehow yet
+  server\app\services\state.py:125:    # another concurrent writer flipped past us).
+  server\app\services\users.py:51:    try:
+> server\app\services\users.py:52:        await db.commit()
+  server\app\services\users.py:53:    except IntegrityError as exc:
+  server\app\services\users.py:54:        await db.rollback()
+  server\app\services\users.py:55:        raise UserAlreadyExistsError from exc
+  server\app\services\users.py:96:    await db.delete(managed_user)
+> server\app\services\users.py:97:    await db.commit()
+
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/routers/cards.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/routers/messages.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/db.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/tests/conftest.py' in D:\Projects\syncler
+ succeeded in 287ms:
+"""Live card routes ג€” upsert, delete."""
+
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.crypto.aead import assemble_envelope
+from app.crypto.signatures import verify_message_envelope
+from app.db import get_db
+from app.middleware.rate_limit import rate_limit
+from app.models import Sender
+from app.schemas import (
+    LiveCardDeleteRequest,
+    LiveCardItem,
+    LiveCardUpsertRequest,
+    decode_base64,
+)
+from app.services.cards import (
+    ExpiredEnvelopeError,
+    PairingMissingError,
+    PluginInactiveError,
+    SequenceNumberRegressionError,
+    delete_live_card,
+    upsert_live_card,
+)
+from app.services.events import get_event_bus
+from app.services.nonce_replay import record_nonce_or_reject
+from app.services.senders import (
+    SenderNotFoundError,
+    SenderRevokedError,
+    get_active_sender,
+)
+
+router = APIRouter(tags=["cards"])
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _build_upsert_envelope_bytes(payload: LiveCardUpsertRequest) -> bytes:
+    """Build the canonical envelope for live card upsert (binds metadata).
+
+    `sequence_number` is kept as an int (not stringified) so the canonical
+    form matches the SDK side, which signs `canonical_json` of a dict whose
+    `sequence_number` is also int. Casting to str here would emit
+    `"sequence_number":"42"` while the SDK emits `"sequence_number":42`,
+    breaking signature verification on every upsert.
+    """
+    return assemble_envelope(
+        {
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+            "plugin_id": str(payload.plugin_id),
+            "card_key": payload.card_key,
+            "card_type": "live",
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
+            "encrypted_payload": payload.encrypted_payload,
+            "nonce": payload.nonce,
+            "sequence_number": payload.sequence_number,
+        }
+    )
+
+
+@router.post("/upsert", status_code=status.HTTP_201_CREATED)
+async def upsert(
+    payload: LiveCardUpsertRequest,
+    request: Request,
+    _: None = Depends(rate_limit("card_upsert_ip")),
+    db: AsyncSession = Depends(get_db),
+) -> LiveCardItem:
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    envelope_bytes = _build_upsert_envelope_bytes(payload)
+    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
+
+    # Per-card rate limit: 1 per second per (sender, user, card_key).
+    request.state.sender_id = str(payload.sender_id)
+    request.state.user_id = str(payload.user_id)
+    request.state.card_key = payload.card_key
+    from app.middleware.rate_limit import check_rate_limit
+    from app.middleware.rate_limit_config import RATE_LIMITS
+    await check_rate_limit(db, request, RATE_LIMITS["card_upsert"])
+
+    # Phase 7: replay protection for live-card upserts. Sequence-number
+    # CAS in upsert_live_card defends against most replay scenarios, but
+    # nothing prevents resurrecting a card with an older sequence after
+    # the current row is deleted. The shared nonce registry closes that
+    # gap. Same transactional semantics as messages.py ג€” the insert
+    # commits with upsert_live_card's commit, or rolls back together.
+    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+
+    try:
+        card = await upsert_live_card(
+            db,
+            sender_id=payload.sender_id,
+            user_id=payload.user_id,
+            plugin_id=payload.plugin_id,
+            card_key=payload.card_key,
+            encrypted_payload=decode_base64(payload.encrypted_payload, field_name="encrypted_payload", minimum=16),
+            nonce=nonce_bytes,
+            sequence_number=payload.sequence_number,
+            expires_at=payload.expires_at,
+        )
+    except PluginInactiveError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except PairingMissingError as exc:
+        # Mirrors the messages route: no active pairing ג†’ 410 Gone. The
+        # sender knows what to do (re-pair) and we don't leak whether the
+        # user_id exists at all (404 vs 410 would differ).
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except ExpiredEnvelopeError as exc:
+        # expires_at <= now OR exceeds the 48h server-enforced cap. 400 Bad
+        # Request ג€” the caller can fix and resubmit. Closes Codex 63 RED
+        # (router-layer mapping for the service-layer TTL check).
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except SequenceNumberRegressionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # SSE fanout
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+    plugin_row = await db.execute(sql_select(Plugin.plugin_identifier).where(Plugin.id == card.plugin_id))
+    identifier = plugin_row.scalar_one_or_none() or ""
+
+    item = LiveCardItem(
+        id=card.id,
+        sender_id=card.sender_id,
+        plugin_id=card.plugin_id,
+        plugin_identifier=identifier,
+        card_key=card.card_key,
+        encrypted_payload=_b64(card.encrypted_payload),
+        nonce=_b64(card.nonce),
+        sequence_number=card.sequence_number,
+        updated_at=card.updated_at,
+        expires_at=card.expires_at,
+    )
+    
+    await get_event_bus().publish_to_user(
+        user_id=card.user_id,
+        event_type="card.upsert",
+        data=item.model_dump(mode="json"),
+    )
+    
+    return item
+
+
+def _build_delete_envelope_bytes(payload: LiveCardDeleteRequest) -> bytes:
+    """Canonical envelope for live card delete (Codex consultation 62 RED #5).
+
+    Binds `user_id` so a delete signature for one user's card cannot be
+    replayed against another user's card with the same (sender, card_key).
+    Uses the same `assemble_envelope` canonicalization as the upsert path
+    so signing libraries on the sender side stay consistent across the
+    two routes.
+    """
+    return assemble_envelope(
+        {
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+            "card_key": payload.card_key,
+        }
+    )
+
+
+@router.post("/delete", status_code=status.HTTP_204_NO_CONTENT)
+async def delete(
+    payload: LiveCardDeleteRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    envelope_bytes = _build_delete_envelope_bytes(payload)
+    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
+
+    await delete_live_card(
+        db,
+        sender_id=payload.sender_id,
+        user_id=payload.user_id,
+        card_key=payload.card_key,
+    )
+
+    # SSE fanout to all of the user's devices so they drop the card locally.
+    # Idempotent: if the card didn't exist, delete_live_card no-ops; we still
+    # publish so any stale local copy on another device clears (defense in
+    # depth ג€” the upsert path could have raced an earlier delete).
+    await get_event_bus().publish_to_user(
+        user_id=payload.user_id,
+        event_type="card.delete",
+        data={
+            "sender_id": str(payload.sender_id),
+            "card_key": payload.card_key,
+        },
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+ succeeded in 291ms:
+"""Message routes ׳’ג‚¬ג€ send, inbox, fetch single, dismiss.
+
+Sender authentication for ``POST /send`` uses an Ed25519 envelope signature
+verified against the registered sender's public key. Users authenticate
+inbox/fetch/dismiss routes via the JWT session.
+"""
+
+from __future__ import annotations
+
+import base64
+import uuid
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import AuthContext, current_auth_context
+from app.crypto.aead import assemble_envelope
+from app.services.nonce_replay import record_nonce_or_reject
+from app.crypto.signatures import verify_message_envelope
+from app.db import get_db
+from app.middleware.rate_limit import rate_limit
+from app.models import Sender
+from app.schemas import (
+    InboxFeedResponse,
+    LiveCardInboxItem,
+    MessageDetailResponse,
+    MessageInboxItem,
+    MessageInboxItemExtended,
+    MessageInboxResponse,
+    MessageSendRequest,
+    MessageSendResponse,
+    decode_base64,
+)
+from app.services.cards import get_live_cards_for_user
+from app.services.messages import (
+    ExpiredEnvelopeError,
+    MessageNotFoundError,
+    NoActiveDeviceWithPluginError,
+    NonceReplayError,
+    PairingMissingError,
+    PluginInactiveError,
+    get_message_for_user,
+    inbox_for_device,
+    mark_dismissed,
+    parse_pointer,
+    store_message,
+)
+from app.services.devices import touch_device_last_seen
+from app.services.events import get_event_bus
+from app.services.push import push_dismiss_to_other_devices, push_message_to_user_devices
+from app.services.senders import (
+    SenderNotFoundError,
+    SenderRevokedError,
+    get_active_sender,
+)
+
+router = APIRouter(tags=["messages"])
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _build_envelope_bytes(payload: MessageSendRequest) -> bytes:
+    """Build the canonical 7-field envelope the sender signs (matches crypto-spec ײ²ֲ§4.1)."""
+    if payload.expires_at is None:
+        raise HTTPException(status_code=400, detail="expires_at is required")
+    return assemble_envelope(
+        {
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+            "plugin_id": str(payload.plugin_id),
+            "min_plugin_version": payload.min_plugin_version or "",
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
+            "encrypted_body": payload.encrypted_body,
+            "nonce": payload.nonce,
+        }
+    )
+
+
+@router.post("/send", response_model=MessageSendResponse, status_code=status.HTTP_201_CREATED)
+async def send_message(
+    payload: MessageSendRequest,
+    request: Request,
+    _: None = Depends(rate_limit("message_send_ip")),
+    db: AsyncSession = Depends(get_db),
+) -> MessageSendResponse:
+    if payload.expires_at is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expires_at is required")
+
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    envelope_bytes = _build_envelope_bytes(payload)
+    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
+
+    # Per-sender rate limit AFTER signature verification (so spammers can't
+    # inflate someone else's bucket by spoofing the body sender_id).
+    request.state.sender_id = str(payload.sender_id)
+    request.state.user_id = str(payload.user_id)
+    from app.middleware.rate_limit import check_rate_limit
+    from app.middleware.rate_limit_config import RATE_LIMITS
+    await check_rate_limit(db, request, RATE_LIMITS["message_send"])
+    await check_rate_limit(db, request, RATE_LIMITS["message_send_user_hour"])
+
+    # Replay check AFTER signature verification (so attackers can't OOM the
+    # nonce table by spamming junk envelopes). Phase 7: durable
+    # Postgres-backed registry. The insert lives in the same session as
+    # store_message ג€” they commit together atomically, so a failed
+    # store_message rolls back the nonce burn and the sender can retry.
+    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+
+    try:
+        message = await store_message(
+            db,
+            sender_id=payload.sender_id,
+            user_id=payload.user_id,
+            plugin_id=payload.plugin_id,
+            encrypted_body=decode_base64(payload.encrypted_body, field_name="encrypted_body", minimum=16),
+            nonce=nonce_bytes,
+            envelope_signature=signature,
+            min_plugin_version=payload.min_plugin_version,
+            expires_at=payload.expires_at,
+        )
+    except ExpiredEnvelopeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except PairingMissingError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no active pairing") from exc
+    except PluginInactiveError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing, revoked, or not owned by sender") from exc
+    except NoActiveDeviceWithPluginError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active devices") from exc
+    except NonceReplayError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
+
+    await push_message_to_user_devices(db, message=message)
+    # SSE hint: nudge any device the recipient has in foreground to pull
+    # /v1/messages/inbox now. Devices in background rely on the FCM
+    # wakeup already triggered by push_message_to_user_devices.
+    await get_event_bus().publish_to_user(
+        user_id=message.user_id,
+        event_type="inbox.changed",
+        data={"message_id": str(message.id), "sent_at": message.sent_at.isoformat()},
+    )
+    return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
+
+
+@router.get("/inbox", response_model=InboxFeedResponse)
+async def inbox(
+    since: datetime | None = Query(None),
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> InboxFeedResponse:
+    # Device identity comes from the JWT ׳’ג‚¬ג€ no separate query param, and
+    # the auth dependency already verified the device is not revoked.
+    # Bump last_seen so Settings ׳’ג€ ג€™ Devices shows fresh activity.
+    await touch_device_last_seen(db, device_id=ctx.device.id)
+
+    # 1. Fetch event messages.
+    messages, next_since = await inbox_for_device(
+        db,
+        user_id=ctx.user.id,
+        device_id=ctx.device.id,
+        since=since,
+    )
+
+    # 2. Fetch live cards.
+    live_cards = await get_live_cards_for_user(db, user_id=ctx.user.id)
+
+    # 3. Project plugin_identifiers in one batch.
+    plugin_ids = list({m.plugin_id for m in messages} | {c.plugin_id for c in live_cards})
+    identifier_by_id: dict[uuid.UUID, str] = {}
+    if plugin_ids:
+        from app.models import Plugin
+        from sqlalchemy import select as sql_select
+        rows = await db.execute(
+            sql_select(Plugin.id, Plugin.plugin_identifier).where(Plugin.id.in_(plugin_ids))
+        )
+        identifier_by_id = {row[0]: row[1] for row in rows.all()}
+
+    # 4. Build the unified feed.
+    items: list[MessageInboxItemExtended | LiveCardInboxItem] = []
+
+    for m in messages:
+        item = _message_to_inbox_item(m, identifier_by_id.get(m.plugin_id, ""))
+        items.append(MessageInboxItemExtended(**item.model_dump()))
+
+    for c in live_cards:
+        items.append(LiveCardInboxItem(
+            id=c.id,
+            sender_id=c.sender_id,
+            plugin_id=c.plugin_id,
+            plugin_identifier=identifier_by_id.get(c.plugin_id, ""),
+            card_key=c.card_key,
+            encrypted_payload=_b64(c.encrypted_payload),
+            nonce=_b64(c.nonce),
+            sequence_number=c.sequence_number,
+            updated_at=c.updated_at,
+            expires_at=c.expires_at,
+        ))
+
+    return InboxFeedResponse(items=items, next_since=next_since)
+
+
+@router.get("/{message_id}", response_model=MessageDetailResponse)
+async def get_message(
+    message_id: uuid.UUID,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> MessageDetailResponse:
+    try:
+        message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
+    # Fetch plugin_identifier for this one message.
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+    plugin_row = await db.execute(
+        sql_select(Plugin.plugin_identifier).where(Plugin.id == message.plugin_id)
+    )
+    identifier = plugin_row.scalar_one_or_none() or ""
+    return MessageDetailResponse(**_message_to_inbox_item(message, identifier).model_dump())
+
+
+@router.post("/{message_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+async def dismiss_message(
+    message_id: uuid.UUID,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    # Device comes from the JWT ׳’ג‚¬ג€ no query param, no ownership check (the
+    # auth dependency already verified the device exists, belongs to the
+    # user, and is not revoked).
+    try:
+        message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
+
+    try:
+        await mark_dismissed(db, message_id=message_id, device_id=ctx.device.id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery row not found") from exc
+
+    # Fan out the dismiss event to other devices. The plugin's dismissBehavior
+    # is encoded on the device side (in the plugin manifest), but the platform
+    # always sends the event ׳’ג‚¬ג€ devices decide locally whether to act on it.
+    await push_dismiss_to_other_devices(db, message=message, dismissing_device_id=ctx.device.id)
+    # SSE hint: nudge OTHER foreground devices to update their local
+    # dismiss state. The dismissing device knows already; we mark its id
+    # so the client-side handler can no-op for self-originated events.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="dismiss",
+        data={"message_id": str(message_id), "source_device_id": str(ctx.device.id)},
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _message_to_inbox_item(message, plugin_identifier: str) -> MessageInboxItem:  # noqa: ANN001
+    encrypted_body, nonce, envelope_signature = parse_pointer(message.encrypted_body_pointer)
+    return MessageInboxItem(
+        id=message.id,
+        sender_id=message.sender_id,
+        plugin_id=message.plugin_id,
+        plugin_identifier=plugin_identifier,
+        min_plugin_version=message.min_plugin_version,
+        encrypted_body=_b64(encrypted_body),
+        nonce=_b64(nonce),
+        envelope_signature=_b64(envelope_signature),
+        sent_at=message.sent_at,
+        expires_at=message.expires_at,
+    )
+
+ succeeded in 312ms:
+from collections.abc import AsyncIterator
+
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from app.config import Settings
+
+_engine: AsyncEngine | None = None
+_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def init_engine(database_url: str | None = None) -> AsyncEngine:
+    global _engine, _session_factory
+
+    if _engine is None:
+        if database_url is None:
+            database_url = Settings().database_url
+
+        _engine = create_async_engine(
+            database_url,
+            pool_pre_ping=True,
+        )
+        _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+
+    return _engine
+
+
+async def dispose_engine() -> None:
+    global _engine, _session_factory
+
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None
+        _session_factory = None
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    if _session_factory is None:
+        init_engine()
+
+    assert _session_factory is not None
+    async with _session_factory() as session:
+        yield session
+
+ succeeded in 319ms:
+import asyncio
+import re
+from collections.abc import AsyncIterator, Iterator
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+
+from app.config import Settings
+from app.db import get_db
+from app.main import app
+from app.models import Base
+
+TEST_JWT_SECRET = "test-secret-with-at-least-32-bytes"
+TEST_DATABASE_NAME = "syncler_test"
+
+
+def _test_database_url() -> str:
+    base_url = make_url(Settings(jwt_secret=TEST_JWT_SECRET).database_url)
+    return base_url.set(database=TEST_DATABASE_NAME).render_as_string(hide_password=False)
+
+
+async def _recreate_database(database_url: str) -> None:
+    url = make_url(database_url)
+    database_name = url.database
+    if database_name is None or not re.fullmatch(r"[A-Za-z0-9_]+", database_name):
+        raise RuntimeError(f"Unsafe test database name: {database_name!r}")
+
+    admin_url = url.set(database="postgres")
+    admin_engine = create_async_engine(
+        admin_url.render_as_string(hide_password=False),
+        isolation_level="AUTOCOMMIT",
+    )
+    try:
+        async with admin_engine.connect() as connection:
+            await connection.execute(
+                text(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = :database_name
+                      AND pid <> pg_backend_pid()
+                    """
+                ),
+                {"database_name": database_name},
+            )
+            await connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+            await connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+    finally:
+        await admin_engine.dispose()
+
+
+async def _drop_database(database_url: str) -> None:
+    url = make_url(database_url)
+    database_name = url.database
+    if database_name is None or not re.fullmatch(r"[A-Za-z0-9_]+", database_name):
+        raise RuntimeError(f"Unsafe test database name: {database_name!r}")
+
+    admin_url = url.set(database="postgres")
+    admin_engine = create_async_engine(
+        admin_url.render_as_string(hide_password=False),
+        isolation_level="AUTOCOMMIT",
+    )
+    try:
+        async with admin_engine.connect() as connection:
+            await connection.execute(
+                text(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = :database_name
+                      AND pid <> pg_backend_pid()
+                    """
+                ),
+                {"database_name": database_name},
+            )
+            await connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+    finally:
+        await admin_engine.dispose()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_database() -> Iterator[str]:
+    database_url = _test_database_url()
+    asyncio.run(_recreate_database(database_url))
+    try:
+        yield database_url
+    finally:
+        asyncio.run(_drop_database(database_url))
+
+
+@pytest.fixture
+def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield loop
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+@pytest.fixture
+def test_settings(test_database: str, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.setenv("DATABASE_URL", test_database)
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    return Settings(database_url=test_database, jwt_secret=TEST_JWT_SECRET)
+
+
+@pytest.fixture
+async def engine(test_settings: Settings) -> AsyncIterator[AsyncEngine]:
+    test_engine = create_async_engine(test_settings.database_url, pool_pre_ping=True)
+    async with test_engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+        await connection.run_sync(Base.metadata.create_all)
+
+    try:
+        yield test_engine
+    finally:
+        async with test_engine.begin() as connection:
+            await connection.run_sync(Base.metadata.drop_all)
+        await test_engine.dispose()
+
+
+@pytest.fixture
+async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            yield session
+        finally:
+            await session.close()
+            if transaction.is_active:
+                await transaction.rollback()
+
+
+@pytest.fixture
+async def app_client(db_session: AsyncSession) -> AsyncIterator[AsyncClient]:
+    async def override_get_db() -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    transport = ASGITransport(app=app, client=("127.0.0.1", 12345))
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+
+codex
+One thing is standing out: the model and migration are not fully shape-matched. I’m checking whether that only affects future autogenerate/parity tests or whether it changes runtime behavior in the test DB created from metadata.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path server/app/services/messages.py,server/app/services/cards.py -Pattern "MAX_RETENTION|MAX_TTL|expires_at|NonceReplayError|nonce" -Context 2,4' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path server/tests/*.py -Pattern "nonce|replay|PairingMissing|no active pairing|card.upsert|cards/upsert|messages/send" -Context 2,4' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path server/app/**/*.py -Pattern "get_global_registry|reset_global_registry|NonceRegistry|NONCE_REGISTRY" -Context 1,2' in D:\Projects\syncler
+ succeeded in 324ms:
+
+  server\app\crypto\nonce.py:4:`server/app/services/nonce_replay.py` (Postgres-backed,
+> server\app\crypto\nonce.py:5:multi-worker-safe). The previous in-memory `NonceRegistry`
+  server\app\crypto\nonce.py:6:implementation was removed because it lost state on worker restart
+  server\app\crypto\nonce.py:7:and didn't synchronize across multiple uvicorn workers.
+  server\app\services\nonce_replay.py:2:
+> server\app\services\nonce_replay.py:3:Replaces the in-memory `NonceRegistry` (`app/crypto/nonce.py`) with a
+  server\app\services\nonce_replay.py:4:Postgres-backed implementation that survives worker restarts and
+  server\app\services\nonce_replay.py:5:synchronizes across multiple uvicorn workers.
+
+
+
+ succeeded in 327ms:
+
+  server\app\services\messages.py:13:
+  server\app\services\messages.py:14:DEFAULT_RETENTION = timedelta(days=30)
+> server\app\services\messages.py:15:MAX_RETENTION = timedelta(days=30)
+  server\app\services\messages.py:16:
+  server\app\services\messages.py:17:
+  server\app\services\messages.py:18:class MessageError(Exception):
+  server\app\services\messages.py:19:    """Base class for message service errors."""
+  server\app\services\messages.py:33:
+  server\app\services\messages.py:34:class ExpiredEnvelopeError(MessageError):
+> server\app\services\messages.py:35:    """The signed envelope's expires_at is in the past or beyond the cap."""
+  server\app\services\messages.py:36:
+  server\app\services\messages.py:37:
+> server\app\services\messages.py:38:class NonceReplayError(MessageError):
+> server\app\services\messages.py:39:    """The (sender_id, nonce) pair was already used."""
+  server\app\services\messages.py:40:
+  server\app\services\messages.py:41:
+  server\app\services\messages.py:42:class MessageNotFoundError(MessageError):
+  server\app\services\messages.py:43:    """Message does not exist for this user."""
+  server\app\services\messages.py:98:    plugin_id: uuid.UUID,
+  server\app\services\messages.py:99:    encrypted_body: bytes,
+> server\app\services\messages.py:100:    nonce: bytes,
+  server\app\services\messages.py:101:    envelope_signature: bytes,
+  server\app\services\messages.py:102:    min_plugin_version: str | None,
+> server\app\services\messages.py:103:    expires_at: datetime,
+  server\app\services\messages.py:104:) -> Message:
+  server\app\services\messages.py:105:    now = datetime.now(UTC)
+> server\app\services\messages.py:106:    if expires_at <= now:
+> server\app\services\messages.py:107:        raise ExpiredEnvelopeError("expires_at is not in the future")
+> server\app\services\messages.py:108:    if expires_at > now + MAX_RETENTION:
+> server\app\services\messages.py:109:        raise ExpiredEnvelopeError("expires_at exceeds 30-day retention cap")
+  server\app\services\messages.py:110:
+  server\app\services\messages.py:111:    pairing = await _pairing(db, sender_id=sender_id, user_id=user_id)
+  server\app\services\messages.py:112:    if pairing is None:
+  server\app\services\messages.py:113:        raise PairingMissingError("no active pairing")
+  server\app\services\messages.py:129:    # Encrypted body is opaque to the server; we keep it in a separate blob 
+table or
+  server\app\services\messages.py:130:    # inline. For V1 we keep it inline via an "encrypted_body_pointer" addressed 
+JSON.
+> server\app\services\messages.py:131:    pointer = _build_pointer(encrypted_body, nonce, envelope_signature)
+  server\app\services\messages.py:132:
+  server\app\services\messages.py:133:    message = Message(
+  server\app\services\messages.py:134:        id=uuid.uuid4(),
+  server\app\services\messages.py:135:        sender_id=sender_id,
+  server\app\services\messages.py:138:        encrypted_body_pointer=pointer,
+  server\app\services\messages.py:139:        min_plugin_version=min_plugin_version,
+> server\app\services\messages.py:140:        expires_at=expires_at,
+  server\app\services\messages.py:141:    )
+  server\app\services\messages.py:142:    db.add(message)
+  server\app\services\messages.py:143:    await db.flush()
+  server\app\services\messages.py:144:
+  server\app\services\messages.py:167:                Message.id == message_id,
+  server\app\services\messages.py:168:                Message.user_id == user_id,
+> server\app\services\messages.py:169:                Message.expires_at > now,
+  server\app\services\messages.py:170:            ),
+  server\app\services\messages.py:171:        ),
+  server\app\services\messages.py:172:    )
+  server\app\services\messages.py:173:    message = result.scalar_one_or_none()
+  server\app\services\messages.py:205:            and_(
+  server\app\services\messages.py:206:                Message.user_id == user_id,
+> server\app\services\messages.py:207:                Message.expires_at > now,
+  server\app\services\messages.py:208:                DeliveryStatus.dismissed_at.is_(None),
+  server\app\services\messages.py:209:            ),
+  server\app\services\messages.py:210:        )
+  server\app\services\messages.py:211:        .order_by(Message.sent_at.asc())
+  server\app\services\messages.py:261:
+  server\app\services\messages.py:262:
+> server\app\services\messages.py:263:def _build_pointer(encrypted_body: bytes, nonce: bytes, envelope_signature: 
+bytes) -> str:
+  server\app\services\messages.py:264:    """Build the encrypted_body_pointer column value.
+  server\app\services\messages.py:265:
+  server\app\services\messages.py:266:    V1 stores the ciphertext inline as base64 segments separated by ``|`` so the
+  server\app\services\messages.py:267:    server never decodes it and never sees plaintext. A future migration may
+  server\app\services\messages.py:271:
+  server\app\services\messages.py:272:    encoded = base64.b64encode(encrypted_body).decode("ascii")
+> server\app\services\messages.py:273:    nonce_encoded = base64.b64encode(nonce).decode("ascii")
+  server\app\services\messages.py:274:    sig_encoded = base64.b64encode(envelope_signature).decode("ascii")
+> server\app\services\messages.py:275:    return f"inline:{nonce_encoded}|{encoded}|{sig_encoded}"
+  server\app\services\messages.py:276:
+  server\app\services\messages.py:277:
+  server\app\services\messages.py:278:def parse_pointer(pointer: str) -> tuple[bytes, bytes, bytes]:
+  server\app\services\messages.py:279:    """Inverse of :func:`_build_pointer`."""
+  server\app\services\messages.py:286:    if len(parts) != 3:
+  server\app\services\messages.py:287:        raise ValueError("malformed pointer")
+> server\app\services\messages.py:288:    nonce = base64.b64decode(parts[0])
+  server\app\services\messages.py:289:    encrypted_body = base64.b64decode(parts[1])
+  server\app\services\messages.py:290:    envelope_signature = base64.b64decode(parts[2])
+> server\app\services\messages.py:291:    return encrypted_body, nonce, envelope_signature
+  server\app\services\cards.py:11:from app.models import LiveCard, Pairing, Plugin
+  server\app\services\cards.py:12:
+> server\app\services\cards.py:13:# Server-enforced 48h TTL ceiling. Sender-supplied `expires_at` is clamped
+> server\app\services\cards.py:14:# against `now + MAX_TTL` so a malicious or buggy sender can't squat a card
+  server\app\services\cards.py:15:# slot indefinitely (Codex consultation 62 RED #4). Aligns with the Phase 3b
+  server\app\services\cards.py:16:# plan in .triad/50-agreement-and-plan.md.
+> server\app\services\cards.py:17:MAX_TTL = timedelta(hours=48)
+  server\app\services\cards.py:18:
+  server\app\services\cards.py:19:
+  server\app\services\cards.py:20:class CardError(Exception):
+  server\app\services\cards.py:21:    """Base class for card service errors."""
+  server\app\services\cards.py:35:
+  server\app\services\cards.py:36:class ExpiredEnvelopeError(CardError):
+> server\app\services\cards.py:37:    """expires_at is not in the future or exceeds the server-enforced cap."""
+  server\app\services\cards.py:38:
+  server\app\services\cards.py:39:
+  server\app\services\cards.py:40:class SequenceNumberRegressionError(CardError):
+  server\app\services\cards.py:41:    """New sequence number is not greater than existing."""
+  server\app\services\cards.py:50:    card_key: str,
+  server\app\services\cards.py:51:    encrypted_payload: bytes,
+> server\app\services\cards.py:52:    nonce: bytes,
+  server\app\services\cards.py:53:    sequence_number: int,
+> server\app\services\cards.py:54:    expires_at: datetime,
+  server\app\services\cards.py:55:) -> LiveCard:
+  server\app\services\cards.py:56:    now = datetime.now(UTC)
+  server\app\services\cards.py:57:    # TTL enforcement (Codex consultation 62 RED #4): reject already-expired
+> server\app\services\cards.py:58:    # expires_at and clamp anything beyond the 48h cap. Mirrors the
+> server\app\services\cards.py:59:    # `store_message` MAX_RETENTION pattern in services/messages.py.
+> server\app\services\cards.py:60:    if expires_at <= now:
+> server\app\services\cards.py:61:        raise ExpiredEnvelopeError("expires_at is not in the future")
+> server\app\services\cards.py:62:    if expires_at > now + MAX_TTL:
+  server\app\services\cards.py:63:        raise ExpiredEnvelopeError(
+> server\app\services\cards.py:64:            f"expires_at exceeds the {int(MAX_TTL.total_seconds() // 3600)}h 
+live-card cap"
+  server\app\services\cards.py:65:        )
+  server\app\services\cards.py:66:
+  server\app\services\cards.py:67:    # Pairing check (Codex consultation 62 RED #3): live-card upsert MUST
+  server\app\services\cards.py:68:    # require an active (sender_id, user_id) pairing, same as the message
+  server\app\services\cards.py:120:        
+  server\app\services\cards.py:121:        existing.encrypted_payload = encrypted_payload
+> server\app\services\cards.py:122:        existing.nonce = nonce
+  server\app\services\cards.py:123:        existing.sequence_number = sequence_number
+  server\app\services\cards.py:124:        existing.updated_at = now
+> server\app\services\cards.py:125:        existing.expires_at = expires_at
+  server\app\services\cards.py:126:        card = existing
+  server\app\services\cards.py:127:    else:
+  server\app\services\cards.py:128:        card = LiveCard(
+  server\app\services\cards.py:129:            id=uuid.uuid4(),
+  server\app\services\cards.py:133:            card_key=card_key,
+  server\app\services\cards.py:134:            encrypted_payload=encrypted_payload,
+> server\app\services\cards.py:135:            nonce=nonce,
+  server\app\services\cards.py:136:            sequence_number=sequence_number,
+  server\app\services\cards.py:137:            created_at=now,
+  server\app\services\cards.py:138:            updated_at=now,
+> server\app\services\cards.py:139:            expires_at=expires_at,
+  server\app\services\cards.py:140:        )
+  server\app\services\cards.py:141:        db.add(card)
+  server\app\services\cards.py:142:
+  server\app\services\cards.py:143:    await db.commit()
+  server\app\services\cards.py:178:            and_(
+  server\app\services\cards.py:179:                LiveCard.user_id == user_id,
+> server\app\services\cards.py:180:                LiveCard.expires_at > now,
+  server\app\services\cards.py:181:            )
+  server\app\services\cards.py:182:        )
+  server\app\services\cards.py:183:    )
+  server\app\services\cards.py:184:    return list(result.scalars().all())
+  server\app\services\cards.py:186:
+  server\app\services\cards.py:187:async def prune_expired_cards(db: AsyncSession) -> int:
+> server\app\services\cards.py:188:    """Delete cards past their expires_at."""
+  server\app\services\cards.py:189:    now = datetime.now(UTC)
+> server\app\services\cards.py:190:    expired = await db.execute(select(LiveCard).where(LiveCard.expires_at <= now))
+  server\app\services\cards.py:191:    count = 0
+  server\app\services\cards.py:192:    for card in expired.scalars().all():
+  server\app\services\cards.py:193:        await db.delete(card)
+  server\app\services\cards.py:194:        count += 1
+
+
+
+ succeeded in 365ms:
+
+  server\tests\test_crypto.py:13:from app.crypto.argon2 import ARGON2_PARAMS_V1, params_for_version, 
+verify_auth_key_hash
+  server\tests\test_crypto.py:14:from app.crypto.hkdf import derive_pairing_key
+> server\tests\test_crypto.py:15:from app.crypto.nonce import generate_nonce
+  server\tests\test_crypto.py:16:from app.crypto.signatures import canonical_manifest_for_signing, 
+verify_message_envelope, verify_plugin_bundle
+  server\tests\test_crypto.py:17:from app.crypto.wire import pack_message, unpack_message
+  server\tests\test_crypto.py:18:
+  server\tests\test_crypto.py:19:
+  server\tests\test_crypto.py:44:ENVELOPE_FIELDS = AAD_FIELDS | {
+  server\tests\test_crypto.py:45:    "encrypted_body": "Y2lwaGVydGV4dC1zYW1wbGU=",
+> server\tests\test_crypto.py:46:    "nonce": "EBESExQVFhcYGRob",
+  server\tests\test_crypto.py:47:}
+  server\tests\test_crypto.py:48:ENVELOPE_BYTES = (
+  server\tests\test_crypto.py:49:    
+b'{"encrypted_body":"Y2lwaGVydGV4dC1zYW1wbGU=","expires_at":"2026-05-20T00:00:00Z",'
+> server\tests\test_crypto.py:50:    b'"min_plugin_version":"1.0.0","nonce":"EBESExQVFhcYGRob",'
+  server\tests\test_crypto.py:51:    b'"plugin_id":"plugin.weather","sender_id":"sender-alpha","user_id":"user-123"}'
+  server\tests\test_crypto.py:52:)
+> server\tests\test_crypto.py:53:NONCE = bytes.fromhex("101112131415161718191a1b")
+  server\tests\test_crypto.py:54:PLAINTEXT = b'{"temperature_c":21}'
+  server\tests\test_crypto.py:55:
+  server\tests\test_crypto.py:56:MANIFEST = {
+  server\tests\test_crypto.py:57:    "name": "Weather Plugin",
+  server\tests\test_crypto.py:98:    b'"sender_id":"55555555-6666-7777-8888-999999999999"}'
+  server\tests\test_crypto.py:99:)
+> server\tests\test_crypto.py:100:BOOTSTRAP_NONCE = bytes.fromhex("a0a1a2a3a4a5a6a7a8a9aaab")
+  server\tests\test_crypto.py:101:BOOTSTRAP_PLAINTEXT = (
+  server\tests\test_crypto.py:102:    b'{"pairing_key":"8PHy8/T19vf4+fr7/P3+/wARIjNEVWZ3iJmqu8zd7v8=",'
+  server\tests\test_crypto.py:103:    b'"user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'
+  server\tests\test_crypto.py:104:)
+  server\tests\test_crypto.py:179:    pairing_key = bytes.fromhex(PAIRING_KEY_HEX)
+  server\tests\test_crypto.py:180:    aad = assemble_aad(AAD_FIELDS)
+> server\tests\test_crypto.py:181:    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
+> server\tests\test_crypto.py:182:    wire = pack_message(NONCE, ciphertext_with_tag)
+  server\tests\test_crypto.py:183:
+  server\tests\test_crypto.py:184:    assert aad == AAD_BYTES
+  server\tests\test_crypto.py:185:    assert decrypt_message_body(pairing_key, wire, aad) == PLAINTEXT
+> server\tests\test_crypto.py:186:    # AES-GCM is deterministic given fixed key/nonce/plaintext/aad — sanity check.
+> server\tests\test_crypto.py:187:    assert AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad) == ciphertext_with_tag
+  server\tests\test_crypto.py:188:
+  server\tests\test_crypto.py:189:    with pytest.raises(InvalidTag):
+  server\tests\test_crypto.py:190:        decrypt_message_body(pairing_key, wire, aad + b"tampered")
+  server\tests\test_crypto.py:191:    with pytest.raises(ValueError):
+> server\tests\test_crypto.py:192:        pack_message(NONCE[:-1], ciphertext_with_tag)
+  server\tests\test_crypto.py:193:    with pytest.raises(ValueError):
+  server\tests\test_crypto.py:194:        assemble_aad({"sender_id": "sender-alpha"})
+  server\tests\test_crypto.py:195:    with pytest.raises(ValueError):
+  server\tests\test_crypto.py:196:        assemble_aad(AAD_FIELDS | {"extra": "not-in-v1"})
+  server\tests\test_crypto.py:201:
+  server\tests\test_crypto.py:202:    with pytest.raises(ValueError):
+> server\tests\test_crypto.py:203:        assemble_envelope(AAD_FIELDS)  # missing encrypted_body + nonce
+  server\tests\test_crypto.py:204:    with pytest.raises(ValueError):
+  server\tests\test_crypto.py:205:        assemble_envelope(ENVELOPE_FIELDS | {"unrelated": "x"})
+  server\tests\test_crypto.py:206:
+  server\tests\test_crypto.py:207:
+> server\tests\test_crypto.py:208:def test_generate_nonce_yields_12_bytes() -> None:
+> server\tests\test_crypto.py:209:    # Phase 7: the in-memory NonceRegistry was deleted (durable replay
+> server\tests\test_crypto.py:210:    # detection now lives in app.services.nonce_replay against
+  server\tests\test_crypto.py:211:    # Postgres). The integration tests for the DB-backed flow live in
+> server\tests\test_crypto.py:212:    # `test_nonce_replay.py`.
+> server\tests\test_crypto.py:213:    nonce = generate_nonce()
+> server\tests\test_crypto.py:214:    assert len(nonce) == 12
+  server\tests\test_crypto.py:215:
+  server\tests\test_crypto.py:216:
+  server\tests\test_crypto.py:217:def test_wire_pack_unpack_round_trip() -> None:
+  server\tests\test_crypto.py:218:    pairing_key = bytes.fromhex(PAIRING_KEY_HEX)
+  server\tests\test_crypto.py:219:    aad = assemble_aad(AAD_FIELDS)
+> server\tests\test_crypto.py:220:    ciphertext_with_tag = AESGCM(pairing_key).encrypt(NONCE, PLAINTEXT, aad)
+> server\tests\test_crypto.py:221:    wire = pack_message(NONCE, ciphertext_with_tag)
+> server\tests\test_crypto.py:222:    unpacked_nonce, unpacked_ciphertext = unpack_message(wire)
+  server\tests\test_crypto.py:223:
+> server\tests\test_crypto.py:224:    assert unpacked_nonce == NONCE
+  server\tests\test_crypto.py:225:    assert unpacked_ciphertext == ciphertext_with_tag
+  server\tests\test_crypto.py:226:
+  server\tests\test_crypto.py:227:    with pytest.raises(ValueError):
+  server\tests\test_crypto.py:228:        unpack_message(wire[:27])
+  server\tests\test_crypto.py:258:
+  server\tests\test_crypto.py:259:    # 3. AEAD round-trip
+> server\tests\test_crypto.py:260:    ciphertext = AESGCM(aead_key).encrypt(BOOTSTRAP_NONCE, BOOTSTRAP_PLAINTEXT, 
+BOOTSTRAP_AAD_JSON)
+  server\tests\test_crypto.py:261:    assert ciphertext.hex() == BOOTSTRAP_CIPHERTEXT_HEX
+  server\tests\test_crypto.py:262:    
+> server\tests\test_crypto.py:263:    decrypted = AESGCM(aead_key).decrypt(BOOTSTRAP_NONCE, ciphertext, 
+BOOTSTRAP_AAD_JSON)
+  server\tests\test_crypto.py:264:    assert decrypted == BOOTSTRAP_PLAINTEXT
+  server\tests\test_messages.py:29:
+  server\tests\test_messages.py:30:
+> server\tests\test_messages.py:31:# Phase 7: the in-memory nonce registry was removed; replay detection
+> server\tests\test_messages.py:32:# now uses the durable `nonce_replay` table. The test DB is recreated
+  server\tests\test_messages.py:33:# per test session via conftest, and individual tests use distinct
+> server\tests\test_messages.py:34:# senders / nonces, so no autouse reset fixture is needed.
+  server\tests\test_messages.py:35:
+  server\tests\test_messages.py:36:
+  server\tests\test_messages.py:37:async def _signup_and_login(client: AsyncClient, email: str = "alice@example.com") 
+-> tuple[uuid.UUID, str]:
+  server\tests\test_messages.py:38:    auth_key_hash = _b64(b"a" * 32)
+  server\tests\test_messages.py:122:    plugin_id: uuid.UUID,
+  server\tests\test_messages.py:123:    encrypted_body_b64: str,
+> server\tests\test_messages.py:124:    nonce_b64: str,
+  server\tests\test_messages.py:125:    expires_at: datetime,
+  server\tests\test_messages.py:126:    min_plugin_version: str = "",
+  server\tests\test_messages.py:127:) -> str:
+  server\tests\test_messages.py:128:    envelope = {
+  server\tests\test_messages.py:131:        "plugin_id": str(plugin_id),
+  server\tests\test_messages.py:132:        "encrypted_body": encrypted_body_b64,
+> server\tests\test_messages.py:133:        "nonce": nonce_b64,
+  server\tests\test_messages.py:134:        "min_plugin_version": min_plugin_version,
+  server\tests\test_messages.py:135:        "expires_at": _iso(expires_at),
+  server\tests\test_messages.py:136:    }
+  server\tests\test_messages.py:137:    envelope_bytes = json.dumps(envelope, sort_keys=True, separators=(",", 
+":")).encode("utf-8")
+  server\tests\test_messages.py:145:    plugin_id: uuid.UUID,
+  server\tests\test_messages.py:146:    private_key: Ed25519PrivateKey,
+> server\tests\test_messages.py:147:    nonce: bytes | None = None,
+  server\tests\test_messages.py:148:    expires_at: datetime | None = None,
+  server\tests\test_messages.py:149:) -> dict:
+> server\tests\test_messages.py:150:    nonce_bytes = nonce or (uuid.uuid4().bytes[:12])
+  server\tests\test_messages.py:151:    expires = expires_at or _future()
+  server\tests\test_messages.py:152:    encrypted_body = _b64(b"ciphertext-and-tag-padding")
+> server\tests\test_messages.py:153:    nonce_b64 = _b64(nonce_bytes)
+  server\tests\test_messages.py:154:    signature = _build_envelope_signature(
+  server\tests\test_messages.py:155:        private_key,
+  server\tests\test_messages.py:156:        sender_id=sender_id,
+  server\tests\test_messages.py:157:        user_id=user_id,
+  server\tests\test_messages.py:158:        plugin_id=plugin_id,
+  server\tests\test_messages.py:159:        encrypted_body_b64=encrypted_body,
+> server\tests\test_messages.py:160:        nonce_b64=nonce_b64,
+  server\tests\test_messages.py:161:        expires_at=expires,
+  server\tests\test_messages.py:162:    )
+  server\tests\test_messages.py:163:    return {
+  server\tests\test_messages.py:164:        "sender_id": str(sender_id),
+  server\tests\test_messages.py:166:        "plugin_id": str(plugin_id),
+  server\tests\test_messages.py:167:        "encrypted_body": encrypted_body,
+> server\tests\test_messages.py:168:        "nonce": nonce_b64,
+  server\tests\test_messages.py:169:        "envelope_signature": signature,
+  server\tests\test_messages.py:170:        "expires_at": _iso(expires),
+  server\tests\test_messages.py:171:    }
+  server\tests\test_messages.py:172:
+  server\tests\test_messages.py:184:        sender_id=sender_id, user_id=user_id, plugin_id=plugin_id, 
+private_key=private_key
+  server\tests\test_messages.py:185:    )
+> server\tests\test_messages.py:186:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:187:    assert send.status_code == 201, send.text
+  server\tests\test_messages.py:188:    message_id = send.json()["message_id"]
+  server\tests\test_messages.py:189:
+  server\tests\test_messages.py:190:    inbox = await app_client.get(
+  server\tests\test_messages.py:199:
+  server\tests\test_messages.py:200:@pytest.mark.asyncio
+> server\tests\test_messages.py:201:async def test_send_rejects_replayed_nonce(
+  server\tests\test_messages.py:202:    app_client: AsyncClient, db_session: AsyncSession
+  server\tests\test_messages.py:203:) -> None:
+  server\tests\test_messages.py:204:    user_id, session_token = await _signup_and_login(app_client)
+  server\tests\test_messages.py:205:    await _enroll_device(app_client, session_token)
+  server\tests\test_messages.py:207:    plugin_id = await _seed_pairing_and_plugin(db_session, user_id=user_id, 
+sender_id=sender_id)
+  server\tests\test_messages.py:208:
+> server\tests\test_messages.py:209:    fixed_nonce = b"X" * 12
+  server\tests\test_messages.py:210:    body = await _send_payload(
+> server\tests\test_messages.py:211:        sender_id=sender_id, user_id=user_id, plugin_id=plugin_id, 
+private_key=private_key, nonce=fixed_nonce
+  server\tests\test_messages.py:212:    )
+> server\tests\test_messages.py:213:    first = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:214:    assert first.status_code == 201, first.text
+  server\tests\test_messages.py:215:
+> server\tests\test_messages.py:216:    replay = await app_client.post("/v1/messages/send", json=body)
+> server\tests\test_messages.py:217:    assert replay.status_code == 409, replay.text
+  server\tests\test_messages.py:218:
+  server\tests\test_messages.py:219:
+  server\tests\test_messages.py:220:@pytest.mark.asyncio
+  server\tests\test_messages.py:221:async def test_send_rejects_plugin_from_other_sender(
+  server\tests\test_messages.py:242:        sender_id=sender_a, user_id=user_id, plugin_id=plugin_id, 
+private_key=private_key_a
+  server\tests\test_messages.py:243:    )
+> server\tests\test_messages.py:244:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:245:    assert send.status_code == 410, send.text  # plugin not owned by sender
+  server\tests\test_messages.py:246:
+  server\tests\test_messages.py:247:
+  server\tests\test_messages.py:248:@pytest.mark.asyncio
+  server\tests\test_messages.py:262:        expires_at=datetime.now(UTC) - timedelta(seconds=10),
+  server\tests\test_messages.py:263:    )
+> server\tests\test_messages.py:264:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:265:    assert send.status_code == 400, send.text
+  server\tests\test_messages.py:266:
+  server\tests\test_messages.py:267:
+  server\tests\test_messages.py:268:@pytest.mark.asyncio
+  server\tests\test_messages.py:290:        sender_id=sender_id, user_id=user_id, plugin_id=plugin_id, 
+private_key=private_key
+  server\tests\test_messages.py:291:    )
+> server\tests\test_messages.py:292:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:293:    assert send.status_code == 201, send.text
+  server\tests\test_messages.py:294:    message_id = send.json()["message_id"]
+  server\tests\test_messages.py:295:
+  server\tests\test_messages.py:296:    # The message is pullable from the inbox endpoint.
+  server\tests\test_messages.py:318:        sender_id=sender_id, user_id=user_id, plugin_id=plugin_id, 
+private_key=private_key
+  server\tests\test_messages.py:319:    )
+> server\tests\test_messages.py:320:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:321:    assert send.status_code == 410, send.text
+  server\tests\test_messages.py:322:
+  server\tests\test_messages.py:323:
+  server\tests\test_messages.py:324:@pytest.mark.asyncio
+  server\tests\test_messages.py:343:        sender_id=sender_id, user_id=user_id, plugin_id=plugin_id, 
+private_key=private_key
+  server\tests\test_messages.py:344:    )
+> server\tests\test_messages.py:345:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:346:    message_id = send.json()["message_id"]
+  server\tests\test_messages.py:347:
+  server\tests\test_messages.py:348:    dismiss = await app_client.post(
+  server\tests\test_messages.py:349:        f"/v1/messages/{message_id}/dismiss",
+  server\tests\test_messages.py:367:        "plugin_id": str(plugin_id),
+  server\tests\test_messages.py:368:        "encrypted_body": _b64(b"ciphertext-and-tag-padding"),
+> server\tests\test_messages.py:369:        "nonce": _b64(b"\x00" * 12),
+  server\tests\test_messages.py:370:        "envelope_signature": _b64(b"\xff" * 64),
+  server\tests\test_messages.py:371:        "expires_at": _iso(_future()),
+  server\tests\test_messages.py:372:    }
+> server\tests\test_messages.py:373:    send = await app_client.post("/v1/messages/send", json=body)
+  server\tests\test_messages.py:374:    assert send.status_code == 401, send.text
+> server\tests\test_nonce_replay.py:1:"""Phase 7 — durable per-sender nonce-replay registry tests.
+  server\tests\test_nonce_replay.py:2:
+  server\tests\test_nonce_replay.py:3:Schema-level + concurrency tests for the new Postgres-backed
+> server\tests\test_nonce_replay.py:4:nonce-replay table. The end-to-end replay rejection through
+> server\tests\test_nonce_replay.py:5:`POST /v1/messages/send` is covered by
+> server\tests\test_nonce_replay.py:6:`test_messages.py::test_send_rejects_replayed_nonce`; this file
+  server\tests\test_nonce_replay.py:7:focuses on the storage primitive itself.
+  server\tests\test_nonce_replay.py:8:"""
+  server\tests\test_nonce_replay.py:9:
+  server\tests\test_nonce_replay.py:10:from __future__ import annotations
+  server\tests\test_nonce_replay.py:18:from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+  server\tests\test_nonce_replay.py:19:
+> server\tests\test_nonce_replay.py:20:from app.models import NonceReplay, Sender
+> server\tests\test_nonce_replay.py:21:from app.services.nonce_replay import (
+> server\tests\test_nonce_replay.py:22:    NONCE_REPLAY_TTL,
+  server\tests\test_nonce_replay.py:23:    _cleanup_expired,
+  server\tests\test_nonce_replay.py:24:    cleanup_expired_with_lock,
+> server\tests\test_nonce_replay.py:25:    record_nonce_or_reject,
+  server\tests\test_nonce_replay.py:26:)
+  server\tests\test_nonce_replay.py:27:
+  server\tests\test_nonce_replay.py:28:
+  server\tests\test_nonce_replay.py:29:async def _make_sender(db: AsyncSession) -> uuid.UUID:
+  server\tests\test_nonce_replay.py:30:    """Create a minimal sender row so the FK constraint on
+> server\tests\test_nonce_replay.py:31:    nonce_replay.sender_id resolves."""
+  server\tests\test_nonce_replay.py:32:    sender = Sender(
+  server\tests\test_nonce_replay.py:33:        id=uuid.uuid4(),
+> server\tests\test_nonce_replay.py:34:        name="Nonce Test",
+  server\tests\test_nonce_replay.py:35:        public_key=b"\x00" * 32,
+  server\tests\test_nonce_replay.py:36:    )
+  server\tests\test_nonce_replay.py:37:    db.add(sender)
+  server\tests\test_nonce_replay.py:38:    await db.flush()
+  server\tests\test_nonce_replay.py:43:async def test_first_insert_returns_true(db_session: AsyncSession) -> None:
+  server\tests\test_nonce_replay.py:44:    sender_id = await _make_sender(db_session)
+> server\tests\test_nonce_replay.py:45:    assert await record_nonce_or_reject(db_session, sender_id, b"a" * 12) is 
+True
+  server\tests\test_nonce_replay.py:46:    row = await db_session.scalar(
+> server\tests\test_nonce_replay.py:47:        select(NonceReplay).where(NonceReplay.sender_id == sender_id),
+  server\tests\test_nonce_replay.py:48:    )
+  server\tests\test_nonce_replay.py:49:    assert row is not None
+> server\tests\test_nonce_replay.py:50:    assert row.nonce == b"a" * 12
+  server\tests\test_nonce_replay.py:51:
+  server\tests\test_nonce_replay.py:52:
+  server\tests\test_nonce_replay.py:53:@pytest.mark.asyncio
+> server\tests\test_nonce_replay.py:54:async def test_replay_returns_false(db_session: AsyncSession) -> None:
+  server\tests\test_nonce_replay.py:55:    sender_id = await _make_sender(db_session)
+> server\tests\test_nonce_replay.py:56:    nonce = b"b" * 12
+> server\tests\test_nonce_replay.py:57:    assert await record_nonce_or_reject(db_session, sender_id, nonce) is True
+> server\tests\test_nonce_replay.py:58:    # Same (sender, nonce) → ON CONFLICT DO NOTHING returns rowcount 0.
+> server\tests\test_nonce_replay.py:59:    assert await record_nonce_or_reject(db_session, sender_id, nonce) is False
+  server\tests\test_nonce_replay.py:60:
+  server\tests\test_nonce_replay.py:61:
+  server\tests\test_nonce_replay.py:62:@pytest.mark.asyncio
+  server\tests\test_nonce_replay.py:63:async def test_isolates_senders(db_session: AsyncSession) -> None:
+  server\tests\test_nonce_replay.py:64:    sender_a = await _make_sender(db_session)
+  server\tests\test_nonce_replay.py:65:    sender_b = await _make_sender(db_session)
+> server\tests\test_nonce_replay.py:66:    nonce = b"c" * 12
+> server\tests\test_nonce_replay.py:67:    assert await record_nonce_or_reject(db_session, sender_a, nonce) is True
+> server\tests\test_nonce_replay.py:68:    # Same nonce, different sender → not a replay.
+> server\tests\test_nonce_replay.py:69:    assert await record_nonce_or_reject(db_session, sender_b, nonce) is True
+  server\tests\test_nonce_replay.py:70:
+  server\tests\test_nonce_replay.py:71:
+  server\tests\test_nonce_replay.py:72:@pytest.mark.asyncio
+> server\tests\test_nonce_replay.py:73:async def test_rejects_non_12_byte_nonce(db_session: AsyncSession) -> None:
+  server\tests\test_nonce_replay.py:74:    sender_id = await _make_sender(db_session)
+  server\tests\test_nonce_replay.py:75:    with pytest.raises(ValueError, match="12 bytes"):
+> server\tests\test_nonce_replay.py:76:        await record_nonce_or_reject(db_session, sender_id, b"short")
+  server\tests\test_nonce_replay.py:77:    with pytest.raises(ValueError, match="12 bytes"):
+> server\tests\test_nonce_replay.py:78:        await record_nonce_or_reject(db_session, sender_id, b"a" * 16)
+  server\tests\test_nonce_replay.py:79:
+  server\tests\test_nonce_replay.py:80:
+  server\tests\test_nonce_replay.py:81:@pytest.mark.asyncio
+  server\tests\test_nonce_replay.py:82:async def test_cleanup_removes_only_expired_rows(db_session: AsyncSession) -> 
+None:
+  server\tests\test_nonce_replay.py:83:    sender_id = await _make_sender(db_session)
+  server\tests\test_nonce_replay.py:84:    # Insert one fresh + one stale row. Manually backdate the stale
+> server\tests\test_nonce_replay.py:85:    # row's seen_at past NONCE_REPLAY_TTL via UPDATE so we don't have
+  server\tests\test_nonce_replay.py:86:    # to wait 30 days.
+> server\tests\test_nonce_replay.py:87:    await record_nonce_or_reject(db_session, sender_id, b"f" * 12)
+> server\tests\test_nonce_replay.py:88:    await record_nonce_or_reject(db_session, sender_id, b"o" * 12)
+> server\tests\test_nonce_replay.py:89:    stale_cutoff = datetime.now(UTC) - NONCE_REPLAY_TTL - timedelta(hours=1)
+  server\tests\test_nonce_replay.py:90:    from sqlalchemy import update
+  server\tests\test_nonce_replay.py:91:    await db_session.execute(
+> server\tests\test_nonce_replay.py:92:        update(NonceReplay)
+> server\tests\test_nonce_replay.py:93:        .where(NonceReplay.nonce == b"o" * 12)
+  server\tests\test_nonce_replay.py:94:        .values(seen_at=stale_cutoff),
+  server\tests\test_nonce_replay.py:95:    )
+  server\tests\test_nonce_replay.py:96:    await db_session.flush()
+  server\tests\test_nonce_replay.py:97:
+  server\tests\test_nonce_replay.py:100:
+  server\tests\test_nonce_replay.py:101:    remaining = await db_session.scalars(
+> server\tests\test_nonce_replay.py:102:        select(NonceReplay).where(NonceReplay.sender_id == sender_id),
+  server\tests\test_nonce_replay.py:103:    )
+> server\tests\test_nonce_replay.py:104:    nonces = [r.nonce for r in remaining]
+> server\tests\test_nonce_replay.py:105:    assert b"f" * 12 in nonces
+> server\tests\test_nonce_replay.py:106:    assert b"o" * 12 not in nonces
+  server\tests\test_nonce_replay.py:107:
+  server\tests\test_nonce_replay.py:108:
+  server\tests\test_nonce_replay.py:109:@pytest.mark.asyncio
+  server\tests\test_nonce_replay.py:110:async def test_concurrent_inserts_via_separate_sessions(
+  server\tests\test_nonce_replay.py:112:) -> None:
+  server\tests\test_nonce_replay.py:113:    """Codex 95 missing-test: prove cross-worker safety. Two
+> server\tests\test_nonce_replay.py:114:    independent sessions racing the same (sender, nonce) must produce
+  server\tests\test_nonce_replay.py:115:    exactly one True and one False, regardless of which lands first.
+  server\tests\test_nonce_replay.py:116:    """
+  server\tests\test_nonce_replay.py:117:    # Bootstrap the sender via a third session committed up front so
+  server\tests\test_nonce_replay.py:118:    # both racing sessions can FK-reference it.
+  server\tests\test_nonce_replay.py:127:        sender_id = sender.id
+  server\tests\test_nonce_replay.py:128:
+> server\tests\test_nonce_replay.py:129:    nonce = b"r" * 12
+  server\tests\test_nonce_replay.py:130:
+  server\tests\test_nonce_replay.py:131:    async def worker() -> bool:
+  server\tests\test_nonce_replay.py:132:        async with AsyncSession(bind=engine, expire_on_commit=False) as s:
+> server\tests\test_nonce_replay.py:133:            result = await record_nonce_or_reject(s, sender_id, nonce)
+  server\tests\test_nonce_replay.py:134:            await s.commit()
+  server\tests\test_nonce_replay.py:135:            return result
+  server\tests\test_nonce_replay.py:136:
+  server\tests\test_nonce_replay.py:137:    # Fire two concurrent workers. The Postgres unique constraint
+  server\tests\test_nonce_replay.py:155:    """
+  server\tests\test_nonce_replay.py:156:    sender_id = await _make_sender(db_session)
+> server\tests\test_nonce_replay.py:157:    await record_nonce_or_reject(db_session, sender_id, b"x" * 12)
+  server\tests\test_nonce_replay.py:158:    deleted = await cleanup_expired_with_lock(db_session)
+  server\tests\test_nonce_replay.py:159:    # All entries fresh → 0 deletions, but NOT -1 (which would mean
+  server\tests\test_nonce_replay.py:160:    # the lock was contended).
+  server\tests\test_nonce_replay.py:161:    assert deleted >= 0
+  server\tests\test_phase3.py:45:
+  server\tests\test_phase3.py:46:
+> server\tests\test_phase3.py:47:# Phase 7: in-memory nonce registry deleted; replay detection now
+> server\tests\test_phase3.py:48:# uses the durable nonce_replay table. See test_messages.py for the
+  server\tests\test_phase3.py:49:# rationale on removing the autouse reset fixture.
+  server\tests\test_phase3.py:50:
+  server\tests\test_phase3.py:51:
+  server\tests\test_phase3.py:52:# ---------- shared bootstrap helpers ------------------------------------
+  server\tests\test_phase3.py:282:
+  server\tests\test_phase3.py:283:
+> server\tests\test_phase3.py:284:# ---------- Phase 3b: live card upsert security gates --------------------
+  server\tests\test_phase3.py:285:
+  server\tests\test_phase3.py:286:
+  server\tests\test_phase3.py:287:def _upsert_body(
+  server\tests\test_phase3.py:288:    sender_id: uuid.UUID,
+  server\tests\test_phase3.py:302:        "card_key": card_key,
+  server\tests\test_phase3.py:303:        "encrypted_payload": _b64(b"ciphertext-and-tag-padding"),
+> server\tests\test_phase3.py:304:        "nonce": _b64(uuid.uuid4().bytes[:12]),
+  server\tests\test_phase3.py:305:        "sequence_number": sequence_number,
+  server\tests\test_phase3.py:306:        "expires_at": _iso(expires),
+  server\tests\test_phase3.py:307:    }
+  server\tests\test_phase3.py:308:    envelope = {**body, "card_type": "live"}
+  server\tests\test_phase3.py:312:
+  server\tests\test_phase3.py:313:@pytest.mark.asyncio
+> server\tests\test_phase3.py:314:async def test_card_upsert_rejected_when_plugin_revoked(
+  server\tests\test_phase3.py:315:    app_client: AsyncClient, db_session: AsyncSession
+  server\tests\test_phase3.py:316:) -> None:
+  server\tests\test_phase3.py:317:    """Codex consultation 62 RED #2: revoked plugin must not upsert cards."""
+  server\tests\test_phase3.py:318:    user_id, bootstrap = await _signup_login(app_client, email="rev@example.com")
+  server\tests\test_phase3.py:324:
+  server\tests\test_phase3.py:325:    body = _upsert_body(sender_id, user_id, plugin_id, private_key)
+> server\tests\test_phase3.py:326:    response = await app_client.post("/v1/cards/upsert", json=body)
+  server\tests\test_phase3.py:327:    assert response.status_code == 410, response.text
+  server\tests\test_phase3.py:328:
+  server\tests\test_phase3.py:329:
+  server\tests\test_phase3.py:330:@pytest.mark.asyncio
+> server\tests\test_phase3.py:331:async def test_card_upsert_rejected_when_no_pairing(
+  server\tests\test_phase3.py:332:    app_client: AsyncClient, db_session: AsyncSession
+  server\tests\test_phase3.py:333:) -> None:
+  server\tests\test_phase3.py:334:    """Codex consultation 62 RED #3: missing active pairing must reject."""
+  server\tests\test_phase3.py:335:    user_id, bootstrap = await _signup_login(app_client, email="np@example.com")
+  server\tests\test_phase3.py:356:
+  server\tests\test_phase3.py:357:    body = _upsert_body(sender_id, user_id, plugin.id, private_key)
+> server\tests\test_phase3.py:358:    response = await app_client.post("/v1/cards/upsert", json=body)
+  server\tests\test_phase3.py:359:    assert response.status_code == 410, response.text
+  server\tests\test_phase3.py:360:
+  server\tests\test_phase3.py:361:
+  server\tests\test_phase3.py:362:@pytest.mark.asyncio
+> server\tests\test_phase3.py:363:async def test_card_upsert_rejected_when_expires_past(
+  server\tests\test_phase3.py:364:    app_client: AsyncClient, db_session: AsyncSession
+  server\tests\test_phase3.py:365:) -> None:
+  server\tests\test_phase3.py:366:    """Codex consultation 62 RED #4: already-expired expires_at is rejected."""
+  server\tests\test_phase3.py:367:    user_id, bootstrap = await _signup_login(app_client, email="exp1@example.com")
+  server\tests\test_phase3.py:376:        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+  server\tests\test_phase3.py:377:    )
+> server\tests\test_phase3.py:378:    response = await app_client.post("/v1/cards/upsert", json=body)
+  server\tests\test_phase3.py:379:    assert response.status_code == 400, response.text
+  server\tests\test_phase3.py:380:
+  server\tests\test_phase3.py:381:
+  server\tests\test_phase3.py:382:@pytest.mark.asyncio
+> server\tests\test_phase3.py:383:async def test_card_upsert_rejected_when_expires_exceeds_48h(
+  server\tests\test_phase3.py:384:    app_client: AsyncClient, db_session: AsyncSession
+  server\tests\test_phase3.py:385:) -> None:
+  server\tests\test_phase3.py:386:    """Codex consultation 62 RED #4: expires_at beyond the 48h cap is rejected."""
+  server\tests\test_phase3.py:387:    user_id, bootstrap = await _signup_login(app_client, email="exp2@example.com")
+  server\tests\test_phase3.py:396:        expires_at=_future(hours=72),  # > 48h cap
+  server\tests\test_phase3.py:397:    )
+> server\tests\test_phase3.py:398:    response = await app_client.post("/v1/cards/upsert", json=body)
+  server\tests\test_phase3.py:399:    assert response.status_code == 400, response.text
+  server\tests\test_phase3.py:400:
+  server\tests\test_phase3.py:401:
+  server\tests\test_phase3.py:402:@pytest.mark.asyncio
+> server\tests\test_phase3.py:403:async def test_card_upsert_sequence_regression_rejected(
+  server\tests\test_phase3.py:404:    app_client: AsyncClient, db_session: AsyncSession
+  server\tests\test_phase3.py:405:) -> None:
+  server\tests\test_phase3.py:406:    """Phase 3b: lower sequence_number than existing must 409."""
+  server\tests\test_phase3.py:407:    user_id, bootstrap = await _signup_login(app_client, email="seq@example.com")
+  server\tests\test_phase3.py:416:        card_key="seq-card", sequence_number=10,
+  server\tests\test_phase3.py:417:    )
+> server\tests\test_phase3.py:418:    r1 = await app_client.post("/v1/cards/upsert", json=first)
+  server\tests\test_phase3.py:419:    assert r1.status_code == 201, r1.text
+  server\tests\test_phase3.py:420:
+  server\tests\test_phase3.py:421:    older = _upsert_body(
+  server\tests\test_phase3.py:422:        sender_id, user_id, plugin_id, private_key,
+  server\tests\test_phase3.py:423:        card_key="seq-card", sequence_number=5,
+  server\tests\test_phase3.py:424:    )
+> server\tests\test_phase3.py:425:    r2 = await app_client.post("/v1/cards/upsert", json=older)
+  server\tests\test_phase3.py:426:    assert r2.status_code == 409, r2.text
+  server\tests\test_phase3.py:427:
+  server\tests\test_phase3.py:428:
+  server\tests\test_phase3.py:429:# ---------- Phase 3b: cross-user delete (Codex 62 RED #5) ----------------
+  server\tests\test_phase3.py:460:    for uid in (alice_user_id, bob_user_id):
+  server\tests\test_phase3.py:461:        body = _upsert_body(sender_id, uid, plugin_id, private_key, 
+card_key="shared-key")
+> server\tests\test_phase3.py:462:        r = await app_client.post("/v1/cards/upsert", json=body)
+  server\tests\test_phase3.py:463:        assert r.status_code == 201, r.text
+  server\tests\test_phase3.py:464:
+  server\tests\test_phase3.py:465:    # Build a delete envelope for ALICE's card and submit it.
+  server\tests\test_phase3.py:466:    alice_envelope = _canonical(
+  server\tests\test_phase3.py:539:        "plugin_id": str(plugin.id),
+  server\tests\test_phase3.py:540:        "encrypted_body": _b64(b"ciphertext-and-tag-padding"),
+> server\tests\test_phase3.py:541:        "nonce": _b64(uuid.uuid4().bytes[:12]),
+  server\tests\test_phase3.py:542:        "min_plugin_version": "",
+  server\tests\test_phase3.py:543:        "expires_at": _iso(expires),
+  server\tests\test_phase3.py:544:    }
+  server\tests\test_phase3.py:545:    sig = _b64(private_key.sign(_canonical(envelope)))
+  server\tests\test_phase3.py:549:        "plugin_id": str(plugin.id),
+  server\tests\test_phase3.py:550:        "encrypted_body": envelope["encrypted_body"],
+> server\tests\test_phase3.py:551:        "nonce": envelope["nonce"],
+  server\tests\test_phase3.py:552:        "envelope_signature": sig,
+  server\tests\test_phase3.py:553:        "expires_at": _iso(expires),
+  server\tests\test_phase3.py:554:    }
+> server\tests\test_phase3.py:555:    send = await app_client.post("/v1/messages/send", json=send_body)
+  server\tests\test_phase3.py:556:    assert send.status_code == 201, send.text
+  server\tests\test_phase3.py:557:    message_id = send.json()["message_id"]
+  server\tests\test_phase3.py:558:
+  server\tests\test_phase3.py:559:    # Confirm it shows up.
+
+
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/alembic/versions/0009_nonce_replay.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 45 -First 15' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/tests/test_nonce_replay.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 145 -First 20' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/services/nonce_replay.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 110 -First 35' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/models.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 288 -First 25' in D:\Projects\syncler
+ succeeded in 330ms:
+ 289:     by the message-expiry / card-expiry checks, so the replay
+ 290:     registry can safely forget them. See
+ 291:     `server/app/jobs/retention.py` for the periodic cleanup task
+ 292:     and `server/app/services/nonce_replay.py` for the best-effort
+ 293:     on-write cleanup.
+ 294:     """
+ 295: 
+ 296:     __tablename__ = "nonce_replay"
+ 297: 
+ 298:     sender_id: Mapped[UUID] = mapped_column(
+ 299:         UUID_TYPE,
+ 300:         ForeignKey("senders.id", ondelete="CASCADE"),
+ 301:         primary_key=True,
+ 302:     )
+ 303:     nonce: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+ 304:     seen_at: Mapped[datetime] = mapped_column(
+ 305:         DateTime(timezone=True),
+ 306:         nullable=False,
+ 307:         server_default=func.now(),
+ 308:         index=True,
+ 309:     )
+ 310: 
+ 311: 
+ 312: class RateLimitEvent(Base):
+ 313:     __tablename__ = "rate_limit_events"
+
+ succeeded in 342ms:
+ 146: async def test_cleanup_with_advisory_lock_runs_once(
+ 147:     db_session: AsyncSession,
+ 148: ) -> None:
+ 149:     """Single-session contention test: re-acquiring the same advisory
+ 150:     lock from a session that already holds it succeeds (Postgres
+ 151:     advisory locks are reentrant per session). The cross-session
+ 152:     contention is exercised in concurrent integration smoke; this
+ 153:     asserts the lock plumbing returns a real row count, not -1, in
+ 154:     the uncontended path.
+ 155:     """
+ 156:     sender_id = await _make_sender(db_session)
+ 157:     await record_nonce_or_reject(db_session, sender_id, b"x" * 12)
+ 158:     deleted = await cleanup_expired_with_lock(db_session)
+ 159:     # All entries fresh ג†’ 0 deletions, but NOT -1 (which would mean
+ 160:     # the lock was contended).
+ 161:     assert deleted >= 0
+
+ succeeded in 349ms:
+ 111:     # rely on the retention job (`app/jobs/retention.py`).
+ 112:     if inserted and random.random() < _ONWRITE_CLEANUP_PROBABILITY:
+ 113:         try:
+ 114:             await _cleanup_expired(db)
+ 115:         except Exception as exc:
+ 116:             # Cleanup is opportunistic ג€” never let a delete failure
+ 117:             # kill the request that just recorded a legitimate nonce.
+ 118:             _log.warning("on-write nonce_replay cleanup failed: %s", exc)
+ 119: 
+ 120:     return inserted
+ 121: 
+ 122: 
+ 123: async def _cleanup_expired(db: AsyncSession) -> int:
+ 124:     """Delete `nonce_replay` rows older than NONCE_REPLAY_TTL.
+ 125:     Returns the number of rows deleted. Safe to call concurrently
+ 126:     across workers ג€” each invocation operates on a distinct snapshot
+ 127:     via ``ix_nonce_replay_seen_at``.
+ 128:     """
+ 129:     cutoff = datetime.now(UTC) - NONCE_REPLAY_TTL
+ 130:     stmt = delete(NonceReplay).where(NonceReplay.seen_at < cutoff)
+ 131:     result = await db.execute(stmt)
+ 132:     deleted = result.rowcount or 0
+ 133:     if deleted:
+ 134:         _log.info("nonce_replay cleanup: deleted %d expired rows", deleted)
+ 135:     return deleted
+ 136: 
+ 137: 
+ 138: # Postgres advisory-lock key for the retention job. Arbitrary 64-bit
+ 139: # integer; needs to be stable across workers so they all try the
+ 140: # same lock. Use a hash of the constant name so it's distinct from
+ 141: # whatever other advisory locks the codebase grows.
+ 142: _RETENTION_ADVISORY_LOCK_KEY: Final[int] = 0x4E4F4E43455F524C  # b'NONCE_RL'
+ 143: 
+ 144: 
+ 145: async def cleanup_expired_with_lock(db: AsyncSession) -> int:
+
+ succeeded in 356ms:
+  46:             sa.DateTime(timezone=True),
+  47:             nullable=False,
+  48:             server_default=sa.func.now(),
+  49:         ),
+  50:         sa.PrimaryKeyConstraint("sender_id", "nonce", name="pk_nonce_replay"),
+  51:         sa.CheckConstraint(
+  52:             "octet_length(nonce) = 12",
+  53:             name="ck_nonce_replay_nonce_length",
+  54:         ),
+  55:     )
+  56:     op.create_index(
+  57:         "ix_nonce_replay_seen_at",
+  58:         "nonce_replay",
+  59:         ["seen_at"],
+  60:     )
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/tests/test_migration.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 35 -First 15' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/routers/cards.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 218 -First 45' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/services/nonce_replay.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ } | Select-Object -Skip 145 -First 35' in D:\Projects\syncler
+ succeeded in 312ms:
+ 219: 
+ 220:     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+ succeeded in 312ms:
+ 146:     """Periodic cleanup entry point for ``app/jobs/retention.py``.
+ 147: 
+ 148:     Acquires a Postgres advisory lock so only one worker runs the
+ 149:     DELETE per invocation (other workers no-op). Returns the number
+ 150:     of rows deleted, or -1 if another worker held the lock.
+ 151: 
+ 152:     Multi-worker safe: pg_try_advisory_lock returns False without
+ 153:     blocking when contended. Advisory locks are released on session
+ 154:     close (transaction-level) or on explicit pg_advisory_unlock.
+ 155:     """
+ 156:     result = await db.execute(
+ 157:         text("SELECT pg_try_advisory_lock(:k)"),
+ 158:         {"k": _RETENTION_ADVISORY_LOCK_KEY},
+ 159:     )
+ 160:     got_lock = bool(result.scalar())
+ 161:     if not got_lock:
+ 162:         return -1
+ 163:     try:
+ 164:         return await _cleanup_expired(db)
+ 165:     finally:
+ 166:         await db.execute(
+ 167:             text("SELECT pg_advisory_unlock(:k)"),
+ 168:             {"k": _RETENTION_ADVISORY_LOCK_KEY},
+ 169:         )
+
+ succeeded in 317ms:
+  36: def _alembic_config() -> Config:
+  37:     return Config(str(PROJECT_ROOT / "alembic.ini"))
+  38: 
+  39: 
+  40: def test_alembic_upgrade_head_and_downgrade_base(test_settings: Settings) -> None:
+  41:     asyncio.run(_reset_public_schema(test_settings.database_url))
+  42: 
+  43:     config = _alembic_config()
+  44:     command.upgrade(config, "head")
+  45: 
+  46:     created_tables = asyncio.run(_table_names(test_settings.database_url))
+  47:     assert created_tables - {"alembic_version"} == set(Base.metadata.tables.keys())
+  48: 
+  49:     command.downgrade(config, "base")
+  50: 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path . -Force | Select-Object -ExpandProperty Name' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-ChildItem -Path server -Force | Select-Object -ExpandProperty Name' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Select-String -Path pyproject.toml,server/pyproject.toml,setup.cfg,server/setup.cfg -Pattern "ruff|flake|lint|unused|F401" -Context 2,4 -ErrorAction SilentlyContinue' in D:\Projects\syncler
+ succeeded in 313ms:
+.pytest_cache
+.venv
+alembic
+app
+build
+pytest-cache-files-5efb56o2
+pytest-cache-files-8df_kv15
+pytest-cache-files-cdbefd61
+pytest-cache-files-fml_3af1
+pytest-cache-files-jwwxrdb0
+pytest-cache-files-kwg_1k_5
+pytest-cache-files-lz6wexoj
+pytest-cache-files-nq97_mnb
+pytest-cache-files-o8_fgyky
+pytest-cache-files-ouv85g96
+pytest-cache-files-svyb4y17
+pytest-cache-files-zt4rnlzh
+syncler_server.egg-info
+tests
+.env
+.env.example
+alembic.ini
+docker-compose.yml
+Dockerfile
+pyproject.toml
+README.md
+uvicorn.log
+
+ succeeded in 324ms:
+.claude
+.git
+.triad
+android
+create-plugin
+docs
+examples
+node_modules
+quotetest2
+sdk-plugin
+sdk-python
+server
+templtest2
+.editorconfig
+.gitignore
+.prettierrc
+eslint.config.js
+package-lock.json
+package.json
+README.md
+
+ exited 1 in 353ms:
+Select-String : Cannot find path 'D:\Projects\syncler\pyproject.toml' because it does not exist.
+At line:2 char:1
++ Select-String -Path pyproject.toml,server/pyproject.toml,setup.cfg,se ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\Projects\syncler\pyproject.toml:String) [Select-String], ItemNotFoun 
+   dException
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.SelectStringCommand
+ 
+
+2026-05-25T01:28:28.851155Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+Select-String : Cannot find path 'D:\Projects\syncler\pyproject.toml' because it does not exist.
+At line:2 char:1
++ Select-String -Path pyproject.toml,server/pyproject.toml,setup.cfg,se ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\Projects\syncler\pyproject.toml:String) [Select-String], ItemNotFoun 
+   dException
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.SelectStringCommand
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/pyproject.toml' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content server/app/jobs/retention.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }' in D:\Projects\syncler
+ succeeded in 240ms:
+[project]
+name = "syncler-server"
+version = "0.1.0"
+description = "FastAPI server for Syncler"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.12",
+    "uvicorn[standard]==0.34.2",
+    "sqlalchemy==2.0.41",
+    "alembic==1.15.2",
+    "asyncpg==0.30.0",
+    "pydantic==2.11.5",
+    "pydantic-settings==2.9.1",
+    "argon2-cffi==23.1.0",
+    "cryptography==45.0.3",
+    "pyjwt[crypto]==2.12.1",
+    "email-validator==2.2.0",
+    "aiosqlite==0.21.0",
+    "firebase-admin==6.5.0",
+    "httpx==0.28.1",
+    "pytest==8.3.5",
+    "pytest-asyncio==0.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "freezegun>=1.5.1,<2",
+]
+
+[build-system]
+requires = ["setuptools>=80.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+ succeeded in 248ms:
+   1: import asyncio
+   2: import json
+   3: from datetime import UTC, datetime, timedelta
+   4: 
+   5: from sqlalchemy import delete
+   6: from sqlalchemy.ext.asyncio import AsyncSession
+   7: 
+   8: from app.db import dispose_engine, get_db, init_engine
+   9: from app.models import LiveCard, Message, NonceReplay, Pairing, RateLimitEvent
+  10: from app.services.nonce_replay import (
+  11:     NONCE_REPLAY_TTL,
+  12:     cleanup_expired_with_lock,
+  13: )
+  14: 
+  15: 
+  16: async def prune_expired(session: AsyncSession) -> dict[str, int]:
+  17:     now = datetime.now(UTC)
+  18: 
+  19:     messages = await session.execute(delete(Message).where(Message.expires_at < now))
+  20:     live_cards = await session.execute(delete(LiveCard).where(LiveCard.expires_at < now))
+  21:     pairings = await session.execute(
+  22:         delete(Pairing).where(
+  23:             Pairing.revoked_at.is_not(None),
+  24:             Pairing.revoked_at < now - timedelta(days=180),
+  25:         )
+  26:     )
+  27:     rate_limit_events = await session.execute(
+  28:         delete(RateLimitEvent).where(RateLimitEvent.window_start < now - timedelta(days=7))
+  29:     )
+  30:     # Phase 7: durable nonce-replay registry cleanup. Uses a Postgres
+  31:     # advisory lock so multi-worker deployments don't all run the same
+  32:     # DELETE concurrently. Returns -1 if another worker held the lock
+  33:     # (no-op for this invocation); we surface that as 0 in the summary.
+  34:     nonce_replay = await cleanup_expired_with_lock(session)
+  35:     await session.commit()
+  36: 
+  37:     return {
+  38:         "messages": messages.rowcount or 0,
+  39:         "live_cards": live_cards.rowcount or 0,
+  40:         "pairings": pairings.rowcount or 0,
+  41:         "rate_limit_events": rate_limit_events.rowcount or 0,
+  42:         "nonce_replay": max(nonce_replay, 0),
+  43:     }
+  44: 
+  45: 
+  46: async def _main() -> None:
+  47:     init_engine()
+  48:     try:
+  49:         async for session in get_db():
+  50:             summary = await prune_expired(session)
+  51:             print(json.dumps(summary, sort_keys=True))
+  52:             break
+  53:     finally:
+  54:         await dispose_engine()
+  55: 
+  56: 
+  57: if __name__ == "__main__":
+  58:     asyncio.run(_main())
+
+codex
+**Findings**
+
+RED: [server/tests/test_nonce_replay.py](/D:/Projects/syncler/server/tests/test_nonce_replay.py:32) `_make_sender()` always uses `public_key=b"\x00" * 32`, but `senders.public_key` is unique. `test_isolates_senders` calls it twice in one test, so the second flush should violate `uq_senders_public_key`. This likely makes the new test file fail.
+
+YELLOW: [server/app/models.py](/D:/Projects/syncler/server/app/models.py:296) does not include the `ck_nonce_replay_nonce_length` check constraint that the migration creates at [0009_nonce_replay.py](/D:/Projects/syncler/server/alembic/versions/0009_nonce_replay.py:51). Runtime service validation mostly covers this, but metadata-created test DBs will not match production schema, and future autogenerate/parity checks will see drift.
+
+YELLOW: [server/app/services/nonce_replay.py](/D:/Projects/syncler/server/app/services/nonce_replay.py:112) catches cleanup failures inside the caller’s active transaction. In Postgres, many statement failures leave the transaction aborted; swallowing the exception does not restore the transaction, so the later `store_message` / `upsert_live_card` commit can still fail. The comment says cleanup should never kill the request, but this implementation cannot guarantee that unless cleanup runs in a separate transaction/session or avoids swallowing DB transaction-aborting errors.
+
+YELLOW: [server/tests/test_nonce_replay.py](/D:/Projects/syncler/server/tests/test_nonce_replay.py:146) does not actually test advisory-lock contention; it only tests the uncontended path. The docstring claims cross-session contention is exercised elsewhere, but I did not find that in the changed tests.
+
+**Area Status**
+
+Model + migration: YELLOW. Migration shape is good; model is missing the nonce-length `CheckConstraint`.
+
+Service: YELLOW. Core atomic insert design is sound. On-write cleanup failure handling is the main footgun. Advisory lock key is fine; I found no existing advisory locks, so practical collision risk is negligible.
+
+Routers: GREEN/YELLOW. Messages and card-upsert moved to a single `record_nonce_or_reject` before persistence, with correct transactional coupling in production. I would add one card-upsert replay route test, but I do not see a code bug in the route flow.
+
+Retention: GREEN. Hooking `cleanup_expired_with_lock` into `prune_expired` is fine. Minor cleanup: `NonceReplay` and `NONCE_REPLAY_TTL` imports are unused.
+
+Docs: GREEN/YELLOW. Scope and card-delete caveat are documented. Some new comments/docstrings appear mojibaked in the working tree, which is cosmetic but worth cleaning before commit.
+
+Tests: RED. The duplicate sender public key should fail, and advisory-lock contention is not really tested.
+
+**Open Questions**
+
+Card-delete replay gap: acceptable Phase 7 scoping if explicitly tracked as a separate security item. It is a real gap, but not introduced by durable nonce replay.
+
+On-write cleanup probability: acceptable. Retention job covers idle deployments.
+
+Advisory lock key: acceptable. No current collision found.
+
+Metadata/migration parity: mismatch found: model lacks the migration’s nonce-length check constraint. The current `test_migration.py` only compares table names, not full schema shape.
+
+**Commit Readiness**
+
+Not ready. Fix the duplicate test sender key and add the model check constraint before commit. I would also adjust on-write cleanup failure handling or remove the “never kill request” claim.
+tokens used
+61,463
+**Findings**
+
+RED: [server/tests/test_nonce_replay.py](/D:/Projects/syncler/server/tests/test_nonce_replay.py:32) `_make_sender()` always uses `public_key=b"\x00" * 32`, but `senders.public_key` is unique. `test_isolates_senders` calls it twice in one test, so the second flush should violate `uq_senders_public_key`. This likely makes the new test file fail.
+
+YELLOW: [server/app/models.py](/D:/Projects/syncler/server/app/models.py:296) does not include the `ck_nonce_replay_nonce_length` check constraint that the migration creates at [0009_nonce_replay.py](/D:/Projects/syncler/server/alembic/versions/0009_nonce_replay.py:51). Runtime service validation mostly covers this, but metadata-created test DBs will not match production schema, and future autogenerate/parity checks will see drift.
+
+YELLOW: [server/app/services/nonce_replay.py](/D:/Projects/syncler/server/app/services/nonce_replay.py:112) catches cleanup failures inside the caller’s active transaction. In Postgres, many statement failures leave the transaction aborted; swallowing the exception does not restore the transaction, so the later `store_message` / `upsert_live_card` commit can still fail. The comment says cleanup should never kill the request, but this implementation cannot guarantee that unless cleanup runs in a separate transaction/session or avoids swallowing DB transaction-aborting errors.
+
+YELLOW: [server/tests/test_nonce_replay.py](/D:/Projects/syncler/server/tests/test_nonce_replay.py:146) does not actually test advisory-lock contention; it only tests the uncontended path. The docstring claims cross-session contention is exercised elsewhere, but I did not find that in the changed tests.
+
+**Area Status**
+
+Model + migration: YELLOW. Migration shape is good; model is missing the nonce-length `CheckConstraint`.
+
+Service: YELLOW. Core atomic insert design is sound. On-write cleanup failure handling is the main footgun. Advisory lock key is fine; I found no existing advisory locks, so practical collision risk is negligible.
+
+Routers: GREEN/YELLOW. Messages and card-upsert moved to a single `record_nonce_or_reject` before persistence, with correct transactional coupling in production. I would add one card-upsert replay route test, but I do not see a code bug in the route flow.
+
+Retention: GREEN. Hooking `cleanup_expired_with_lock` into `prune_expired` is fine. Minor cleanup: `NonceReplay` and `NONCE_REPLAY_TTL` imports are unused.
+
+Docs: GREEN/YELLOW. Scope and card-delete caveat are documented. Some new comments/docstrings appear mojibaked in the working tree, which is cosmetic but worth cleaning before commit.
+
+Tests: RED. The duplicate sender public key should fail, and advisory-lock contention is not really tested.
+
+**Open Questions**
+
+Card-delete replay gap: acceptable Phase 7 scoping if explicitly tracked as a separate security item. It is a real gap, but not introduced by durable nonce replay.
+
+On-write cleanup probability: acceptable. Retention job covers idle deployments.
+
+Advisory lock key: acceptable. No current collision found.
+
+Metadata/migration parity: mismatch found: model lacks the migration’s nonce-length check constraint. The current `test_migration.py` only compares table names, not full schema shape.
+
+**Commit Readiness**
+
+Not ready. Fix the duplicate test sender key and add the model check constraint before commit. I would also adjust on-write cleanup failure handling or remove the “never kill request” claim.

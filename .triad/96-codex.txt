@@ -1,0 +1,37 @@
+**Findings**
+
+RED: [server/tests/test_nonce_replay.py](/D:/Projects/syncler/server/tests/test_nonce_replay.py:32) `_make_sender()` always uses `public_key=b"\x00" * 32`, but `senders.public_key` is unique. `test_isolates_senders` calls it twice in one test, so the second flush should violate `uq_senders_public_key`. This likely makes the new test file fail.
+
+YELLOW: [server/app/models.py](/D:/Projects/syncler/server/app/models.py:296) does not include the `ck_nonce_replay_nonce_length` check constraint that the migration creates at [0009_nonce_replay.py](/D:/Projects/syncler/server/alembic/versions/0009_nonce_replay.py:51). Runtime service validation mostly covers this, but metadata-created test DBs will not match production schema, and future autogenerate/parity checks will see drift.
+
+YELLOW: [server/app/services/nonce_replay.py](/D:/Projects/syncler/server/app/services/nonce_replay.py:112) catches cleanup failures inside the caller’s active transaction. In Postgres, many statement failures leave the transaction aborted; swallowing the exception does not restore the transaction, so the later `store_message` / `upsert_live_card` commit can still fail. The comment says cleanup should never kill the request, but this implementation cannot guarantee that unless cleanup runs in a separate transaction/session or avoids swallowing DB transaction-aborting errors.
+
+YELLOW: [server/tests/test_nonce_replay.py](/D:/Projects/syncler/server/tests/test_nonce_replay.py:146) does not actually test advisory-lock contention; it only tests the uncontended path. The docstring claims cross-session contention is exercised elsewhere, but I did not find that in the changed tests.
+
+**Area Status**
+
+Model + migration: YELLOW. Migration shape is good; model is missing the nonce-length `CheckConstraint`.
+
+Service: YELLOW. Core atomic insert design is sound. On-write cleanup failure handling is the main footgun. Advisory lock key is fine; I found no existing advisory locks, so practical collision risk is negligible.
+
+Routers: GREEN/YELLOW. Messages and card-upsert moved to a single `record_nonce_or_reject` before persistence, with correct transactional coupling in production. I would add one card-upsert replay route test, but I do not see a code bug in the route flow.
+
+Retention: GREEN. Hooking `cleanup_expired_with_lock` into `prune_expired` is fine. Minor cleanup: `NonceReplay` and `NONCE_REPLAY_TTL` imports are unused.
+
+Docs: GREEN/YELLOW. Scope and card-delete caveat are documented. Some new comments/docstrings appear mojibaked in the working tree, which is cosmetic but worth cleaning before commit.
+
+Tests: RED. The duplicate sender public key should fail, and advisory-lock contention is not really tested.
+
+**Open Questions**
+
+Card-delete replay gap: acceptable Phase 7 scoping if explicitly tracked as a separate security item. It is a real gap, but not introduced by durable nonce replay.
+
+On-write cleanup probability: acceptable. Retention job covers idle deployments.
+
+Advisory lock key: acceptable. No current collision found.
+
+Metadata/migration parity: mismatch found: model lacks the migration’s nonce-length check constraint. The current `test_migration.py` only compares table names, not full schema shape.
+
+**Commit Readiness**
+
+Not ready. Fix the duplicate test sender key and add the model check constraint before commit. I would also adjust on-write cleanup failure handling or remove the “never kill request” claim.
