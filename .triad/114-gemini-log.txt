@@ -1,0 +1,15 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+1. Verdict on v2: YELLOW
+- **Filesystem TOCTOU race:** Because `unloadPlugin` is `oneway` and triggers a host-side bundle wipe of `/plugin-sandbox/{pluginId}/bundle.js`, a rapid reload will cause the async wipe to delete or corrupt the bundle being staged by the new `loadPlugin`. 
+- **Fix:** Key the staging path by a unique session UUID (e.g., `.../{pluginId}_{uuid}/bundle.js`) instead of just `pluginId`.
+
+2. Anything missing:
+- **WebView data directory isolation:** Since multiple WebViews run in the single `:plugin` process, they share the default WebView data/cache directories. You may need to clarify if/how state is cleared between reloads of the same plugin.
+- **Token Generation:** The AIDL shows `int loadPlugin(...)` returning the token. This resolves your Risk #4 (a load cannot arrive for an already `ready` token because the load *creates* the new token), but explicitly noting that `sandboxToken` is a unique *session ID* (not derived from `pluginId`) would clarify this.
+
+3. Anything new (Answers to your risks):
+- **Risk 1 (Shared-UID):** Acceptable trade-off for V1.5. With no production users, securing the IPC/lifecycle architecture first before tackling `isolatedProcess` (10c) is the right sequencing.
+- **Risk 2 (64 KB cap):** 64 KB is generous for a diagnostic manifest. Truncating is the correct defense.
+- **Risk 3 (Unload race):** As noted in the verdict, the real danger here is the filesystem collision, not the token state machine. 
+- **Risk 5 (Queue memory):** One Coroutine + Channel per token is idiomatic and extremely lightweight. Memory footprint is negligible.

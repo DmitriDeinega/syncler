@@ -1,0 +1,1301 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e605a-9555-7e71-90bb-e46a17f741ea
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 115 — Phase 10a design v3 (post-114 rewrite)
+
+Triad 114 verdicts: both YELLOW. Findings folded into v3 at
+commit `66f349d`. Counts: Codex 3 numbered items + 3 missing-list
+items + 3 risk responses; Gemini 1 critical (fs TOCTOU) + 2
+missing items + 4 risk responses.
+
+## v3 deltas vs v2
+
+### 1. `unloading` state added to the lifecycle FSM (Codex 114 #1)
+
+Because `unloadPlugin` is `oneway`, host-visible "unloaded" and
+sandbox-side cleanup (WebView destroy, JS heap teardown, staged-
+file wipe ACK) can skew. v3 splits them: sandbox owns
+`unloading → unloaded`; host treats `unloading` as in-progress.
+
+### 2. State machine table now covers `loadPlugin` + `querySandboxState` (Codex 114 #2 + missing #3)
+
+Same-`pluginId` `loadPlugin` during `loading` / `ready` /
+`unloading` returns structured rejection codes
+(`concurrent_load_in_progress`,
+`concurrent_unload_in_progress`). The documented host sequence
+for reload is: `unloadPlugin(N)` → wait for
+`querySandboxState(N) == "unloaded"` or for `onPluginCrashed(N)`
+→ `loadPlugin(...)` (which allocates token N+1).
+
+### 3. `sandboxToken` defined as session ID, not derived from `pluginId` (Gemini 114 #2 + Codex 114 missing #1 — generation fencing)
+
+Successive loads of the same `pluginId` get DIFFERENT tokens. The
+host's `IPluginHostCallback` routes by token; a stale `bridgeCall`
+from token N after the host has moved on to N+1 lands in a
+drained slot and is silently dropped.
+
+### 4. Session-keyed bundle staging path (Gemini 114 critical + Codex 114 missing #2)
+
+Path is now:
+
+```
+{noBackupFilesDir}/plugin-sandbox/{pluginId}_{sandboxToken}/bundle.js
+```
+
+`pluginId`-only paths raced the async unload wipe against a
+freshly-staged new bundle. Per-token paths make the two
+operations operate on disjoint directories.
+
+### 5. WebView per-process state isolation between same-`pluginId` reloads (Gemini 114 missing #1)
+
+Sandbox calls `WebStorage.getInstance().deleteAllData()` +
+`CookieManager.getInstance().removeAllCookies()` when the last
+`ready` token for a given `pluginId` enters `unloaded`. Real
+per-plugin storage scoping deferred to Phase 10c.
+
+### 6. `loadPlugin` error semantics structured into codes (Codex 114 #3)
+
+v2 had a contradiction: doc said "manifest NOT parsed sandbox-
+side" but later said "loadPlugin throws if manifestJson parse
+fails sandbox-side". v3 enumerates the real failure codes:
+`parcel_malformed`, `bundle_hash_mismatch`,
+`unsupported_renderer`, `diagnostic_field_oversize`.
+`diagnosticManifestJson` is **never** deserialized for behavior;
+a malformed diagnostic field is dropped + warn-logged, NOT a
+load failure.
+
+### Accepted as-is
+
+- Shared-UID trade-off (both reviewers GREEN on the framing).
+- 64 KB diagnostic cap (both fine).
+- Per-token coroutine + channel queue (Gemini "idiomatic and
+  extremely lightweight"; Codex "sane for tens of plugins").
+
+## Files
+
+- `docs/plugin-host-multi-process.md` — v3 rewrite at commit
+  `66f349d` (102 ins, 23 del vs v2).
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on v3: GREEN / YELLOW / RED + items.
+2. Anything still missing.
+3. Anything new.
+
+If dual-GREEN, Phase 10b implementation begins.
+
+**Reply text only. Do NOT call any write/mutation tool. Do not
+commit, edit, or stage anything.**
+
+codex
+I’ll review the v3 doc and the referenced diff in read-only mode, focusing on whether the lifecycle/token/path changes close the prior race and state-machine gaps. No writes or staging.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Raw docs/plugin-host-multi-process.md' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline --decorate --no-renames 66f349d' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --no-ext-diff --unified=80 --no-renames 66f349d -- docs/plugin-host-multi-process.md' in D:\Projects\syncler
+ succeeded in 276ms:
+66f349d (HEAD -> master) phase 10a v3: state machine + generation fencing + session-keyed staging
+ docs/plugin-host-multi-process.md | 125 +++++++++++++++++++++++++++++++-------
+ 1 file changed, 102 insertions(+), 23 deletions(-)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 288ms:
+commit 66f349d9f1c9b1443881c1529cdf4b750c1458ec
+Author: Dima <ddeynega@gmail.com>
+Date:   Mon May 25 21:16:19 2026 +0300
+
+    phase 10a v3: state machine + generation fencing + session-keyed staging
+    
+    Both reviewers YELLOW on v2. All findings folded into v3.
+    
+    Triad 114 fixes:
+    
+    1. New 'unloading' state. Because unloadPlugin is oneway,
+       host-visible 'unloaded' and sandbox-side cleanup (WebView
+       destroy, JS heap teardown, staged-file wipe ACK) skew. v3
+       gives the sandbox an explicit unloading -> unloaded
+       transition; host treats unloading as in-progress and
+       unloaded as done.
+    
+    2. State machine table now covers loadPlugin per state, plus
+       querySandboxState. loadPlugin during loading / ready /
+       unloading is rejected with structured codes
+       (concurrent_load_in_progress, concurrent_unload_in_progress).
+       Same-pluginId reload contract documented: unload -> await
+       unloaded -> reload.
+    
+    3. sandboxToken is now explicitly defined as a sandbox-allocated
+       session ID, not derived from pluginId. Successive loads of
+       the same pluginId get DIFFERENT tokens (generation fencing).
+       Stale bridgeCall from token N after the host has moved to
+       N+1 is routed to a drained slot and silently dropped.
+    
+    4. Bundle staging path is now session-keyed:
+         {noBackupFilesDir}/plugin-sandbox/{pluginId}_{sandboxToken}/bundle.js
+       Gemini critical: pluginId-only paths race the async unload
+       wipe against a freshly-staged new bundle. Per-token paths
+       make the two operations operate on disjoint directories.
+    
+    5. WebView per-process state cleared between same-pluginId
+       reloads: WebStorage.deleteAllData() + CookieManager.
+       removeAllCookies() when the last ready token for a pluginId
+       enters unloaded. Phase 10c will scope this per-plugin.
+    
+    6. Error semantics for loadPlugin failure modes structured into
+       codes: parcel_malformed, bundle_hash_mismatch,
+       unsupported_renderer, diagnostic_field_oversize. v2 had a
+       contradiction ('manifestJson parse fails sandbox-side' vs
+       'NOT parsed sandbox-side'); v3 explicitly clarifies that
+       diagnosticManifestJson is never deserialized for behavior -
+       a malformed diagnostic field is dropped + warn-logged.
+    
+    The shared-UID security framing (v2's most contentious item)
+    is accepted by both reviewers as a reasonable V1.5 trade-off,
+    explicitly scoped as liveness/resource isolation, not data
+    isolation. Phase 10c remains a future option for isolatedProcess
+    + ParcelFileDescriptor handoff.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/docs/plugin-host-multi-process.md b/docs/plugin-host-multi-process.md
+index d533b27..4f06708 100644
+--- a/docs/plugin-host-multi-process.md
++++ b/docs/plugin-host-multi-process.md
+@@ -1,391 +1,470 @@
+ # Multi-Process Plugin Host (V1.5 runtime #1, Phase 10)
+ 
+-Status: **design v2** — Phase 10a (this document) locks the AIDL
++Status: **design v3** — Phase 10a (this document) locks the AIDL
+ contract, process lifecycle, and migration plan. Phase 10b implements.
+-v2 revisions land the triad 113 findings (security framing, callback
+-identity, oneway ordering, payload limits, lifecycle race, bundle
+-storage).
++v3 revisions land the triad 114 findings (unload→reload race,
++state-machine completeness, generation fencing, staged-path
++collision, manifest-error wording, WebView-data isolation).
++v2 revisions landed the triad 113 findings (security framing,
++callback identity, oneway ordering, payload limits, lifecycle race,
++bundle storage).
+ 
+ ## Why
+ 
+ The current plugin runtime runs every plugin's JavaScript bundle inside
+ a `WebView` in the host UI process (`app.syncler.android`). A buggy or
+ malicious plugin can:
+ 
+ - Crash the host process and take down the inbox UI.
+ - Starve the main thread with synchronous JS work.
+ - Stay alive past the user's explicit removal because the OS can't
+   selectively kill it.
+ 
+ Moving plugin execution to a dedicated Android process (`:plugin`)
+ fixes those three:
+ 
+ - A plugin crash kills only `:plugin`. The host stays up.
+ - The OS scheduler + OOM-killer treat `:plugin` independently — we
+   can `Process.killProcess` deterministically when the user revokes
+   a pairing.
+ - The `:plugin` `ProcessRecord` boundary gives the OS a clean target
+   to reap on memory pressure without touching the inbox.
+ 
+ What it does **NOT** do (corrected from v1):
+ 
+ - **It does NOT protect host application data from a native exploit
+   inside the WebView.** `:plugin` inherits the host's UID (it's a
+   `android:process=":plugin"` declaration, not `isolatedProcess`),
+   so anything in `/data/data/app.syncler.android/` is reachable from
+   a code-exec exploit that escapes the WebView's renderer sandbox.
+   The shared UID is an explicit V1.5 trade-off — see
+   [§ Threat model](#threat-model) below.
+ 
+ ## Threat model
+ 
+ The threat-classes Phase 10 addresses are **liveness and resource
+ isolation**:
+ 
+ | Threat | Phase 10 helps? | How |
+ |---|---|---|
+ | Plugin JS infinite-loops / spins the main thread | YES | spin happens in `:plugin`'s thread, not the host UI |
+ | Plugin JS OOM | YES | OOM-killer can reap `:plugin` independently |
+ | Native crash via WebView renderer bug | YES (host stays up) | crash kills only `:plugin` |
+ | Plugin JS reads other plugins' SharedPreferences | YES (via capability gate) | all I/O routes through host-side bridge |
+ | **Native exploit escapes the renderer sandbox into ARM code** | **NO** | shared UID means host data is reachable |
+ | Plugin tries to read host's master key from memory | NO | already failed before Phase 10; capabilities never expose it |
+ 
+ The shared-UID trade-off is deliberate. A separate UID
+ (`android:isolatedProcess="true"`) would defeat the post-native-
+ exploit data-read class, but it would also block direct file-
+ descriptor sharing for bundles. We could work around that with
+ `ParcelFileDescriptor`-over-AIDL — and Phase 10b should keep
+ that as a follow-up if real-world abuse shows up. For V1.5 the
+ plugin-bundle signature check + WebView's own renderer sandbox
+ are the primary defense against the native-exploit class, and
+ Phase 10 inherits both.
+ 
+ ## Architecture
+ 
+ ```
+ ┌────────────────────────────────────────────────────────────────┐
+ │ Host process (app.syncler.android)                             │
+ │                                                                │
+ │   PluginHostActivity / inbox UI                                │
+ │              │                                                 │
+ │              ▼                                                 │
+ │   PluginRegistry  ←──────┐                                     │
+ │              │            │ result callbacks                   │
+ │              ▼            │                                    │
+ │   PluginBridge (capability dispatch)                           │
+ │       │  │  │                                                  │
+ │       │  │  └──→ NetworkBridge, StorageBridge, …               │
+ │       │  │                                                     │
+ │       │  ▼  (AIDL: IPluginSandbox, oneway calls)               │
+ │  ╔════╪══════════════════════════════════════════════════════╗ │
+ │  ║    │   :plugin subprocess (app.syncler.android:plugin)    ║ │
+ │  ║    │                                                       ║│
+ │  ║    │  PluginSandboxService (BoundService)                  ║│
+ │  ║    │      │                                                ║│
+ │  ║    │      └─ per-token serial queue                        ║│
+ │  ║    │           │                                           ║│
+ │  ║    │           ▼                                           ║│
+ │  ║    │  WebView (one per sandboxToken)                       ║│
+ │  ║    │           │                                           ║│
+ │  ║    └──────────▶│ JavascriptInterface __syncler_internal    ║│
+ │  ║                │                                           ║│
+ │  ║                └─ AIDL: IPluginHostCallback ───────────────╫┘
+ │  ╚═══════════════════════════════════════════════════════════╝
+ └────────────────────────────────────────────────────────────────┘
+ ```
+ 
+ ### Process
+ 
+ `AndroidManifest.xml` declares the sandbox process by attribute:
+ 
+ ```xml
+ <service
+     android:name="app.syncler.feature.pluginsandbox.PluginSandboxService"
+     android:process=":plugin"
+     android:exported="false" />
+ ```
+ 
+ Leading colon = private process owned by the host app, same UID,
+ same signature, different `ProcessRecord`.
+ 
+ ## AIDL contract
+ 
+ Two interfaces, one shared Parcelable. **Every callback from the
+ sandbox to the host carries the `sandboxToken`** so the host can
+ route per-plugin without trusting a stashed pointer (triad 113
+ finding: bridge calls without token in a single shared `:plugin`
+ process risk token confusion).
+ 
+ `IPluginSandbox` — host → subprocess.
+ 
+ ```aidl
+ interface IPluginSandbox {
+     // Lifecycle (synchronous — caller blocks on Binder until the
+     // sandbox has acknowledged. Callback is registered AS PART OF
+     // loadPlugin to close the registration race that v1 had).
+     int loadPlugin(in PluginLoadParcel request, in IPluginHostCallback callback);
+     oneway void unloadPlugin(int sandboxToken);
+ 
+     // Host → plugin event delivery (oneway = no return value, the
+     // sandbox cannot block the host UI on slow plugin code).
+     oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+     oneway void deliverBridgeResult(int sandboxToken, String callbackId, String resultJson);
+ 
+     // Diagnostics (synchronous — only called from settings UI).
+     String querySandboxState(int sandboxToken);
+ }
+ ```
+ 
++`sandboxToken` is an opaque, monotonically-increasing **session ID
++generated by the sandbox per `loadPlugin` call**. It is NOT derived
++from `pluginId`. Successive loads of the same `pluginId` get
++DIFFERENT tokens — Phase 10's "generation fence". Every callback
++the host receives is keyed by token, so a late `bridgeCall` from a
++stale token (e.g. the previous load that we're still tearing down)
++gets routed to a slot the host has already drained and is silently
++dropped. Triad 114 finding: bare `pluginId` keying would let stale
++callbacks confuse a freshly-loaded plugin.
++
+ `IPluginHostCallback` — subprocess → host. Every method carries
+ `sandboxToken`.
+ 
+ ```aidl
+ interface IPluginHostCallback {
+     // Plugin → host bridge call.
+     oneway void bridgeCall(int sandboxToken, String method, String argsJson, String callbackId);
+ 
+     // Lifecycle / diagnostics.
+     oneway void onWebViewError(int sandboxToken, String code, String message);
+     oneway void onPluginReady(int sandboxToken);
+     oneway void onPluginCrashed(int sandboxToken, String reason);
+ }
+ ```
+ 
+ All event-delivery methods are explicitly `oneway`. The lifecycle
+ `loadPlugin` is the one synchronous call so the host knows the
+ returned token is valid before it dispatches anything.
+ 
+ ### Parcelable
+ 
+ `PluginLoadParcel` — pre-parsed payload. **Manifest is NOT shipped
+ as raw JSON.** Triad 113 finding: parser divergence between host
+ and sandbox is a real risk for capability enforcement. The host
+ parses the manifest once (existing
+ `PluginSignatureVerifier` + `PluginManifest`), normalizes it, and
+ ships these fields:
+ 
+ ```aidl
+ parcelable PluginLoadParcel {
+     String pluginId;
+     String pluginIdentifier;        // reverse-DNS, manifest-declared
+     String version;                  // SemVer string
+     String renderer;                 // "script" | "template"
+     String bundleFilePath;           // absolute, in the host's noBackupFilesDir
+     String bundleHashHex;            // SHA-256 hex; sandbox re-verifies
+     String[] declaredCapabilities;   // canonical capability names
+     String[] declaredEndpoints;      // network bridge allow-list
+     String dismissBehavior;          // template-renderer behavior hint
+     long timeoutMillis;              // load-timeout the sandbox honors
+     String diagnosticManifestJson;   // raw JSON; logging/telemetry only
+                                      // — NEVER consulted for grants
+ }
+ ```
+ 
+ The `diagnosticManifestJson` field is retained for runtime telemetry
+ parity with the existing in-process loader — but the design
+ explicitly forbids using it as a source of grant authority. Grants
+ flow from `declaredCapabilities` + `declaredEndpoints` only.
+ 
+ ### Bundle storage
+ 
+ Bundles live in **`noBackupFilesDir`**, NOT `getCacheDir()`. This
+ matches the existing `AndroidEncryptedBundleStore` location and
+ removes the cache-eviction race (triad 113: OS may purge cacheDir
+ between the host's verification and the sandbox's read).
+ 
+-The host writes the decrypted JS bundle to
+-`getNoBackupFilesDir()/plugin-sandbox/{pluginId}/bundle.js` before
+-calling `loadPlugin`. The sandbox reads from the same path. The
+-host wipes the staged file on `unloadPlugin` and on process exit.
++The host writes the decrypted JS bundle to a **session-keyed**
++path:
++
++```
++getNoBackupFilesDir()/plugin-sandbox/{pluginId}_{sandboxToken}/bundle.js
++```
++
++The directory name carries `sandboxToken` (not just `pluginId`) so
++a rapid unload→reload of the same `pluginId` produces a different
++staged path. Triad 114 finding (Gemini critical): because
++`unloadPlugin` is `oneway` and triggers async wipe, a `pluginId`-
++only path would race — the new load's freshly-staged bundle could
++be overwritten by the old unload's wipe. Per-token paths make the
++two operations operate on disjoint directories.
++
++The host wipes the staged directory for token N immediately after
++the sandbox acknowledges `unloadPlugin(N)` (the host's
++"cleanup-complete" callback, fired by the sandbox on its way out
++of the `unloading` state below). If the sandbox dies before
++ACKing, the host wipes on the rebind in
++`PluginSandboxConnection.onServiceDisconnected`. Process-exit
++hooks (`Runtime.addShutdownHook`) on the host catch the residual
++case where the host itself is killed.
++
++The sandbox does NOT auto-clear WebView state between same-
++`pluginId` reloads (triad 114 Gemini missing #1): Android's
++WebView shares a per-process cookie / cache / IndexedDB directory
++across all WebView instances in `:plugin`. Phase 10b's
++`PluginSandboxService` calls `WebStorage.getInstance().deleteAllData()`
+++ `CookieManager.getInstance().removeAllCookies()` whenever the
++last `ready` token for a given `pluginId` enters `unloaded`. We
++don't try to scope storage per-plugin yet — that's a Phase 10c
++follow-up.
+ 
+ Future migration path: pass the bundle bytes via
+ `ParcelFileDescriptor` opened on the host side and read-only on the
+ sandbox side. That would let us move to `isolatedProcess` later
+ without re-doing the staging. Phase 10b uses the staged-file path;
+ the ParcelFileDescriptor variant is a Phase 10c optimization.
+ 
+ ### IPC payload caps
+ 
+ Binder enforces ~1 MB per transaction. Three places this matters:
+ 
+ - **`PluginLoadParcel`**: small. `diagnosticManifestJson` capped at
+   64 KB at the host (truncate + log) so a hostile manifest can't
+   blow the transaction.
+ - **`dispatchHook` `payloadJson`**: capped at 256 KB. Plugins that
+   legitimately need larger payloads (rare — most are short JSON
+   patches) get a `payload_too_large` error code in the bridge
+   result and a corresponding log.
+ - **`deliverBridgeResult` `resultJson`** and **`bridgeCall`
+   `argsJson`**: same 256 KB cap. Capabilities that legitimately
+   return large data (e.g. a future `gallery.read` that streams an
+   image) use a `ParcelFileDescriptor` side-channel, not the JSON
+   argument bus. The bridge contract defines which methods are
+   large-payload methods.
+ 
+ Caps are enforced on the SENDING side. Receiving side double-checks
+ and rejects oversize payloads with a typed `payload_too_large`
+ result.
+ 
+ ## Lifecycle + state machine
+ 
+ A loaded plugin's `sandboxToken` is in one of these states. Every
+ AIDL method's behavior is defined per state:
+ 
+ ```
+                 ┌──────────┐
+                 │  none    │
+                 └────┬─────┘
+                      │ loadPlugin returns token
+                      ▼
+                 ┌──────────┐
+        ┌────────│ loading  │──── error during eval ───┐
+        │        └────┬─────┘                          │
+        │             │ onPluginReady                   │
+        │             ▼                                 │
+        │        ┌──────────┐                           │
+        │        │  ready   │──── onWebViewError ──────▶│
+        │        └────┬─────┘                           ▼
+        │             │ unloadPlugin              ┌──────────┐
+        │             ▼                           │ errored  │
+-       │        ┌──────────┐                     └────┬─────┘
+-       │        │ unloaded │                          │ unload
+-       │        └──────────┘                          ▼
+-       │                                       ┌──────────┐
+-       └─── process dies (RemoteException) ───▶│ process_ │
++       │        ┌───────────┐                    └────┬─────┘
++       │        │ unloading │                         │ unloadPlugin
++       │        └────┬──────┘                         ▼
++       │             │ cleanup completes      ┌───────────┐
++       │             ▼                        │ unloading │
++       │        ┌──────────┐                  └────┬──────┘
++       │        │ unloaded │◀─── cleanup ─────────┘
++       │        └──────────┘
++       │
++       └─── process dies (RemoteException) ───▶┌──────────┐
++                                               │ process_ │
+                                                │  dead    │
+                                                └──────────┘
+ ```
+ 
++`unloading` was added in v3 (triad 114 Codex #1): because
++`unloadPlugin` is `oneway`, the host-visible "unloaded" view and
++the sandbox's actual cleanup (WebView destroy, JS heap teardown,
++staged-file wipe ACK) can be skew. The sandbox owns the
++`unloading → unloaded` transition; the host treats `unloading`
++as "in-progress" and `unloaded` as "done".
++
+ AIDL behavior per state:
+ 
+-| State | `dispatchHook` | `deliverBridgeResult` | `unloadPlugin` |
+-|---|---|---|---|
+-| `loading` | buffered (sandbox replays after `onPluginReady`) | buffered | OK; cancels load |
+-| `ready` | delivered | delivered | OK |
+-| `errored` | dropped + warn-log | dropped | OK; clears state |
+-| `unloaded` | dropped + warn-log (caller bug) | dropped + warn-log | no-op |
+-| `process_dead` | dropped + `onPluginCrashed` fires once | dropped | no-op |
++| State | `loadPlugin` (same `pluginId`) | `dispatchHook` | `deliverBridgeResult` | `unloadPlugin` | `querySandboxState` |
++|---|---|---|---|---|---|
++| `loading` | rejected, `concurrent_load_in_progress` | buffered (sandbox replays after `onPluginReady`) | buffered | OK; cancels load → `unloading` | returns `"loading"` |
++| `ready` | rejected — caller MUST `unloadPlugin` first | delivered | delivered | OK → `unloading` | returns `"ready"` |
++| `errored` | OK; allocates new token, old slot stays in `errored` | dropped + warn-log | dropped | OK → `unloading` | returns `"errored"` |
++| `unloading` | rejected, `concurrent_unload_in_progress` (host SHOULD await `unloaded` then retry) | dropped + warn-log | dropped + warn-log | no-op (re-entrant) | returns `"unloading"` |
++| `unloaded` | OK; allocates new token | dropped + warn-log (caller bug) | dropped + warn-log | no-op | returns `"unloaded"` |
++| `process_dead` | OK after rebind; allocates new token | dropped + `onPluginCrashed` fires once | dropped | no-op | returns `"process_dead"` |
++
++The "rejected" rows return `IllegalStateException` over Binder with
++a structured error code. The host's `PluginRegistry` is the one
++caller of `loadPlugin`; it serializes loads per `pluginId` so the
++rejection rows are reachable mostly via bugs / tests, but the
++sandbox MUST enforce them defensively because a buggy or
++adversarial host could hammer.
++
++**Same-`pluginId` reload race**: the documented sequence is
++`unloadPlugin(N)` → wait for `querySandboxState(N) == "unloaded"`
++or for `onPluginCrashed(N)` → then `loadPlugin(...)` which
++allocates token N+1 with a fresh staged-path directory. The host's
++`PluginRegistry` enforces this; the sandbox's `unloading` row
++above is the backstop.
+ 
+ The sandbox's per-token serial queue (one coroutine + channel per
+ `sandboxToken`) serializes hooks + bridge-results so concurrent
+ `oneway` calls from different host threads stay ordered. Triad 113
+ finding: Binder preserves per-IBinder per-client order, but multi-
+ coroutine host can interleave without an explicit queue.
+ 
+ ### Pending callback cleanup
+ 
+ Each `bridgeCall` from the sandbox produces a `callbackId`. The
+ host maintains a per-token `Map<callbackId, ContinuationOrFuture>`.
+ On `unloadPlugin` or `onPluginCrashed`, the host completes every
+ outstanding callback with a `plugin_unloaded` or `plugin_crashed`
+ error so capability calls don't hang until the existing
+ `CALL_TIMEOUT_MS`. Triad 113 finding.
+ 
+ ### Connection teardown
+ 
+ `PluginSandboxConnection` is a singleton that holds the
+ `ServiceConnection`. Reference-counted:
+ 
+ - `loadPlugin` count goes 0 → 1: `bindService(BIND_AUTO_CREATE)`.
+ - `unloadPlugin` count goes 1 → 0: schedule an `unbindService`
+   after a 30-second idle window. New `loadPlugin` during the
+   window cancels the unbind.
+ 
+ Triad 113 finding: without the idle-unbind, `:plugin` lives forever
+ even with no plugins loaded, wasting memory.
+ 
+ ## Migration path (Phase 10b implementation order)
+ 
+ Triad 113 finding: e2e proves the multi-process path BEFORE the
+ in-process path is removed, so we have a clean git-revert.
+ 
+ 1. **AIDL module** (`:core:plugin-aidl`). Generated stubs + the
+    `PluginLoadParcel` Parcelable. Both host and sandbox depend on
+    it.
+ 2. **Sandbox module** (`:feature:plugin-sandbox`). Ships
+    `PluginSandboxService`, the per-token state machine, the
+    serial queue, and a build flavor that records AIDL calls
+    without instantiating a real `WebView` (for tests).
+ 3. **Connection layer** (`PluginSandboxConnection`). Singleton in
+    the host that owns the binding + idle-unbind logic.
+ 4. **`PluginBridge` rewire.** Bridge gets a `SandboxRouter`
+    constructor arg that talks AIDL. WebView-touching methods are
+    removed; capabilities stay in place.
+ 5. **E2E test pass** (`:feature:plugin-host:connectedAndroidTest`
+    plus a unit-level test harness in `:feature:plugin-sandbox`).
+    Coverage: load → dispatch → bridge call → result → unload,
+    `Process.killProcess(:plugin)` recovery, capability boundary
+    round-trips.
+ 6. **Strip in-process WebView** from `:feature:plugin-host`. Only
+    after step 5 is green.
+ 
+ Each step is its own commit. Step 6 is the only destructive one;
+ the order keeps it last so step 5 failures don't leave the host
+ without a plugin runtime.
+ 
+ ## Security boundaries (reconfirmed)
+ 
+ - **Capabilities stay in the host.** The sandbox never gets a
+   network handle, camera handle, or session token. Every privileged
+   op crosses the AIDL boundary that the host gates against the
+   `declaredCapabilities` list in `PluginLoadParcel`.
+ - **Bundle integrity is re-verified in the sandbox.** Defense-
+   in-depth against a corrupt staging path or TOCTOU race.
+ - **`diagnosticManifestJson` is logging-only.** The host's parsed
+   capability list is the only grant authority.
+ - **`sandboxToken` carried on every callback.** The host can route
+   per-plugin without trusting the IBinder identity alone.
+ 
+ ## Error semantics
+ 
+-- **`loadPlugin` throws `IllegalStateException`** if `manifestJson`
+-  parse fails sandbox-side or the bundle hash mismatches. Host
+-  surfaces `load_failed` to the UI.
++- **`loadPlugin` `IllegalStateException` with structured code.**
++  v3 (triad 114 Codex #3): the failure modes are
++  `parcel_malformed` (Parcelable fields missing / wrong type),
++  `bundle_hash_mismatch` (sandbox-side hash verify against
++  `bundleHashHex` failed), `unsupported_renderer` (e.g. sandbox
++  build doesn't ship the requested renderer), and
++  `diagnostic_field_oversize` (capped JSON field exceeded the
++  64 KB cap mid-stream). **Manifest is NOT parsed sandbox-side**
++  — Phase 10a v2 moved grant authority to the parsed
++  `PluginLoadParcel` fields. The `diagnosticManifestJson` field
++  is logged but never deserialized for behavior; a malformed
++  diagnostic field is dropped + warn-logged, NOT a load failure.
+ - **AIDL `RemoteException` mid-call.** Sandbox died. Host fires
+   `onPluginCrashed("remote_exception")` for every active token,
+   drains the pending-callback map with `plugin_crashed` errors,
+   and rebinds on the next `loadPlugin`.
+ - **`onWebViewError`.** Plugin's state transitions to `errored`;
+   the host logs via `AuditLogger`; no further hooks dispatched.
+ - **Bridge call timeout.** Existing `CALL_TIMEOUT_MS` still applies
+   on the host side. The sandbox does NOT enforce its own timeout.
+ - **Process kill while load in flight.** `loadPlugin` returns
+   `RemoteException`; host treats it as a generic load failure.
+ 
+ ## Non-goals for Phase 10
+ 
+ - **Per-plugin process isolation.** Phase 10 puts ALL plugins in
+   the single `:plugin` process. Per-plugin process is a future
+   follow-up.
+ - **`isolatedProcess` UID isolation.** Phase 10b uses the shared-
+   UID `:plugin` form; the `ParcelFileDescriptor` bundle handoff
+   needed for `isolatedProcess` is Phase 10c.
+ - **Native Kotlin AAR loading.** V1.5 #2 / Phase 11.
+ 
+ ## Test plan
+ 
+ - **Parcelable round-trip**: `PluginLoadParcel.writeToParcel` →
+   `createFromParcel` preserves every field, including the capped
+   `diagnosticManifestJson`.
+ - **State machine**: every (state × method) cell in the table above
+   has at least one assertion.
+ - **Serial queue**: 100 concurrent `dispatchHook` calls from
+   different host threads → sandbox sees them in submission order
+   per token.
+ - **Connection teardown**: load → unload → wait 31 s → assert
+   unbindService fired; load again → assert rebind.
+ - **Crash recovery**: `Process.killProcess(:plugin)` mid-dispatch
+   → `onPluginCrashed` fires once per token; pending callbacks
+   complete with `plugin_crashed`; next `loadPlugin` rebinds.
+ - **Capability**: round-trip bridge call matches in-process
+   behavior byte-for-byte against the existing `NetworkBridge` +
+   `StorageBridge` test fixtures.
+ - **Payload cap**: a 1 MB `payloadJson` dispatch → host-side cap
+   hit, `payload_too_large` returned to the calling capability.
+ 
+ ## Rollout
+ 
+ V0.1 means no production users; the in-process WebView is removed
+ in step 6 of the migration order. No feature flag — full
+ replacement.
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 303ms:
+# Multi-Process Plugin Host (V1.5 runtime #1, Phase 10)
+
+Status: **design v3** В?" Phase 10a (this document) locks the AIDL
+contract, process lifecycle, and migration plan. Phase 10b implements.
+v3 revisions land the triad 114 findings (unloadВ+'reload race,
+state-machine completeness, generation fencing, staged-path
+collision, manifest-error wording, WebView-data isolation).
+v2 revisions landed the triad 113 findings (security framing,
+callback identity, oneway ordering, payload limits, lifecycle race,
+bundle storage).
+
+## Why
+
+The current plugin runtime runs every plugin's JavaScript bundle inside
+a `WebView` in the host UI process (`app.syncler.android`). A buggy or
+malicious plugin can:
+
+- Crash the host process and take down the inbox UI.
+- Starve the main thread with synchronous JS work.
+- Stay alive past the user's explicit removal because the OS can't
+  selectively kill it.
+
+Moving plugin execution to a dedicated Android process (`:plugin`)
+fixes those three:
+
+- A plugin crash kills only `:plugin`. The host stays up.
+- The OS scheduler + OOM-killer treat `:plugin` independently В?" we
+  can `Process.killProcess` deterministically when the user revokes
+  a pairing.
+- The `:plugin` `ProcessRecord` boundary gives the OS a clean target
+  to reap on memory pressure without touching the inbox.
+
+What it does **NOT** do (corrected from v1):
+
+- **It does NOT protect host application data from a native exploit
+  inside the WebView.** `:plugin` inherits the host's UID (it's a
+  `android:process=":plugin"` declaration, not `isolatedProcess`),
+  so anything in `/data/data/app.syncler.android/` is reachable from
+  a code-exec exploit that escapes the WebView's renderer sandbox.
+  The shared UID is an explicit V1.5 trade-off В?" see
+  [? Threat model](#threat-model) below.
+
+## Threat model
+
+The threat-classes Phase 10 addresses are **liveness and resource
+isolation**:
+
+| Threat | Phase 10 helps? | How |
+|---|---|---|
+| Plugin JS infinite-loops / spins the main thread | YES | spin happens in `:plugin`'s thread, not the host UI |
+| Plugin JS OOM | YES | OOM-killer can reap `:plugin` independently |
+| Native crash via WebView renderer bug | YES (host stays up) | crash kills only `:plugin` |
+| Plugin JS reads other plugins' SharedPreferences | YES (via capability gate) | all I/O routes through host-side bridge |
+| **Native exploit escapes the renderer sandbox into ARM code** | **NO** | shared UID means host data is reachable |
+| Plugin tries to read host's master key from memory | NO | already failed before Phase 10; capabilities never expose it |
+
+The shared-UID trade-off is deliberate. A separate UID
+(`android:isolatedProcess="true"`) would defeat the post-native-
+exploit data-read class, but it would also block direct file-
+descriptor sharing for bundles. We could work around that with
+`ParcelFileDescriptor`-over-AIDL В?" and Phase 10b should keep
+that as a follow-up if real-world abuse shows up. For V1.5 the
+plugin-bundle signature check + WebView's own renderer sandbox
+are the primary defense against the native-exploit class, and
+Phase 10 inherits both.
+
+## Architecture
+
+```
+В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?
+В", Host process (app.syncler.android)                             В",
+В",                                                                В",
+В",   PluginHostActivity / inbox UI                                В",
+В",              В",                                                 В",
+В",              В-м                                                 В",
+В",   PluginRegistry  В+?В"?В"?В"?В"?В"?В"?В"?                                     В",
+В",              В",            В", result callbacks                   В",
+В",              В-м            В",                                    В",
+В",   PluginBridge (capability dispatch)                           В",
+В",       В",  В",  В",                                                  В",
+В",       В",  В",  В""В"?В"?В+' NetworkBridge, StorageBridge, В?▌               В",
+В",       В",  В",                                                     В",
+В",       В",  В-м  (AIDL: IPluginSandbox, oneway calls)               В",
+В",  В"В?В?В?В?ВxВ?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В- В",
+В",  В`    В",   :plugin subprocess (app.syncler.android:plugin)    В` В",
+В",  В`    В",                                                       В`В",
+В",  В`    В",  PluginSandboxService (BoundService)                  В`В",
+В",  В`    В",      В",                                                В`В",
+В",  В`    В",      В""В"? per-token serial queue                        В`В",
+В",  В`    В",           В",                                           В`В",
+В",  В`    В",           В-м                                           В`В",
+В",  В`    В",  WebView (one per sandboxToken)                       В`В",
+В",  В`    В",           В",                                           В`В",
+В",  В`    В""В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В-В", JavascriptInterface __syncler_internal    В`В",
+В",  В`                В",                                           В`В",
+В",  В`                В""В"? AIDL: IPluginHostCallback В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?ВоВ"~
+В",  В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?В?
+В""В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"~
+```
+
+### Process
+
+`AndroidManifest.xml` declares the sandbox process by attribute:
+
+```xml
+<service
+    android:name="app.syncler.feature.pluginsandbox.PluginSandboxService"
+    android:process=":plugin"
+    android:exported="false" />
+```
+
+Leading colon = private process owned by the host app, same UID,
+same signature, different `ProcessRecord`.
+
+## AIDL contract
+
+Two interfaces, one shared Parcelable. **Every callback from the
+sandbox to the host carries the `sandboxToken`** so the host can
+route per-plugin without trusting a stashed pointer (triad 113
+finding: bridge calls without token in a single shared `:plugin`
+process risk token confusion).
+
+`IPluginSandbox` В?" host В+' subprocess.
+
+```aidl
+interface IPluginSandbox {
+    // Lifecycle (synchronous В?" caller blocks on Binder until the
+    // sandbox has acknowledged. Callback is registered AS PART OF
+    // loadPlugin to close the registration race that v1 had).
+    int loadPlugin(in PluginLoadParcel request, in IPluginHostCallback callback);
+    oneway void unloadPlugin(int sandboxToken);
+
+    // Host В+' plugin event delivery (oneway = no return value, the
+    // sandbox cannot block the host UI on slow plugin code).
+    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+    oneway void deliverBridgeResult(int sandboxToken, String callbackId, String resultJson);
+
+    // Diagnostics (synchronous В?" only called from settings UI).
+    String querySandboxState(int sandboxToken);
+}
+```
+
+`sandboxToken` is an opaque, monotonically-increasing **session ID
+generated by the sandbox per `loadPlugin` call**. It is NOT derived
+from `pluginId`. Successive loads of the same `pluginId` get
+DIFFERENT tokens В?" Phase 10's "generation fence". Every callback
+the host receives is keyed by token, so a late `bridgeCall` from a
+stale token (e.g. the previous load that we're still tearing down)
+gets routed to a slot the host has already drained and is silently
+dropped. Triad 114 finding: bare `pluginId` keying would let stale
+callbacks confuse a freshly-loaded plugin.
+
+`IPluginHostCallback` В?" subprocess В+' host. Every method carries
+`sandboxToken`.
+
+```aidl
+interface IPluginHostCallback {
+    // Plugin В+' host bridge call.
+    oneway void bridgeCall(int sandboxToken, String method, String argsJson, String callbackId);
+
+    // Lifecycle / diagnostics.
+    oneway void onWebViewError(int sandboxToken, String code, String message);
+    oneway void onPluginReady(int sandboxToken);
+    oneway void onPluginCrashed(int sandboxToken, String reason);
+}
+```
+
+All event-delivery methods are explicitly `oneway`. The lifecycle
+`loadPlugin` is the one synchronous call so the host knows the
+returned token is valid before it dispatches anything.
+
+### Parcelable
+
+`PluginLoadParcel` В?" pre-parsed payload. **Manifest is NOT shipped
+as raw JSON.** Triad 113 finding: parser divergence between host
+and sandbox is a real risk for capability enforcement. The host
+parses the manifest once (existing
+`PluginSignatureVerifier` + `PluginManifest`), normalizes it, and
+ships these fields:
+
+```aidl
+parcelable PluginLoadParcel {
+    String pluginId;
+    String pluginIdentifier;        // reverse-DNS, manifest-declared
+    String version;                  // SemVer string
+    String renderer;                 // "script" | "template"
+    String bundleFilePath;           // absolute, in the host's noBackupFilesDir
+    String bundleHashHex;            // SHA-256 hex; sandbox re-verifies
+    String[] declaredCapabilities;   // canonical capability names
+    String[] declaredEndpoints;      // network bridge allow-list
+    String dismissBehavior;          // template-renderer behavior hint
+    long timeoutMillis;              // load-timeout the sandbox honors
+    String diagnosticManifestJson;   // raw JSON; logging/telemetry only
+                                     // В?" NEVER consulted for grants
+}
+```
+
+The `diagnosticManifestJson` field is retained for runtime telemetry
+parity with the existing in-process loader В?" but the design
+explicitly forbids using it as a source of grant authority. Grants
+flow from `declaredCapabilities` + `declaredEndpoints` only.
+
+### Bundle storage
+
+Bundles live in **`noBackupFilesDir`**, NOT `getCacheDir()`. This
+matches the existing `AndroidEncryptedBundleStore` location and
+removes the cache-eviction race (triad 113: OS may purge cacheDir
+between the host's verification and the sandbox's read).
+
+The host writes the decrypted JS bundle to a **session-keyed**
+path:
+
+```
+getNoBackupFilesDir()/plugin-sandbox/{pluginId}_{sandboxToken}/bundle.js
+```
+
+The directory name carries `sandboxToken` (not just `pluginId`) so
+a rapid unloadВ+'reload of the same `pluginId` produces a different
+staged path. Triad 114 finding (Gemini critical): because
+`unloadPlugin` is `oneway` and triggers async wipe, a `pluginId`-
+only path would race В?" the new load's freshly-staged bundle could
+be overwritten by the old unload's wipe. Per-token paths make the
+two operations operate on disjoint directories.
+
+The host wipes the staged directory for token N immediately after
+the sandbox acknowledges `unloadPlugin(N)` (the host's
+"cleanup-complete" callback, fired by the sandbox on its way out
+of the `unloading` state below). If the sandbox dies before
+ACKing, the host wipes on the rebind in
+`PluginSandboxConnection.onServiceDisconnected`. Process-exit
+hooks (`Runtime.addShutdownHook`) on the host catch the residual
+case where the host itself is killed.
+
+The sandbox does NOT auto-clear WebView state between same-
+`pluginId` reloads (triad 114 Gemini missing #1): Android's
+WebView shares a per-process cookie / cache / IndexedDB directory
+across all WebView instances in `:plugin`. Phase 10b's
+`PluginSandboxService` calls `WebStorage.getInstance().deleteAllData()`
++ `CookieManager.getInstance().removeAllCookies()` whenever the
+last `ready` token for a given `pluginId` enters `unloaded`. We
+don't try to scope storage per-plugin yet В?" that's a Phase 10c
+follow-up.
+
+Future migration path: pass the bundle bytes via
+`ParcelFileDescriptor` opened on the host side and read-only on the
+sandbox side. That would let us move to `isolatedProcess` later
+without re-doing the staging. Phase 10b uses the staged-file path;
+the ParcelFileDescriptor variant is a Phase 10c optimization.
+
+### IPC payload caps
+
+Binder enforces ~1 MB per transaction. Three places this matters:
+
+- **`PluginLoadParcel`**: small. `diagnosticManifestJson` capped at
+  64 KB at the host (truncate + log) so a hostile manifest can't
+  blow the transaction.
+- **`dispatchHook` `payloadJson`**: capped at 256 KB. Plugins that
+  legitimately need larger payloads (rare В?" most are short JSON
+  patches) get a `payload_too_large` error code in the bridge
+  result and a corresponding log.
+- **`deliverBridgeResult` `resultJson`** and **`bridgeCall`
+  `argsJson`**: same 256 KB cap. Capabilities that legitimately
+  return large data (e.g. a future `gallery.read` that streams an
+  image) use a `ParcelFileDescriptor` side-channel, not the JSON
+  argument bus. The bridge contract defines which methods are
+  large-payload methods.
+
+Caps are enforced on the SENDING side. Receiving side double-checks
+and rejects oversize payloads with a typed `payload_too_large`
+result.
+
+## Lifecycle + state machine
+
+A loaded plugin's `sandboxToken` is in one of these states. Every
+AIDL method's behavior is defined per state:
+
+```
+                В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?
+                В",  none    В",
+                В""В"?В"?В"?В"?В"кВ"?В"?В"?В"?В"?В"~
+                     В", loadPlugin returns token
+                     В-м
+                В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?
+       В"?В"?В"?В"?В"?В"?В"?В"?В"?В", loading  В",В"?В"?В"?В"? error during eval В"?В"?В"?В"?
+       В",        В""В"?В"?В"?В"?В"кВ"?В"?В"?В"?В"?В"~                          В",
+       В",             В", onPluginReady                   В",
+       В",             В-м                                 В",
+       В",        В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?                           В",
+       В",        В",  ready   В",В"?В"?В"?В"? onWebViewError В"?В"?В"?В"?В"?В"?В-В",
+       В",        В""В"?В"?В"?В"?В"кВ"?В"?В"?В"?В"?В"~                           В-м
+       В",             В", unloadPlugin              В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?
+       В",             В-м                           В", errored  В",
+       В",        В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?                    В""В"?В"?В"?В"?В"кВ"?В"?В"?В"?В"?В"~
+       В",        В", unloading В",                         В", unloadPlugin
+       В",        В""В"?В"?В"?В"?В"кВ"?В"?В"?В"?В"?В"?В"~                         В-м
+       В",             В", cleanup completes      В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?
+       В",             В-м                        В", unloading В",
+       В",        В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?                  В""В"?В"?В"?В"?В"кВ"?В"?В"?В"?В"?В"?В"~
+       В",        В", unloaded В",В-?В"?В"?В"? cleanup В"?В"?В"?В"?В"?В"?В"?В"?В"?В"~
+       В",        В""В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"~
+       В",
+       В""В"?В"?В"? process dies (RemoteException) В"?В"?В"?В-В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?
+                                               В", process_ В",
+                                               В",  dead    В",
+                                               В""В"?В"?В"?В"?В"?В"?В"?В"?В"?В"?В"~
+```
+
+`unloading` was added in v3 (triad 114 Codex #1): because
+`unloadPlugin` is `oneway`, the host-visible "unloaded" view and
+the sandbox's actual cleanup (WebView destroy, JS heap teardown,
+staged-file wipe ACK) can be skew. The sandbox owns the
+`unloading В+' unloaded` transition; the host treats `unloading`
+as "in-progress" and `unloaded` as "done".
+
+AIDL behavior per state:
+
+| State | `loadPlugin` (same `pluginId`) | `dispatchHook` | `deliverBridgeResult` | `unloadPlugin` | `querySandboxState` |
+|---|---|---|---|---|---|
+| `loading` | rejected, `concurrent_load_in_progress` | buffered (sandbox replays after `onPluginReady`) | buffered | OK; cancels load В+' `unloading` | returns `"loading"` |
+| `ready` | rejected В?" caller MUST `unloadPlugin` first | delivered | delivered | OK В+' `unloading` | returns `"ready"` |
+| `errored` | OK; allocates new token, old slot stays in `errored` | dropped + warn-log | dropped | OK В+' `unloading` | returns `"errored"` |
+| `unloading` | rejected, `concurrent_unload_in_progress` (host SHOULD await `unloaded` then retry) | dropped + warn-log | dropped + warn-log | no-op (re-entrant) | returns `"unloading"` |
+| `unloaded` | OK; allocates new token | dropped + warn-log (caller bug) | dropped + warn-log | no-op | returns `"unloaded"` |
+| `process_dead` | OK after rebind; allocates new token | dropped + `onPluginCrashed` fires once | dropped | no-op | returns `"process_dead"` |
+
+The "rejected" rows return `IllegalStateException` over Binder with
+a structured error code. The host's `PluginRegistry` is the one
+caller of `loadPlugin`; it serializes loads per `pluginId` so the
+rejection rows are reachable mostly via bugs / tests, but the
+sandbox MUST enforce them defensively because a buggy or
+adversarial host could hammer.
+
+**Same-`pluginId` reload race**: the documented sequence is
+`unloadPlugin(N)` В+' wait for `querySandboxState(N) == "unloaded"`
+or for `onPluginCrashed(N)` В+' then `loadPlugin(...)` which
+allocates token N+1 with a fresh staged-path directory. The host's
+`PluginRegistry` enforces this; the sandbox's `unloading` row
+above is the backstop.
+
+The sandbox's per-token serial queue (one coroutine + channel per
+`sandboxToken`) serializes hooks + bridge-results so concurrent
+`oneway` calls from different host threads stay ordered. Triad 113
+finding: Binder preserves per-IBinder per-client order, but multi-
+coroutine host can interleave without an explicit queue.
+
+### Pending callback cleanup
+
+Each `bridgeCall` from the sandbox produces a `callbackId`. The
+host maintains a per-token `Map<callbackId, ContinuationOrFuture>`.
+On `unloadPlugin` or `onPluginCrashed`, the host completes every
+outstanding callback with a `plugin_unloaded` or `plugin_crashed`
+error so capability calls don't hang until the existing
+`CALL_TIMEOUT_MS`. Triad 113 finding.
+
+### Connection teardown
+
+`PluginSandboxConnection` is a singleton that holds the
+`ServiceConnection`. Reference-counted:
+
+- `loadPlugin` count goes 0 В+' 1: `bindService(BIND_AUTO_CREATE)`.
+- `unloadPlugin` count goes 1 В+' 0: schedule an `unbindService`
+  after a 30-second idle window. New `loadPlugin` during the
+  window cancels the unbind.
+
+Triad 113 finding: without the idle-unbind, `:plugin` lives forever
+even with no plugins loaded, wasting memory.
+
+## Migration path (Phase 10b implementation order)
+
+Triad 113 finding: e2e proves the multi-process path BEFORE the
+in-process path is removed, so we have a clean git-revert.
+
+1. **AIDL module** (`:core:plugin-aidl`). Generated stubs + the
+   `PluginLoadParcel` Parcelable. Both host and sandbox depend on
+   it.
+2. **Sandbox module** (`:feature:plugin-sandbox`). Ships
+   `PluginSandboxService`, the per-token state machine, the
+   serial queue, and a build flavor that records AIDL calls
+   without instantiating a real `WebView` (for tests).
+3. **Connection layer** (`PluginSandboxConnection`). Singleton in
+   the host that owns the binding + idle-unbind logic.
+4. **`PluginBridge` rewire.** Bridge gets a `SandboxRouter`
+   constructor arg that talks AIDL. WebView-touching methods are
+   removed; capabilities stay in place.
+5. **E2E test pass** (`:feature:plugin-host:connectedAndroidTest`
+   plus a unit-level test harness in `:feature:plugin-sandbox`).
+   Coverage: load В+' dispatch В+' bridge call В+' result В+' unload,
+   `Process.killProcess(:plugin)` recovery, capability boundary
+   round-trips.
+6. **Strip in-process WebView** from `:feature:plugin-host`. Only
+   after step 5 is green.
+
+Each step is its own commit. Step 6 is the only destructive one;
+the order keeps it last so step 5 failures don't leave the host
+without a plugin runtime.
+
+## Security boundaries (reconfirmed)
+
+- **Capabilities stay in the host.** The sandbox never gets a
+  network handle, camera handle, or session token. Every privileged
+  op crosses the AIDL boundary that the host gates against the
+  `declaredCapabilities` list in `PluginLoadParcel`.
+- **Bundle integrity is re-verified in the sandbox.** Defense-
+  in-depth against a corrupt staging path or TOCTOU race.
+- **`diagnosticManifestJson` is logging-only.** The host's parsed
+  capability list is the only grant authority.
+- **`sandboxToken` carried on every callback.** The host can route
+  per-plugin without trusting the IBinder identity alone.
+
+## Error semantics
+
+- **`loadPlugin` `IllegalStateException` with structured code.**
+  v3 (triad 114 Codex #3): the failure modes are
+  `parcel_malformed` (Parcelable fields missing / wrong type),
+  `bundle_hash_mismatch` (sandbox-side hash verify against
+  `bundleHashHex` failed), `unsupported_renderer` (e.g. sandbox
+  build doesn't ship the requested renderer), and
+  `diagnostic_field_oversize` (capped JSON field exceeded the
+  64 KB cap mid-stream). **Manifest is NOT parsed sandbox-side**
+  В?" Phase 10a v2 moved grant authority to the parsed
+  `PluginLoadParcel` fields. The `diagnosticManifestJson` field
+  is logged but never deserialized for behavior; a malformed
+  diagnostic field is dropped + warn-logged, NOT a load failure.
+- **AIDL `RemoteException` mid-call.** Sandbox died. Host fires
+  `onPluginCrashed("remote_exception")` for every active token,
+  drains the pending-callback map with `plugin_crashed` errors,
+  and rebinds on the next `loadPlugin`.
+- **`onWebViewError`.** Plugin's state transitions to `errored`;
+  the host logs via `AuditLogger`; no further hooks dispatched.
+- **Bridge call timeout.** Existing `CALL_TIMEOUT_MS` still applies
+  on the host side. The sandbox does NOT enforce its own timeout.
+- **Process kill while load in flight.** `loadPlugin` returns
+  `RemoteException`; host treats it as a generic load failure.
+
+## Non-goals for Phase 10
+
+- **Per-plugin process isolation.** Phase 10 puts ALL plugins in
+  the single `:plugin` process. Per-plugin process is a future
+  follow-up.
+- **`isolatedProcess` UID isolation.** Phase 10b uses the shared-
+  UID `:plugin` form; the `ParcelFileDescriptor` bundle handoff
+  needed for `isolatedProcess` is Phase 10c.
+- **Native Kotlin AAR loading.** V1.5 #2 / Phase 11.
+
+## Test plan
+
+- **Parcelable round-trip**: `PluginLoadParcel.writeToParcel` В+'
+  `createFromParcel` preserves every field, including the capped
+  `diagnosticManifestJson`.
+- **State machine**: every (state ?- method) cell in the table above
+  has at least one assertion.
+- **Serial queue**: 100 concurrent `dispatchHook` calls from
+  different host threads В+' sandbox sees them in submission order
+  per token.
+- **Connection teardown**: load В+' unload В+' wait 31 s В+' assert
+  unbindService fired; load again В+' assert rebind.
+- **Crash recovery**: `Process.killProcess(:plugin)` mid-dispatch
+  В+' `onPluginCrashed` fires once per token; pending callbacks
+  complete with `plugin_crashed`; next `loadPlugin` rebinds.
+- **Capability**: round-trip bridge call matches in-process
+  behavior byte-for-byte against the existing `NetworkBridge` +
+  `StorageBridge` test fixtures.
+- **Payload cap**: a 1 MB `payloadJson` dispatch В+' host-side cap
+  hit, `payload_too_large` returned to the calling capability.
+
+## Rollout
+
+V0.1 means no production users; the in-process WebView is removed
+in step 6 of the migration order. No feature flag В?" full
+replacement.
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+I’ve got the full v3 diff. The design fixes the prior high-risk gaps, but I’m checking the exact API mechanics around cleanup acknowledgment and token allocation because those are the places implementation could still drift.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "git grep -n \"interface IPluginSandbox\\|PluginLoadParcel\\|PluginSandbox\" -- ." in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Select-String -Path docs/plugin-host-multi-process.md -Pattern 'session-keyed|cleanup-complete|querySandboxState|loadPlugin|structured code|deleteAllData|same-"'`pluginId` reload|sandboxToken'"'" in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "git grep -n \"interface IPluginSandbox\\|PluginLoadParcel\\|PluginSandbox\" -- ."` rejected: blocked by policy
+2026-05-25T18:17:04.322310Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "git grep -n \"interface IPluginSandbox\\|PluginLoadParcel\\|PluginSandbox\" -- ."` rejected: blocked by policy
+ succeeded in 367ms:
+
+docs\plugin-host-multi-process.md:92:Г  К    Г  WebView (one per sandboxToken)                       КГ
+docs\plugin-host-multi-process.md:118:sandbox to the host carries the `sandboxToken`** so the host can
+docs\plugin-host-multi-process.md:129:    // loadPlugin to close the registration race that v1 had).
+docs\plugin-host-multi-process.md:130:    int loadPlugin(in PluginLoadParcel request, in IPluginHostCallback callback);
+docs\plugin-host-multi-process.md:131:    oneway void unloadPlugin(int sandboxToken);
+docs\plugin-host-multi-process.md:135:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, 
+String callbackId);
+docs\plugin-host-multi-process.md:136:    oneway void deliverBridgeResult(int sandboxToken, String callbackId, String 
+resultJson);
+docs\plugin-host-multi-process.md:139:    String querySandboxState(int sandboxToken);
+docs\plugin-host-multi-process.md:143:`sandboxToken` is an opaque, monotonically-increasing **session ID
+docs\plugin-host-multi-process.md:144:generated by the sandbox per `loadPlugin` call**. It is NOT derived
+docs\plugin-host-multi-process.md:154:`sandboxToken`.
+docs\plugin-host-multi-process.md:159:    oneway void bridgeCall(int sandboxToken, String method, String argsJson, 
+String callbackId);
+docs\plugin-host-multi-process.md:162:    oneway void onWebViewError(int sandboxToken, String code, String message);
+docs\plugin-host-multi-process.md:163:    oneway void onPluginReady(int sandboxToken);
+docs\plugin-host-multi-process.md:164:    oneway void onPluginCrashed(int sandboxToken, String reason);
+docs\plugin-host-multi-process.md:169:`loadPlugin` is the one synchronous call so the host knows the
+docs\plugin-host-multi-process.md:210:The host writes the decrypted JS bundle to a **session-keyed**
+docs\plugin-host-multi-process.md:214:getNoBackupFilesDir()/plugin-sandbox/{pluginId}_{sandboxToken}/bundle.js
+docs\plugin-host-multi-process.md:217:The directory name carries `sandboxToken` (not just `pluginId`) so
+docs\plugin-host-multi-process.md:220:`unloadPlugin` is `oneway` and triggers async wipe, a `pluginId`-
+docs\plugin-host-multi-process.md:226:the sandbox acknowledges `unloadPlugin(N)` (the host's
+docs\plugin-host-multi-process.md:227:"cleanup-complete" callback, fired by the sandbox on its way out
+docs\plugin-host-multi-process.md:238:`PluginSandboxService` calls `WebStorage.getInstance().deleteAllData()`
+docs\plugin-host-multi-process.md:274:A loaded plugin's `sandboxToken` is in one of these states. Every
+docs\plugin-host-multi-process.md:281:                     Г loadPlugin returns token
+docs\plugin-host-multi-process.md:291:       Г             Г unloadPlugin              кФФФФФФФФФФП
+docs\plugin-host-multi-process.md:294:       Г        Г unloading Г                         Г unloadPlugin
+docs\plugin-host-multi-process.md:309:`unloadPlugin` is `oneway`, the host-visible "unloaded" view and
+docs\plugin-host-multi-process.md:317:| State | `loadPlugin` (same `pluginId`) | `dispatchHook` | 
+`deliverBridgeResult` | `unloadPlugin` | `querySandboxState` |
+docs\plugin-host-multi-process.md:320:| `ready` | rejected - caller MUST `unloadPlugin` first | delivered | delivered 
+| OK  `unloading` | returns `"ready"` |
+docs\plugin-host-multi-process.md:328:caller of `loadPlugin`; it serializes loads per `pluginId` so the
+docs\plugin-host-multi-process.md:333:**Same-`pluginId` reload race**: the documented sequence is
+docs\plugin-host-multi-process.md:334:`unloadPlugin(N)`  wait for `querySandboxState(N) == "unloaded"`
+docs\plugin-host-multi-process.md:335:or for `onPluginCrashed(N)`  then `loadPlugin(...)` which
+docs\plugin-host-multi-process.md:341:`sandboxToken`) serializes hooks + bridge-results so concurrent
+docs\plugin-host-multi-process.md:350:On `unloadPlugin` or `onPluginCrashed`, the host completes every
+docs\plugin-host-multi-process.md:360:- `loadPlugin` count goes 0  1: `bindService(BIND_AUTO_CREATE)`.
+docs\plugin-host-multi-process.md:361:- `unloadPlugin` count goes 1  0: schedule an `unbindService`
+docs\plugin-host-multi-process.md:362:  after a 30-second idle window. New `loadPlugin` during the
+docs\plugin-host-multi-process.md:407:- **`sandboxToken` carried on every callback.** The host can route
+docs\plugin-host-multi-process.md:412:- **`loadPlugin` `IllegalStateException` with structured code.**
+docs\plugin-host-multi-process.md:427:  and rebinds on the next `loadPlugin`.
+docs\plugin-host-multi-process.md:432:- **Process kill while load in flight.** `loadPlugin` returns
+docs\plugin-host-multi-process.md:459:  complete with `plugin_crashed`; next `loadPlugin` rebinds.
+
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+1. Verdict on v3: **RED**
+
+Items:
+
+1. **Token/path contradiction blocks implementation.** The doc says `sandboxToken` is sandbox-generated and returned by `loadPlugin`, but also says the host writes the bundle before `loadPlugin` to `.../{pluginId}_{sandboxToken}/bundle.js` ([docs/plugin-host-multi-process.md:143](D:/Projects/syncler/docs/plugin-host-multi-process.md:143), [docs/plugin-host-multi-process.md:210](D:/Projects/syncler/docs/plugin-host-multi-process.md:210)). The host cannot stage a token-keyed path before it knows the token. Fix by making the host allocate a `sessionId` included in `PluginLoadParcel`, or add a synchronous `reserveSandboxToken(pluginId)` step before staging. I would prefer host-allocated opaque session ID.
+
+2. **Cleanup ACK is referenced but absent from AIDL.** The doc says the sandbox fires a `"cleanup-complete" callback` when leaving `unloading`, but `IPluginHostCallback` has no such method ([docs/plugin-host-multi-process.md:154](D:/Projects/syncler/docs/plugin-host-multi-process.md:154), [docs/plugin-host-multi-process.md:226](D:/Projects/syncler/docs/plugin-host-multi-process.md:226)). Either add `oneway void onPluginUnloaded(int sandboxToken)` / `onSandboxCleanupComplete`, or define polling-only semantics using `querySandboxState`.
+
+3. **WebView global storage wipe is unsafe with multiple plugins loaded.** `deleteAllData()` and `removeAllCookies()` are process-global, but the trigger is “last ready token for a given pluginId” ([docs/plugin-host-multi-process.md:238](D:/Projects/syncler/docs/plugin-host-multi-process.md:238)). Unloading plugin A can wipe plugin B’s cookies/IndexedDB while B is still ready. Trigger must be “no ready WebViews remain in `:plugin`”, or the doc must explicitly serialize plugin execution / accept global disruption.
+
+2. Anything still missing: the unload completion signal needs to be part of the formal state machine and test plan, not prose-only.
+
+3. Anything new: the session-keyed staging idea is correct, but token ownership needs one source of truth. Right now v3 has both “sandbox-generated token” and “host-staged token path,” which cannot both stand.
+tokens used
+22,358
+1. Verdict on v3: **RED**
+
+Items:
+
+1. **Token/path contradiction blocks implementation.** The doc says `sandboxToken` is sandbox-generated and returned by `loadPlugin`, but also says the host writes the bundle before `loadPlugin` to `.../{pluginId}_{sandboxToken}/bundle.js` ([docs/plugin-host-multi-process.md:143](D:/Projects/syncler/docs/plugin-host-multi-process.md:143), [docs/plugin-host-multi-process.md:210](D:/Projects/syncler/docs/plugin-host-multi-process.md:210)). The host cannot stage a token-keyed path before it knows the token. Fix by making the host allocate a `sessionId` included in `PluginLoadParcel`, or add a synchronous `reserveSandboxToken(pluginId)` step before staging. I would prefer host-allocated opaque session ID.
+
+2. **Cleanup ACK is referenced but absent from AIDL.** The doc says the sandbox fires a `"cleanup-complete" callback` when leaving `unloading`, but `IPluginHostCallback` has no such method ([docs/plugin-host-multi-process.md:154](D:/Projects/syncler/docs/plugin-host-multi-process.md:154), [docs/plugin-host-multi-process.md:226](D:/Projects/syncler/docs/plugin-host-multi-process.md:226)). Either add `oneway void onPluginUnloaded(int sandboxToken)` / `onSandboxCleanupComplete`, or define polling-only semantics using `querySandboxState`.
+
+3. **WebView global storage wipe is unsafe with multiple plugins loaded.** `deleteAllData()` and `removeAllCookies()` are process-global, but the trigger is “last ready token for a given pluginId” ([docs/plugin-host-multi-process.md:238](D:/Projects/syncler/docs/plugin-host-multi-process.md:238)). Unloading plugin A can wipe plugin B’s cookies/IndexedDB while B is still ready. Trigger must be “no ready WebViews remain in `:plugin`”, or the doc must explicitly serialize plugin execution / accept global disruption.
+
+2. Anything still missing: the unload completion signal needs to be part of the formal state machine and test plan, not prose-only.
+
+3. Anything new: the session-keyed staging idea is correct, but token ownership needs one source of truth. Right now v3 has both “sandbox-generated token” and “host-staged token path,” which cannot both stand.

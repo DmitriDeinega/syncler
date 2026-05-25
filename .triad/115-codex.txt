@@ -1,0 +1,13 @@
+1. Verdict on v3: **RED**
+
+Items:
+
+1. **Token/path contradiction blocks implementation.** The doc says `sandboxToken` is sandbox-generated and returned by `loadPlugin`, but also says the host writes the bundle before `loadPlugin` to `.../{pluginId}_{sandboxToken}/bundle.js` ([docs/plugin-host-multi-process.md:143](D:/Projects/syncler/docs/plugin-host-multi-process.md:143), [docs/plugin-host-multi-process.md:210](D:/Projects/syncler/docs/plugin-host-multi-process.md:210)). The host cannot stage a token-keyed path before it knows the token. Fix by making the host allocate a `sessionId` included in `PluginLoadParcel`, or add a synchronous `reserveSandboxToken(pluginId)` step before staging. I would prefer host-allocated opaque session ID.
+
+2. **Cleanup ACK is referenced but absent from AIDL.** The doc says the sandbox fires a `"cleanup-complete" callback` when leaving `unloading`, but `IPluginHostCallback` has no such method ([docs/plugin-host-multi-process.md:154](D:/Projects/syncler/docs/plugin-host-multi-process.md:154), [docs/plugin-host-multi-process.md:226](D:/Projects/syncler/docs/plugin-host-multi-process.md:226)). Either add `oneway void onPluginUnloaded(int sandboxToken)` / `onSandboxCleanupComplete`, or define polling-only semantics using `querySandboxState`.
+
+3. **WebView global storage wipe is unsafe with multiple plugins loaded.** `deleteAllData()` and `removeAllCookies()` are process-global, but the trigger is “last ready token for a given pluginId” ([docs/plugin-host-multi-process.md:238](D:/Projects/syncler/docs/plugin-host-multi-process.md:238)). Unloading plugin A can wipe plugin B’s cookies/IndexedDB while B is still ready. Trigger must be “no ready WebViews remain in `:plugin`”, or the doc must explicitly serialize plugin execution / accept global disruption.
+
+2. Anything still missing: the unload completion signal needs to be part of the formal state machine and test plan, not prose-only.
+
+3. Anything new: the session-keyed staging idea is correct, but token ownership needs one source of truth. Right now v3 has both “sandbox-generated token” and “host-staged token path,” which cannot both stand.

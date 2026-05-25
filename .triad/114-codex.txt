@@ -1,0 +1,23 @@
+1. Verdict on v2: **YELLOW**
+
+Items:
+
+1. **Add explicit unload cleanup state before Phase 10b.** Your risk #3 is real. Because `unloadPlugin` is `oneway`, host-side “unloaded” and sandbox-side cleanup can diverge. A same-`pluginId` reload can race stale WebView teardown, staged-file deletion, pending callback drain, or late `onPluginCrashed`. Add an `unloading` / `cleanup` state and define same-`pluginId` `loadPlugin` behavior during it: reject, await, or allocate a generation and fence all old callbacks.
+
+2. **Define `loadPlugin` behavior in the state table.** The table says every AIDL method is defined per state, but only covers `dispatchHook`, `deliverBridgeResult`, and `unloadPlugin`. Since `loadPlugin` creates tokens and can collide by `pluginId`, it needs rows for: existing `loading`, `ready`, `errored`, `unloading`, `unloaded`, `process_dead`.
+
+3. **Fix the error-semantics contradiction.** The doc now says `diagnosticManifestJson` is never a grant source and manifest is not parsed sandbox-side, but later says `loadPlugin` throws `IllegalStateException` if `manifestJson` parse fails sandbox-side. That should become something like: malformed `PluginLoadParcel`, hash mismatch, unsupported renderer, or invalid capped diagnostic field. Also prefer a typed load result/error over relying on unchecked Binder exceptions.
+
+2. Anything missing:
+
+- **Generation fencing.** Tokens help, but same `pluginId` reloads also need stale callback rejection. A late callback from token N after token N+1 is ready should be ignored or routed only to token N’s already-drained state.
+- **Staged bundle deletion timing.** If old and new loads share `plugin-sandbox/{pluginId}/bundle.js`, unload cleanup can delete the new bundle. Use token/generation-specific staging paths, or make cleanup path-specific.
+- **`querySandboxState` state behavior.** It is in the AIDL but absent from the state table.
+
+3. Anything new:
+
+- Shared UID is acceptable for V1.5 **if** Phase 10 is explicitly scoped as liveness/resource isolation, not data isolation. I would not jump directly to `isolatedProcess` for Phase 10b unless V1.5 is intended to claim hostile-plugin data containment.
+- `diagnosticManifestJson` 64 KB is fine. Smaller is optional, not material.
+- Per-token coroutine/channel is sane for tens of plugins.
+
+Net: close the unload→reload/generation ambiguity and the stale `manifestJson` error wording, then I’d call it **GREEN** for Phase 10b.
