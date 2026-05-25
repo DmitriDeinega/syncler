@@ -1,0 +1,14 @@
+1. Verdict: **YELLOW**
+
+Item:
+- [RotationRepository.kt](D:/Projects/syncler/android/core/auth/src/main/kotlin/app/syncler/core/auth/RotationRepository.kt:348): `statePlaintext` is decrypted at line 329, but the cleanup `finally` does not begin until after `val newMasterKey = MasterKey.generate()`. If `MasterKey.generate()` throws, `statePlaintext` is still not zeroed. This contradicts the claimed “new MK generation throws → finally zeroes statePlaintext” path.
+
+2. Still missing:
+- Move `MasterKey.generate()` inside the protected `try/finally`, or initialize `newMasterKey: ByteArray?` before the try and null-check in cleanup.
+- The deferred partial decrypt + abort test is still worth adding; include this exact generated-MK failure path if practical.
+
+3. New found:
+- `clearPersistedTokenForCompromise()` closes the persisted revoked-token window as described.
+- Pairing hygiene test covers the requested one-pairing POST shape.
+- NUL-byte regression appears fixed: `rg "\x00"` found no match in `SettingsViewModel.kt`.
+- Minor: `SettingsViewModel.kt` is not literally plain ASCII; it still contains non-ASCII comment punctuation. Not a blocker unless ASCII-only is a hard source policy.
