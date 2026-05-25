@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthContext, current_auth_context
-from app.crypto.aead import assemble_envelope
 from app.services.nonce_replay import record_nonce_or_reject
 from app.crypto.signatures import verify_message_envelope
 from app.db import get_db

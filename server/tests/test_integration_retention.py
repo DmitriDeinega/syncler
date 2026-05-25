@@ -25,6 +25,7 @@ async def test_prune_expired_only_deletes_expired_messages(db_session: AsyncSess
     plugin = Plugin(
         id=uuid4(),
         sender_id=sender.id,
+        plugin_identifier="com.test.retention_integration",
         version="1.0.0",
         manifest_hash=b"5" * 32,
         bundle_hash=b"6" * 32,
@@ -52,7 +53,14 @@ async def test_prune_expired_only_deletes_expired_messages(db_session: AsyncSess
         expires_at=now + timedelta(hours=1),
         sent_at=now,
     )
-    db_session.add_all([user, sender, plugin, expired, future])
+    # Insert parents in dependency order so FKs resolve. SQLAlchemy
+    # can't always infer topological order from a single add_all when
+    # the model graph doesn't declare relationship()s.
+    db_session.add_all([user, sender])
+    await db_session.flush()
+    db_session.add(plugin)
+    await db_session.flush()
+    db_session.add_all([expired, future])
     await db_session.commit()
 
     summary = await prune_expired(db_session)

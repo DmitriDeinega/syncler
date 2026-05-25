@@ -136,7 +136,7 @@ async def test_pairing_complete_rejects_expired_token(
         headers={"Authorization": f"Bearer {session_token}"},
         json={
             "pairing_token": _b64(b"E" * 32),
-            "encrypted_initial_state": _b64(b"opaque-state"),
+            "encrypted_initial_state": _b64(b"opaque-state-padding-to-16-plus"),
         },
     )
     assert complete.status_code == 410, complete.text

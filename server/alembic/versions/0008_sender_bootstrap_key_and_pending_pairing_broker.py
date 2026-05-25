@@ -22,7 +22,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0008_sender_bootstrap_key_and_pending_pairing_broker"
+revision = "0008_sender_bootstrap_broker"
 down_revision = "0007_live_cards"
 branch_labels = None
 depends_on = None

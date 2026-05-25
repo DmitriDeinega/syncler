@@ -124,8 +124,20 @@ def downgrade() -> None:
     op.drop_column("live_cards", "min_plugin_version")
     op.drop_column("live_cards", "card_type")
     op.drop_column("live_cards", "encrypted_body_pointer")
-    op.add_column("live_cards", sa.Column("encrypted_payload", sa.LargeBinary(), nullable=False, server_default=b""))
-    op.add_column("live_cards", sa.Column("nonce", sa.LargeBinary(), nullable=False, server_default=b""))
+    op.add_column(
+        "live_cards",
+        sa.Column(
+            "encrypted_payload", sa.LargeBinary(), nullable=False,
+            server_default=sa.text("'\\x'::bytea"),
+        ),
+    )
+    op.add_column(
+        "live_cards",
+        sa.Column(
+            "nonce", sa.LargeBinary(), nullable=False,
+            server_default=sa.text("'\\x'::bytea"),
+        ),
+    )
     op.drop_column("users", "device_directory_version")
     op.drop_column("devices", "updated_at")
     op.drop_constraint(

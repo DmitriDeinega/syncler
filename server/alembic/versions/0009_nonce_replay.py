@@ -26,7 +26,7 @@ import sqlalchemy as sa
 
 
 revision = "0009_nonce_replay"
-down_revision = "0008_sender_bootstrap_key_and_pending_pairing_broker"
+down_revision = "0008_sender_bootstrap_broker"
 branch_labels = None
 depends_on = None
 

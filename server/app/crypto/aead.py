@@ -46,7 +46,18 @@ def assemble_aad(fields: dict[str, Any]) -> bytes:
     AAD authenticates the protocol context bound to the ciphertext but does
     NOT include the ciphertext itself. See ``assemble_envelope`` for the
     Ed25519 signing input.
+
+    Validates against ``AAD_REQUIRED_FIELDS`` — missing or extra keys raise
+    ``ValueError`` so a buggy caller can't silently sign over the wrong
+    field set.
     """
+    provided = set(fields.keys())
+    if provided != AAD_REQUIRED_FIELD_SET:
+        missing = AAD_REQUIRED_FIELD_SET - provided
+        extra = provided - AAD_REQUIRED_FIELD_SET
+        raise ValueError(
+            f"assemble_aad field mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
+        )
     return _canonical(fields)
 
 
@@ -54,7 +65,16 @@ def assemble_envelope(fields: dict[str, Any]) -> bytes:
     """Assemble canonical envelope JSON for Ed25519 sender signing.
 
     Envelope = AAD + ``encrypted_body`` (base64) + ``nonce`` (base64).
+    Same field-set strictness as ``assemble_aad`` — missing/extra keys
+    raise ``ValueError``.
     """
+    provided = set(fields.keys())
+    if provided != ENVELOPE_REQUIRED_FIELD_SET:
+        missing = ENVELOPE_REQUIRED_FIELD_SET - provided
+        extra = provided - ENVELOPE_REQUIRED_FIELD_SET
+        raise ValueError(
+            f"assemble_envelope field mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
+        )
     return _canonical(fields)
 
 

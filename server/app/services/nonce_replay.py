@@ -158,10 +158,22 @@ async def cleanup_expired_with_lock(db: AsyncSession) -> int:
     DELETE per invocation (other workers no-op). Returns the number
     of rows deleted, or -1 if another worker held the lock.
 
-    Multi-worker safe: pg_try_advisory_lock returns False without
-    blocking when contended. Advisory locks are released on session
-    close (transaction-level) or on explicit pg_advisory_unlock.
+    Multi-worker safe on Postgres via pg_try_advisory_lock — returns
+    False without blocking when contended. Advisory locks are released
+    on session close (transaction-level) or on explicit
+    pg_advisory_unlock.
+
+    On SQLite (test backend), the advisory-lock primitives don't
+    exist; we just run the cleanup directly since the test DB is
+    single-process anyway. Dialect-gated to keep the prod Postgres
+    path strict.
     """
+    dialect_name = db.bind.dialect.name if db.bind is not None else ""
+    if dialect_name != "postgresql":
+        # No advisory-lock primitive available; cleanup runs
+        # unconditionally. Test infrastructure only.
+        return await _cleanup_expired(db)
+
     result = await db.execute(
         text("SELECT pg_try_advisory_lock(:k)"),
         {"k": _RETENTION_ADVISORY_LOCK_KEY},

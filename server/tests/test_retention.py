@@ -49,6 +49,7 @@ async def test_prune_expired_deletes_expired_message(db_session: AsyncSession) -
     plugin = Plugin(
         id=uuid4(),
         sender_id=sender.id,
+        plugin_identifier="com.test.retention",
         version="1.0.0",
         manifest_hash=b"5" * 32,
         bundle_hash=b"6" * 32,
