@@ -1,0 +1,315 @@
+Reading prompt from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e618e-3c32-7322-91a8-2231da93961d
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 134 — Phase 11a design v3 (post-133)
+
+Triad 133 (Codex-only, Gemini quota exhausted): YELLOW. Two
+blockers + four nits.
+
+## v3 deltas vs v2
+
+### Block 1: per-plugin isolated process via `bindIsolatedService`
+
+Codex 133 #2: a single `:nativePlugin` process shared across
+N plugins isn't real per-plugin isolation. Malicious code
+can reflect on the shared heap to reach sibling plugins'
+contexts.
+
+**V3 fix**: each native plugin gets its OWN isolated process
+via `Context.bindIsolatedService(Intent, BindServiceFlags,
+instanceName, ...)` (API 29+). The `instanceName` is the
+host-allocated `sandboxToken` (Phase 10's monotonic int), so
+two simultaneous loads of the same plugin (re-load mid-flow)
+get two distinct UIDs.
+
+`bindIsolatedService` was added in Android 10 (API 29). Our
+minSdk is 26. Two options:
+
+- **Raise minSdk to 29 for native plugins ONLY** (JS plugins
+  keep working on 26-28). The renderer-routing layer in
+  `SandboxedPluginInstanceFactory` rejects `renderer ==
+  "native_kotlin"` on Build.VERSION.SDK_INT < 29 with a
+  user-visible "this device doesn't support native plugins"
+  error. Active install base in 2026 is ~95% API 29+;
+  acceptable trade-off.
+- **Fixed pool of N service entries** (PluginNativeSandboxService0..N
+  each with `:nativePlugin0`..`:nativePluginN` process
+  attributes) for API 26-28 compatibility. Capped at N=8 or
+  so. More manifest noise but works on all minSdk.
+
+Recommendation: option 1 (raise minSdk for native plugins).
+
+### Block 2: DEX delivery over `ParcelFileDescriptor` (not path)
+
+Codex 133 #1: isolated UID can't read `/data/data/<host_pkg>/...`.
+The `bundleFilePath` in `PluginLoadParcel` doesn't work.
+
+**V3 fix**: the host opens the staged DEX file in the host
+process, passes a `ParcelFileDescriptor` over the AIDL
+`loadPlugin` call. The sandbox reads the FD bytes into memory,
+verifies SHA-256 against `bundleHashHex` (Phase 10 TOCTOU
+defense still applies), then loads via
+`InMemoryDexClassLoader(ByteBuffer, parentClassLoader)`
+(API 26+).
+
+AIDL change:
+
+```aidl
+int loadPlugin(in PluginLoadParcel request, in IPluginHostCallback callback,
+               in ParcelFileDescriptor bundleFd);
+```
+
+`bundleFilePath` stays for JS plugins (the `:plugin` process
+isn't isolated and can still read host private storage). For
+native, the `bundleFd` carries the bytes; `bundleFilePath` is
+optional / unused.
+
+### Block 3: tighter entryClass validation (Codex 133 #4 nit a)
+
+Java/Kotlin binary class name regex, NOT reverse-DNS:
+
+```text
+^([A-Za-z_$][A-Za-z0-9_$]*\.)*[A-Za-z_$][A-Za-z0-9_$]*$
+```
+
+Permits segments starting with uppercase (`MyPackage.WeatherPlugin`),
+underscores, and `$` (nested classes). Length cap: 256 chars.
+
+### Block 4: ABI mismatch fails before code load (Codex 133 #4 nit b)
+
+`PluginNativeSandboxService.onLoad`:
+
+1. Parse parcel (validate fields).
+2. Verify bundle hash against the FD bytes.
+3. Check `parcel.nativeSdkAbi == NATIVE_SDK_ABI` constant
+   baked into the SDK runtime. Mismatch → throw
+   `IllegalStateException(UNSUPPORTED_SDK_ABI)` over Binder
+   BEFORE constructing `InMemoryDexClassLoader`.
+
+### Block 5: `onInit` timeout cancels job, not just reports (Codex 133 #4 nit c)
+
+```kotlin
+val initJob = scope.launch {
+    val result = withTimeoutOrNull(INIT_TIMEOUT_MS) {
+        plugin.onInit(context)
+    }
+    if (result == null) {
+        // Timeout: cancel the scope (which cancels all children
+        // including any background work onInit kicked off),
+        // surface the failure via reportError, the coordinator
+        // unloads.
+        scope.cancel()
+        hostSignals.reportError("init_timeout", "")
+        return@launch
+    }
+    result.fold(
+        onSuccess = { hostSignals.reportReady() },
+        onFailure = { hostSignals.reportError("init_failed", it.message ?: "") },
+    )
+}
+```
+
+Cancellation propagates to whatever the plugin's `onInit`
+was waiting on; no orphaned coroutines after the failure.
+
+### Block 6: bridge call attribution by Binder session (Codex 133 #4 nit d)
+
+Currently `PluginBridge.call(method, argsJson, callbackId)`
+takes the plugin's identifier implicitly (the bridge instance
+is bound to one `pluginId`). With per-plugin isolated
+processes, the bridge call arrives from a specific Binder
+connection — the `SandboxRouter.PluginHostCallbackStub` has
+already pinned `expectedToken` in its constructor.
+
+V3: keep using the `sandboxToken` (host-allocated) for
+attribution. NEVER trust a plugin-supplied `pluginId` in the
+bridge call body. The router resolves `sandboxToken →
+SandboxHandle → registered PluginBridge instance` directly.
+
+Documented as a §11.x.x rule in the spec: "Bridge calls are
+attributed by `sandboxToken` (host-allocated, AIDL-routed),
+not by any plugin-supplied identifier."
+
+### Block 7: Binder payload size limits (Codex 133 #4 nit f)
+
+`PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP` already
+exists (64 KB, Phase 10a). For native:
+
+- `bridgeCall.argsJson` ≤ 64 KB.
+- `bridgeCall.resultJson` ≤ 64 KB.
+- `dispatchHook.payloadJson` ≤ 64 KB.
+- DEX bundle (via FD) ≤ 4 MB. Documented; enforced at the
+  host's staging step (size check before opening FD).
+
+All Phase 10's existing payload caps stay; the new DEX size
+cap is the only addition.
+
+## Carry-overs from v2 (unchanged)
+
+- `isolatedProcess="true"` for the native sandbox service.
+- DEX-only (no AAR, no resources, no native libs, no
+  manifest merging).
+- `entry_class` + `native_sdk_abi` as first-class
+  `PluginLoadParcel` fields (not diagnostic JSON).
+- Bounded per-plugin coroutine dispatcher.
+- Trust model documented.
+- New `:plugin-sdk-runtime` module.
+- New `sdk-plugin-kotlin/` SDK module.
+- Manifest renderer `"native_kotlin"`.
+
+## Updated process model
+
+```
+Host process (UID 10042 say)
+ ├─ PluginSandboxConnection (Phase 10b)
+ ├─ SandboxRouter
+ │   ├─ binds :plugin (shared, NOT isolated) for JS plugins
+ │   └─ bindIsolatedService(:nativePlugin, instanceName=token, ...) for EACH native plugin
+ ├─ PluginBridge (capability dispatch) — one instance per sandboxToken
+
+:plugin process (UID 10042 — shared with host)
+ └─ Multiple WebViews (one per JS plugin), Phase 10b machinery
+
+:nativePlugin process(es) — UID 90000+ each, isolated
+ └─ ONE native plugin per process; InMemoryDexClassLoader rooted
+    at the verified DEX bytes; bounded coroutine dispatcher
+```
+
+## Process death handling
+
+`SandboxRouter.handleSandboxDeath` already handles `:plugin`
+death (Phase 10b). With per-plugin native processes,
+`PluginSandboxConnection` needs to track death per-instance:
+when any one `:nativePlugin/<token>` dies, only THAT token's
+handle gets reaped — sibling native plugins keep running in
+their own processes.
+
+`SandboxRouter` adds:
+
+```kotlin
+class SandboxRouter(...) {
+    init {
+        connection.onSandboxDeath = { deadInstanceName -> handleSandboxDeath(deadInstanceName) }
+    }
+
+    private fun handleSandboxDeath(deadInstanceName: String?) {
+        // deadInstanceName == null  → :plugin (shared JS) died: reap all JS tokens.
+        // deadInstanceName == "42"  → :nativePlugin/42 died: reap just that token.
+        ...
+    }
+}
+```
+
+## Open questions for v3
+
+A. **minSdk for native plugins**: 29 (recommended) or fall
+   back to the fixed-pool approach for 26-28 compatibility?
+   Recommendation: 29. The benefit (true per-plugin isolation)
+   outweighs the cost (excluding 5% of devices from running
+   ONE category of plugins — they still get JS, template,
+   etc).
+
+B. **Bundle size cap**: 4 MB DEX. Most Kotlin plugin code is
+   a few hundred KB compiled. Code-heavy plugins (e.g. with
+   embedded kotlinx-serialization) might push 1-2 MB.
+   Confirm 4 MB is comfortable.
+
+C. **isolated process startup cost**: Android spawns a fresh
+   process per `bindIsolatedService` call. Latency is ~100-300ms
+   per bind (more on cold-start devices). With Phase 10's
+   ref-counted bindService + 30s idle-unbind, the cost
+   amortizes across multiple hook dispatches per plugin —
+   but the FIRST `loadPlugin` call always pays the spawn
+   cost. Acceptable for a permission-gated, user-initiated
+   plugin install?
+
+D. **`bindIsolatedService` callback identity**: the host's
+   `IPluginHostCallback.Stub` is passed at `bindIsolatedService`
+   time. Binder reuses the proxy across the AIDL boundary.
+   The sandbox calls back through that proxy; the host
+   process verifies the callback's source by which
+   ServiceConnection fired (one per token), not by anything
+   the plugin can forge. Same defense Phase 10 has.
+
+E. **Plugin SDK runtime ABI bumps**: every breaking change
+   to `SynclerPlugin` / `PluginContext` bumps
+   `NATIVE_SDK_ABI`. Each bump requires plugins to recompile
+   and re-publish. Documented as expected breakage. V1.5
+   SDK ABI = 1.
+
+F. **Spec carve-out**: `docs/plugin-host-multi-process.md`
+   has a §12-ish stub for Phase 11. v3 design lands there
+   when implementation begins.
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on Phase 11a v3: GREEN / YELLOW / RED + items.
+2. Anything in the per-plugin isolated process model that
+   I'm missing.
+3. Anything else.
+
+**Reply text only. Do NOT call any write/mutation tool. Do not commit, edit, or stage anything.**
+
+codex
+Verdict: **YELLOW**, but much closer to green. The two Phase 133 blockers are addressed conceptually. I would not start implementation until these are tightened.
+
+1. **`scope.cancel()` before `reportError` is still risky.** If `hostSignals.reportError(...)` is suspendable or touches a cancelled coroutine context, cancellation can prevent the error report from being delivered. Report first from a non-cancelled context, then cancel the plugin scope, or cancel only plugin child jobs and keep the reporting path outside that scope.
+
+2. **Sandbox must enforce the DEX size cap too.** Host-side staging enforcement is good, but the native sandbox should also stop reading after `4 MB + 1` and fail. That protects against host bugs, stale callers, and future refactors.
+
+3. **Death tracking needs one `ServiceConnection`/death association per token.** The design says this, but make it explicit: native handles must not share a mutable “current token” or process-global callback. The `deadInstanceName` path is only reliable if the connection object is token-owned.
+
+4. **Define dependency/classloader policy before implementation.** `InMemoryDexClassLoader(ByteBuffer, parentClassLoader)` means plugins can reference whatever the parent exposes. The spec should say what is intentionally parent-provided: `plugin-sdk-runtime`, Kotlin stdlib, coroutines, serialization, etc. Also reject or at least document bundled classes under forbidden host/runtime package prefixes to avoid type identity surprises and spoofed SDK classes.
+
+5. **`bindIsolatedService` is the right model, with API 29 native-only support.** I agree with option A. The fixed-pool fallback weakens the simplicity and still creates lifecycle/resource edge cases. JS continuing on API 26-28 is a reasonable product trade.
+
+Other answers:
+
+- **4 MB DEX cap:** reasonable for v1. Enforce compressed/staged artifact size and actual bytes read from FD. If plugins later need large embedded libraries, that is probably a signal to revisit SDK packaging rather than silently expanding the cap.
+
+- **Startup cost:** acceptable for permission-gated install/load. Treat native plugin load as a visible operation and cache within the 30s idle window as proposed.
+
+- **Callback identity:** acceptable if every native token gets its own callback stub/connection and the router resolves by host-owned `sandboxToken`, never by plugin-provided ids.
+
+Net: **YELLOW with small spec fixes**. The isolation model is now basically sound; the remaining work is making cancellation/reporting, size enforcement, classloader boundaries, and token-owned lifecycle wiring unambiguous.
+tokens used
+4,923
+Verdict: **YELLOW**, but much closer to green. The two Phase 133 blockers are addressed conceptually. I would not start implementation until these are tightened.
+
+1. **`scope.cancel()` before `reportError` is still risky.** If `hostSignals.reportError(...)` is suspendable or touches a cancelled coroutine context, cancellation can prevent the error report from being delivered. Report first from a non-cancelled context, then cancel the plugin scope, or cancel only plugin child jobs and keep the reporting path outside that scope.
+
+2. **Sandbox must enforce the DEX size cap too.** Host-side staging enforcement is good, but the native sandbox should also stop reading after `4 MB + 1` and fail. That protects against host bugs, stale callers, and future refactors.
+
+3. **Death tracking needs one `ServiceConnection`/death association per token.** The design says this, but make it explicit: native handles must not share a mutable “current token” or process-global callback. The `deadInstanceName` path is only reliable if the connection object is token-owned.
+
+4. **Define dependency/classloader policy before implementation.** `InMemoryDexClassLoader(ByteBuffer, parentClassLoader)` means plugins can reference whatever the parent exposes. The spec should say what is intentionally parent-provided: `plugin-sdk-runtime`, Kotlin stdlib, coroutines, serialization, etc. Also reject or at least document bundled classes under forbidden host/runtime package prefixes to avoid type identity surprises and spoofed SDK classes.
+
+5. **`bindIsolatedService` is the right model, with API 29 native-only support.** I agree with option A. The fixed-pool fallback weakens the simplicity and still creates lifecycle/resource edge cases. JS continuing on API 26-28 is a reasonable product trade.
+
+Other answers:
+
+- **4 MB DEX cap:** reasonable for v1. Enforce compressed/staged artifact size and actual bytes read from FD. If plugins later need large embedded libraries, that is probably a signal to revisit SDK packaging rather than silently expanding the cap.
+
+- **Startup cost:** acceptable for permission-gated install/load. Treat native plugin load as a visible operation and cache within the 30s idle window as proposed.
+
+- **Callback identity:** acceptable if every native token gets its own callback stub/connection and the router resolves by host-owned `sandboxToken`, never by plugin-provided ids.
+
+Net: **YELLOW with small spec fixes**. The isolation model is now basically sound; the remaining work is making cancellation/reporting, size enforcement, classloader boundaries, and token-owned lifecycle wiring unambiguous.
