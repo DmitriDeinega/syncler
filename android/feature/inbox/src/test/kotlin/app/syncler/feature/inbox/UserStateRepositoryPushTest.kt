@@ -165,6 +165,7 @@ private class StubApi : SynclerApi {
     override suspend fun rotateMasterKey(
         body: app.syncler.core.network.RotateMasterKeyRequestDto,
     ): Response<app.syncler.core.network.RotateMasterKeyResponseDto> = stub()
+    override suspend fun getPairingState(id: String): app.syncler.core.network.PairingStateResponseDto = stub()
 
     override suspend fun signup(body: SignupRequest): SignupResponse = stub()
     override suspend fun preLogin(body: PreLoginRequest): PreLoginResponse = stub()

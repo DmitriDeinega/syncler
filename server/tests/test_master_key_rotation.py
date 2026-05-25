@@ -1010,3 +1010,72 @@ async def test_put_state_stamps_row_with_locked_key_generation(
     )
     # And the response surfaces the same value.
     assert put.json()["key_generation"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 8e — GET /v1/pairings/{id}/state (used by root_* rotation flow).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_pairing_state_returns_blob_for_owner(
+    app_client: AsyncClient,
+) -> None:
+    session, _ = await _signup_login_enroll(app_client)
+    await _seed_initial_state(app_client, session)
+    pid = await _pair_with_sender(app_client, session, sender_name="A")
+
+    r = await app_client.get(
+        f"/v1/pairing/{pid}/state",
+        headers={"Authorization": f"Bearer {session}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pairing_id"] == str(pid)
+    assert body["state_version"] == 1
+    assert body["key_generation"] == 1
+    # Encrypted blob is opaque base64; verify it's non-empty.
+    assert len(body["encrypted_state"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_get_pairing_state_404_for_non_owner(
+    app_client: AsyncClient,
+) -> None:
+    # User A creates a pairing.
+    session_a, _ = await _signup_login_enroll(app_client, email="a@example.com")
+    await _seed_initial_state(app_client, session_a)
+    pid = await _pair_with_sender(app_client, session_a, sender_name="A")
+
+    # User B tries to read it.
+    session_b, _ = await _signup_login_enroll(
+        app_client,
+        email="b@example.com",
+        auth_key=b"different-auth-key-32-bytes-pad!",
+    )
+    r = await app_client.get(
+        f"/v1/pairing/{pid}/state",
+        headers={"Authorization": f"Bearer {session_b}"},
+    )
+    assert r.status_code == 404, r.text
+
+
+@pytest.mark.asyncio
+async def test_get_pairing_state_404_for_revoked(
+    app_client: AsyncClient,
+) -> None:
+    session, _ = await _signup_login_enroll(app_client)
+    await _seed_initial_state(app_client, session)
+    pid = await _pair_with_sender(app_client, session, sender_name="A")
+
+    rev = await app_client.post(
+        f"/v1/pairing/{pid}/revoke",
+        headers={"Authorization": f"Bearer {session}"},
+    )
+    assert rev.status_code == 204
+
+    r = await app_client.get(
+        f"/v1/pairing/{pid}/state",
+        headers={"Authorization": f"Bearer {session}"},
+    )
+    assert r.status_code == 404

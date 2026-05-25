@@ -68,6 +68,14 @@ interface SynclerApi {
     @GET("/v1/pairing")
     suspend fun listPairings(): List<PairingItemDto>
 
+    /**
+     * Phase 8e — fetch a pairing's encrypted_state for the
+     * root_* rotation flow. Used by the client to GET-decrypt-
+     * re-encrypt every pairing during a master-key rotation.
+     */
+    @GET("/v1/pairing/{id}/state")
+    suspend fun getPairingState(@Path("id") id: String): PairingStateResponseDto
+
     @GET("/v1/state")
     suspend fun getUserState(): StateGetResponseDto
 
@@ -283,6 +291,14 @@ data class PairingItemDto(
     @Json(name = "sender_id") val senderId: String,
     @Json(name = "created_at") val createdAt: String?,
     @Json(name = "revoked_at") val revokedAt: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingStateResponseDto(
+    @Json(name = "pairing_id") val pairingId: String,
+    @Json(name = "encrypted_state") val encryptedState: String,
+    @Json(name = "state_version") val stateVersion: Int,
+    @Json(name = "key_generation") val keyGeneration: Int,
 )
 
 @JsonClass(generateAdapter = true)

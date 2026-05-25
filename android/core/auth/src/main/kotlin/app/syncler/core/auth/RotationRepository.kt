@@ -1,5 +1,6 @@
 package app.syncler.core.auth
 
+import app.syncler.core.crypto.Aead
 import app.syncler.core.crypto.KeyDerivation
 import app.syncler.core.crypto.MasterKey
 import app.syncler.core.crypto.RotationAad
@@ -7,6 +8,8 @@ import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.crypto.toBase64
 import app.syncler.core.network.RotateMasterKeyRequestDto
 import app.syncler.core.network.RotationChallengeResponseDto
+import app.syncler.core.network.RotationPairingEntryDto
+import app.syncler.core.network.RotationUserStateBodyDto
 import app.syncler.core.network.SynclerApi
 import java.security.SecureRandom
 import javax.inject.Inject
@@ -19,18 +22,19 @@ import timber.log.Timber
 /**
  * Phase 8 master-key rotation client (docs/crypto-spec.md §10).
  *
- * V0.1 scope: only ``password_rewrap`` (change the user's password
- * without rotating the underlying master key). The two ``root_*``
- * variants need to fetch every pairing's encrypted_state from the
- * server to re-encrypt under a new master key, which requires a
- * server endpoint (``GET /v1/pairings/{id}/state``) that doesn't
- * exist yet — deferred to Phase 8d together with the §10.9 AAD
- * lockstep wiring.
+ * Three modes per §10.1:
  *
- * For password_rewrap the master key value stays byte-identical;
- * only its wrapping key + the user's auth_salt + auth_key_hash
- * change. `users.key_generation` is NOT bumped — devices on older
- * generations keep working, no mixed-client gate triggers.
+ *   - ``password_rewrap``: master key value unchanged, only wrap key
+ *     + auth_salt + auth_key_hash change. No blob re-encryption,
+ *     no `key_generation` bump, no session revocation.
+ *   - ``root_hygiene_rotation``: new master key value, same wrap
+ *     key (same password + salt). EVERY blob (encrypted_user_state
+ *     + every pairing.encrypted_state) is re-encrypted under the
+ *     new MK. `key_generation` bumps by 1. Sessions stay live.
+ *   - ``root_compromise_rotation``: new MK + new wrap key + new
+ *     salt + new password. All blobs re-encrypted. ALL sessions
+ *     revoked including the initiating one — caller MUST log out
+ *     after success and force a fresh login.
  */
 @Singleton
 class RotationRepository @Inject constructor(
@@ -202,10 +206,304 @@ class RotationRepository @Inject constructor(
         }
     }
 
+    /**
+     * `root_hygiene_rotation` (§10.1) — generate a new master key,
+     * re-encrypt every blob, KEEP the user's password.
+     *
+     *  1. GET rotation challenge.
+     *  2. Derive Argon2(currentPassword, currentSalt) → recover the
+     *     CURRENT wrap key + auth proof.
+     *  3. Local sanity unwrap on the cached wrappedMK (catches
+     *     typos before the server's failed-proof bucket increments).
+     *  4. GET /v1/state → decrypt under the OLD MK with the
+     *     OLD user-state AAD.
+     *  5. GET /v1/pairing (filter active) → for each pairing
+     *     GET /v1/pairing/{id}/state → decrypt under the OLD MK
+     *     with the OLD pairing AAD.
+     *  6. Generate a fresh 32-byte newMasterKey.
+     *  7. Re-encrypt the user state under newMasterKey with the
+     *     NEW user-state AAD (key_generation = oldGen + 1,
+     *     state_version = oldStateVersion + 1, user_id unchanged).
+     *  8. Re-encrypt each pairing under newMasterKey with the
+     *     NEW pairing AAD (same lockstep math).
+     *  9. Wrap newMasterKey under the SAME wrap key (password
+     *     unchanged) with the SAME MK wrap AAD (auth_salt + user_id
+     *     unchanged).
+     * 10. POST /v1/account/rotate-master-key with
+     *     reason="root_hygiene_rotation".
+     * 11. verifyAndBump key_generation high-water mark;
+     *     session.updateAfterRotation with the NEW MK +
+     *     NEW key_generation.
+     */
+    suspend fun rotateHygiene(
+        currentPassword: CharArray,
+    ): Result<RootRotateResult> = rotateRoot(
+        currentPassword = currentPassword,
+        newPassword = currentPassword,
+        compromise = false,
+    )
+
+    /**
+     * `root_compromise_rotation` (§10.1) — new MK + new wrap key +
+     * new password + new salt. Same blob-rotation as hygiene PLUS:
+     *
+     *  - Generate fresh newSalt + derive Argon2(newPassword, newSalt)
+     *    → newWrapKey + newAuthKey.
+     *  - Wrap newMasterKey under newWrapKey with NEW MK wrap AAD
+     *    (new auth_salt + user_id unchanged).
+     *  - Include new_auth_salt + new_auth_key_proof in the request.
+     *  - Server revokes ALL device sessions — including ours.
+     *  - Caller MUST trigger logout after success (the next
+     *    authenticated call will 401).
+     */
+    suspend fun rotateCompromise(
+        currentPassword: CharArray,
+        newPassword: CharArray,
+    ): Result<RootRotateResult> = rotateRoot(
+        currentPassword = currentPassword,
+        newPassword = newPassword,
+        compromise = true,
+    )
+
+    private suspend fun rotateRoot(
+        currentPassword: CharArray,
+        newPassword: CharArray,
+        compromise: Boolean,
+    ): Result<RootRotateResult> = runCatching {
+        val sessionState = session.sessionState.value
+        require(sessionState.isUnlocked) {
+            "root_* rotation requires an unlocked session"
+        }
+        val currentMasterKey = sessionState.masterKey
+            ?: error("Session is missing masterKey")
+        val currentAuthSalt = sessionState.authSalt
+            ?: error("Session is missing auth_salt — log out and back in")
+        val currentEncryptedMasterKey = sessionState.encryptedMasterKey
+            ?: error("Session is missing encryptedMasterKey — log out and back in")
+        val userId = session.currentUserId()
+            ?: error("Session has no user_id claim — cannot rotate")
+        val currentKeyGen = session.currentKeyGeneration()
+        val newKeyGen = currentKeyGen + 1
+
+        // Step 1 — challenge.
+        val challenge: RotationChallengeResponseDto = api.rotateMasterKeyChallenge()
+
+        // Step 2 — derive current keys.
+        val currentKeys = withContext(Dispatchers.Default) {
+            KeyDerivation.derive(currentPassword, currentAuthSalt)
+        }
+        try {
+            // Step 3 — local unwrap test (against cached wrappedMK).
+            val currentMkAad = RotationAad.masterKeyWrap(
+                userId = userId,
+                authSaltB64 = currentAuthSalt.toBase64(),
+            )
+            try {
+                MasterKey.unwrap(
+                    currentEncryptedMasterKey,
+                    currentKeys.masterKeyWrapKey,
+                    aad = currentMkAad,
+                ).fill(0)  // scratch — we already have plaintext MK in session
+            } catch (exc: Exception) {
+                throw WrongCurrentPasswordError()
+            }
+
+            // Step 4 — fetch current user state + decrypt.
+            val userStateResp = api.getUserState()
+            // §10.10 — refuse to operate on a stale snapshot.
+            keyGenerationStore.verifyAndBump(
+                userId = userId,
+                observed = userStateResp.keyGeneration,
+                source = "rotate-root.state.get",
+            )
+            val oldStateAad = RotationAad.userState(
+                userId = userId,
+                keyGeneration = userStateResp.keyGeneration,
+                stateVersion = userStateResp.stateVersion,
+            )
+            val statePlaintext = Aead.decrypt(
+                currentMasterKey,
+                java.util.Base64.getDecoder().decode(userStateResp.encryptedBlob),
+                aad = oldStateAad,
+            )
+
+            // Step 5 — fetch active pairings + each pairing's state.
+            val pairingList = api.listPairings().filter { it.revokedAt == null }
+            // Capture old plaintexts + versions for re-encryption.
+            data class PairingSnapshot(
+                val pairingId: String,
+                val stateVersion: Int,
+                val plaintext: ByteArray,
+            )
+            val snapshots = pairingList.map { item ->
+                val resp = api.getPairingState(item.id)
+                val oldPairAad = RotationAad.pairingState(
+                    userId = userId,
+                    pairingId = item.id,
+                    keyGeneration = resp.keyGeneration,
+                    stateVersion = resp.stateVersion,
+                )
+                val plaintext = Aead.decrypt(
+                    currentMasterKey,
+                    java.util.Base64.getDecoder().decode(resp.encryptedState),
+                    aad = oldPairAad,
+                )
+                PairingSnapshot(
+                    pairingId = item.id,
+                    stateVersion = resp.stateVersion,
+                    plaintext = plaintext,
+                )
+            }
+
+            // Step 6 — generate new MK.
+            val newMasterKey = MasterKey.generate()
+            try {
+                // Step 7 — re-encrypt user state under new MK with NEW AAD.
+                val newStateVersion = userStateResp.stateVersion + 1
+                val newStateAad = RotationAad.userState(
+                    userId = userId,
+                    keyGeneration = newKeyGen,
+                    stateVersion = newStateVersion,
+                )
+                val newEncryptedUserState = Aead.encrypt(
+                    newMasterKey,
+                    statePlaintext,
+                    aad = newStateAad,
+                )
+
+                // Step 8 — re-encrypt each pairing.
+                val newPairingEntries = snapshots.map { snap ->
+                    val newPairAad = RotationAad.pairingState(
+                        userId = userId,
+                        pairingId = snap.pairingId,
+                        keyGeneration = newKeyGen,
+                        stateVersion = snap.stateVersion + 1,
+                    )
+                    val newPairBlob = Aead.encrypt(
+                        newMasterKey,
+                        snap.plaintext,
+                        aad = newPairAad,
+                    )
+                    RotationPairingEntryDto(
+                        pairingId = snap.pairingId,
+                        stateVersionObserved = snap.stateVersion,
+                        newEncryptedState = newPairBlob.toBase64(),
+                    )
+                }
+                // Zero the old plaintext scratch.
+                snapshots.forEach { it.plaintext.fill(0) }
+                statePlaintext.fill(0)
+
+                // Step 9 — wrap new MK. Compromise uses new wrap key + new salt.
+                val (newWrapKey, newAuthKey, newAuthSalt) = if (compromise) {
+                    val newSalt = ByteArray(KeyDerivation.SALT_LENGTH_BYTES)
+                        .also(secureRandom::nextBytes)
+                    val keys = withContext(Dispatchers.Default) {
+                        KeyDerivation.derive(newPassword, newSalt)
+                    }
+                    Triple(keys.masterKeyWrapKey, keys.authKey, newSalt)
+                } else {
+                    Triple(currentKeys.masterKeyWrapKey, null, currentAuthSalt)
+                }
+                val newMkWrapAad = RotationAad.masterKeyWrap(
+                    userId = userId,
+                    authSaltB64 = newAuthSalt.toBase64(),
+                )
+                val newWrappedMk = MasterKey.wrap(
+                    masterKey = newMasterKey,
+                    masterKeyWrapKey = newWrapKey,
+                    aad = newMkWrapAad,
+                )
+
+                // Step 10 — POST rotate-master-key.
+                val response = api.rotateMasterKey(
+                    RotateMasterKeyRequestDto(
+                        reason = if (compromise) "root_compromise_rotation"
+                                 else "root_hygiene_rotation",
+                        keyGenerationObserved = currentKeyGen,
+                        rotationChallenge = challenge.rotationChallenge,
+                        currentPasswordProof = currentKeys.authKey.toBase64(),
+                        newEncryptedMasterKey = newWrappedMk.toBase64(),
+                        newAuthSalt = if (compromise) newAuthSalt.toBase64() else null,
+                        newAuthKeyProof = if (compromise) newAuthKey?.toBase64() else null,
+                        newEncryptedUserState = RotationUserStateBodyDto(
+                            encryptedBlob = newEncryptedUserState.toBase64(),
+                            stateVersionObserved = userStateResp.stateVersion,
+                        ),
+                        pairings = newPairingEntries,
+                    ),
+                )
+                if (!response.isSuccessful) {
+                    Timber.tag(TAG).w(
+                        "root rotation failed HTTP %d",
+                        response.code(),
+                    )
+                    throw HttpException(response)
+                }
+                val body = response.body() ?: error("root rotation returned 200 with no body")
+
+                // Step 11 — verify new key_generation + bump high-water mark.
+                keyGenerationStore.verifyAndBump(
+                    userId = userId,
+                    observed = body.keyGeneration,
+                    source = "rotate-master-key",
+                )
+
+                // For compromise, the server revoked our session too —
+                // don't bother updating Session, the caller will log out.
+                // For hygiene we keep going: update Session with the new
+                // MK + new generation. Note: for compromise we ALSO update
+                // so the caller has a coherent view until they trigger
+                // logout (defense in depth).
+                if (compromise) {
+                    // Compromise rotates everything; pass new salt + new
+                    // wrapped MK so the cached values match the wire.
+                    session.updateAfterRotation(
+                        newMasterKey = newMasterKey,
+                        newKeyGeneration = body.keyGeneration,
+                        newAuthSalt = newAuthSalt,
+                        newEncryptedMasterKey = newWrappedMk,
+                    )
+                } else {
+                    session.updateAfterRotation(
+                        newMasterKey = newMasterKey,
+                        newKeyGeneration = body.keyGeneration,
+                        newAuthSalt = currentAuthSalt,
+                        newEncryptedMasterKey = newWrappedMk,
+                    )
+                }
+
+                RootRotateResult(
+                    newKeyGeneration = body.keyGeneration,
+                    sessionsRevoked = compromise,
+                    pairingsRotated = newPairingEntries.size,
+                )
+            } finally {
+                newMasterKey.fill(0)
+            }
+        } finally {
+            currentKeys.authKey.fill(0)
+            currentKeys.masterKeyWrapKey.fill(0)
+        }
+    }
+
     private companion object {
         const val TAG = "Rotation"
     }
 }
+
+/**
+ * Result of [RotationRepository.rotateHygiene] or
+ * [RotationRepository.rotateCompromise]. ``sessionsRevoked`` is
+ * true for compromise — the caller MUST log out after receiving
+ * this so the local Session matches the server (its next call
+ * would 401 anyway).
+ */
+data class RootRotateResult(
+    val newKeyGeneration: Int,
+    val sessionsRevoked: Boolean,
+    val pairingsRotated: Int,
+)
 
 /**
  * Returned by a successful [RotationRepository.rewrapPassword]. The

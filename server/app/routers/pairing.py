@@ -24,6 +24,7 @@ from app.schemas import (
     PairingInitiateResponse,
     PairingItem,
     PairingPreviewResponse,
+    PairingStateResponse,
     decode_base64,
 )
 from app.services.key_generation import lock_user_and_gate
@@ -370,3 +371,44 @@ async def list_pairings(
         select(Pairing).where(Pairing.user_id == ctx.user.id).order_by(Pairing.created_at.desc()),
     )
     return [PairingItem.model_validate(p) for p in result.scalars().all()]
+
+
+@router.get(
+    "/{pairing_id}/state",
+    response_model=PairingStateResponse,
+)
+async def get_pairing_state(
+    pairing_id: uuid.UUID,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> PairingStateResponse:
+    """Phase 8e — return the encrypted_state for a pairing the user
+    owns. Used by the client to fetch+decrypt every blob during a
+    ``root_*`` rotation so it can re-encrypt under the new master key.
+
+    Scoping is `(pairing_id, user_id, revoked_at IS NULL)` — a user
+    cannot read another user's pairing state, and revoked pairings
+    are 404'd (you can't rotate a key for state you can no longer
+    decrypt anyway).
+    """
+    result = await db.execute(
+        select(Pairing).where(
+            and_(
+                Pairing.id == pairing_id,
+                Pairing.user_id == ctx.user.id,
+                Pairing.revoked_at.is_(None),
+            ),
+        ),
+    )
+    pairing = result.scalar_one_or_none()
+    if pairing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="pairing not found or revoked",
+        )
+    return PairingStateResponse(
+        pairing_id=pairing.id,
+        encrypted_state=_b64(pairing.encrypted_state),
+        state_version=pairing.state_version,
+        key_generation=pairing.key_generation,
+    )

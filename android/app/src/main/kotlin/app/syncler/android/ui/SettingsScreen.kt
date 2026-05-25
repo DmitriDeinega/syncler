@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.syncler.feature.settings.ChangePasswordCard
+import app.syncler.feature.settings.RotateMasterKeyCard
 
 /**
  * The Settings tab: device management + account actions (logout). Replaces
@@ -114,6 +115,14 @@ fun SettingsScreen(
             // feature/settings so the Hilt ViewModel + RotationRepository
             // dependency edge stays out of :app.
             ChangePasswordCard(modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
+            // Phase 8e — root_hygiene + root_compromise. Compromise
+            // flow's onLogout callback wipes the local session after
+            // the server-side revoke completes.
+            RotateMasterKeyCard(
+                modifier = Modifier.fillMaxWidth(),
+                onLogout = onLogout,
+            )
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = onLogout,

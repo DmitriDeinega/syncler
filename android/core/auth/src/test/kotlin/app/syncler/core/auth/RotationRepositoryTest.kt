@@ -107,6 +107,69 @@ class RotationRepositoryTest {
         assertEquals(1, fixture.keyGenStore.read(fixture.api.signupRequest!!.userId!!))
     }
 
+    // ----------------------------------------------------------------
+    // Phase 8e — root_hygiene_rotation + root_compromise_rotation.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun rotateHygieneRefreshesMasterKeyAndBumpsGeneration() = runTest {
+        val fixture = newFixture()
+        fixture.signupAndLogin()
+        fixture.seedUserState()  // empty-pairings happy path
+
+        val oldMasterKey = fixture.session.sessionState.value.masterKey!!.copyOf()
+        val result = fixture.rotation.rotateHygiene(PASSWORD.toCharArray())
+        assertTrue(result.toString(), result.isSuccess)
+        val payload = result.getOrNull()!!
+        assertEquals(2, payload.newKeyGeneration)
+        assertEquals(0, payload.pairingsRotated)
+        assertEquals(false, payload.sessionsRevoked)
+
+        val body = fixture.api.rotateCallBody!!
+        assertEquals("root_hygiene_rotation", body.reason)
+        assertEquals(1, body.keyGenerationObserved)
+        assertNotNull(body.newEncryptedUserState)
+        assertEquals(1, body.newEncryptedUserState!!.stateVersionObserved)
+        // Hygiene: NO new salt / auth-key proof.
+        assertEquals(null, body.newAuthSalt)
+        assertEquals(null, body.newAuthKeyProof)
+        // No pairings to rotate in this fixture.
+        assertEquals(0, body.pairings!!.size)
+
+        val after = fixture.session.sessionState.value
+        // MK CHANGED (root_hygiene generates a new one).
+        assertNotEquals(true, oldMasterKey.contentEquals(after.masterKey))
+        assertEquals(2, after.keyGeneration)
+    }
+
+    @Test
+    fun rotateCompromiseAlsoChangesAuthSaltAndProof() = runTest {
+        val fixture = newFixture()
+        fixture.signupAndLogin()
+        fixture.seedUserState()
+
+        val oldSalt = fixture.session.sessionState.value.authSalt!!.copyOf()
+        val result = fixture.rotation.rotateCompromise(
+            PASSWORD.toCharArray(),
+            NEW_PASSWORD.toCharArray(),
+        )
+        assertTrue(result.toString(), result.isSuccess)
+        val payload = result.getOrNull()!!
+        assertEquals(2, payload.newKeyGeneration)
+        assertEquals(true, payload.sessionsRevoked)
+
+        val body = fixture.api.rotateCallBody!!
+        assertEquals("root_compromise_rotation", body.reason)
+        assertNotNull(body.newAuthSalt)
+        assertNotNull(body.newAuthKeyProof)
+        assertNotNull(body.newEncryptedUserState)
+
+        val after = fixture.session.sessionState.value
+        // Salt rotated.
+        assertNotEquals(true, oldSalt.contentEquals(after.authSalt))
+        assertEquals(2, after.keyGeneration)
+    }
+
     @Test
     fun rewrapRequiresUnlockedSession() = runTest {
         val fixture = newFixture()
@@ -145,6 +208,30 @@ class RotationRepositoryTest {
             auth.signup(EMAIL, PASSWORD.toCharArray()).getOrThrow()
             // After signup the session is authenticated and has authSalt +
             // encryptedMasterKey cached (per Phase 8c wiring).
+        }
+
+        /**
+         * Phase 8e — seed a GETable user-state blob that the rotation
+         * flow can decrypt. Encrypts a placeholder under the current
+         * in-memory MK with the userState AAD (key_generation = 1,
+         * state_version = 1, user_id from the JWT). The fake returns
+         * this verbatim from getUserState.
+         */
+        fun seedUserState(plaintext: ByteArray = "{}".toByteArray()) {
+            val mk = session.sessionState.value.masterKey!!
+            val userId = session.currentUserId()!!
+            val aad = app.syncler.core.crypto.RotationAad.userState(
+                userId = userId,
+                keyGeneration = 1,
+                stateVersion = 1,
+            )
+            val wire = app.syncler.core.crypto.Aead.encrypt(mk, plaintext, aad = aad)
+            api.seededUserState = app.syncler.core.network.StateGetResponseDto(
+                stateVersion = 1,
+                encryptedBlob = java.util.Base64.getEncoder().encodeToString(wire),
+                updatedAt = null,
+                keyGeneration = 1,
+            )
         }
     }
 
@@ -241,11 +328,29 @@ private class RotationFakeApi(
     ): Response<RotateMasterKeyResponseDto> {
         rotateCallBody = body
         return if (rotateStatus == 200) {
+            // Phase 8e — root_* rotations bump key_generation by 1
+            // server-side; password_rewrap leaves it unchanged.
+            val isRoot = body.reason == "root_hygiene_rotation" ||
+                body.reason == "root_compromise_rotation"
+            val newGen = body.keyGenerationObserved + if (isRoot) 1 else 0
+            val newStateVersion =
+                body.newEncryptedUserState?.stateVersionObserved?.plus(1)
             Response.success(
                 RotateMasterKeyResponseDto(
-                    keyGeneration = body.keyGenerationObserved,
-                    encryptedUserState = null,
-                    pairings = emptyList(),
+                    keyGeneration = newGen,
+                    encryptedUserState = if (newStateVersion != null) {
+                        app.syncler.core.network.RotationUserStateResultDto(
+                            stateVersion = newStateVersion,
+                            keyGeneration = newGen,
+                        )
+                    } else null,
+                    pairings = body.pairings.orEmpty().map { entry ->
+                        app.syncler.core.network.RotationPairingResultDto(
+                            pairingId = entry.pairingId,
+                            stateVersion = entry.stateVersionObserved + 1,
+                            keyGeneration = newGen,
+                        )
+                    },
                 ),
             )
         } else {
@@ -264,7 +369,14 @@ private class RotationFakeApi(
     override suspend fun completePairing(body: app.syncler.core.network.PairingCompleteRequestDto) = stub()
     override suspend fun revokePairing(id: String): Response<Unit> = stub()
     override suspend fun listPairings(): List<app.syncler.core.network.PairingItemDto> = emptyList()
-    override suspend fun getUserState() = stub()
+
+    // Phase 8e — set by the test fixture before calling rotateHygiene/
+    // rotateCompromise so the fake can return a real (AAD-bound) blob.
+    var seededUserState: app.syncler.core.network.StateGetResponseDto? = null
+    override suspend fun getUserState() = seededUserState
+        ?: error("test must seed getUserState before invoking the rotation flow")
+    override suspend fun getPairingState(id: String): app.syncler.core.network.PairingStateResponseDto =
+        stub()
     override suspend fun putUserState(
         body: app.syncler.core.network.StatePutRequestDto,
     ): Response<app.syncler.core.network.StatePutResponseDto> = stub()

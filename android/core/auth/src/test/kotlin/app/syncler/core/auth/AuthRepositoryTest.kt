@@ -305,6 +305,7 @@ private class FakeApi(
     override suspend fun rotateMasterKey(
         body: app.syncler.core.network.RotateMasterKeyRequestDto,
     ): Response<app.syncler.core.network.RotateMasterKeyResponseDto> = stub()
+    override suspend fun getPairingState(id: String): app.syncler.core.network.PairingStateResponseDto = stub()
 
     private fun stub(): Nothing = throw UnsupportedOperationException("not implemented by AuthRepositoryTest fake")
 }

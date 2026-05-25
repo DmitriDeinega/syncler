@@ -441,6 +441,23 @@ class PairingItem(BaseModel):
     revoked_at: datetime | None
 
 
+class PairingStateResponse(BaseModel):
+    """Phase 8e (docs/crypto-spec.md §10) — the encrypted_state for
+    a specific pairing the user owns. Used by the client during
+    root_* rotations: the client GETs every pairing's state, decrypts
+    under the old MK, re-encrypts under the new MK, and POSTs them
+    all back via /v1/account/rotate-master-key.
+
+    Server is content-blind to the blob — this endpoint just returns
+    what's stored verbatim.
+    """
+
+    pairing_id: UUID
+    encrypted_state: str  # base64
+    state_version: int
+    key_generation: int
+
+
 class StateGetResponse(BaseModel):
     state_version: int
     encrypted_blob: str  # base64
