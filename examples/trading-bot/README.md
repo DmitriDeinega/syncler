@@ -51,7 +51,7 @@ Writes `pairing.png` (the QR). Scan it in the Syncler app and confirm the finger
 python bot.py set-pairing <user_id> <pairing_key_hex>
 ```
 
-(Phase 5a-2 lands automated pairing — see `docs/ROADMAP.md` V1.5 DX. Until 5a-2.1 wires the Android UX, the manual copy-paste is the V1 flow.)
+(Automated pairing has shipped end-to-end — see `docs/integration-guide.md §8.5`. This example still uses the V1 manual copy-paste; migrating it to `Client.wait_for_pairing(...)` is a follow-up V1.5 dogfood task.)
 
 ### 4. Build + sign the plugin
 

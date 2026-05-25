@@ -530,16 +530,22 @@ def action():
 
 ## 8. Testing it end-to-end
 
+> **Starting a new plugin from scratch?** Run `npm create @syncler/plugin <name>` first — it scaffolds `src/plugin.ts`, `manifest.json`, `build.sh`, `package.json`, `README.md`, and `.gitignore` for you, validated against the SDK rules. Pair it with the `examples/trading-bot/` directory for a complete sender + plugin round-trip you can copy from.
+
 1. Install the Syncler Android app (`./gradlew :app:installDebug`).
 2. Sign up + log in. The app auto-enrolls this device with the server.
 3. From your backend, run a script that registers your sender and prints a pairing QR (see SDK README).
 4. Tap **Pair sender** -> **Scan QR** in the Syncler app. Confirm the fingerprint matches what your script prints.
-5. After confirming, the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you.
+5. **Pairing handoff.** Two paths depending on how your sender is set up:
+   - **V1.5 automated (default going forward):** if your sender has registered a bootstrap key and supplied `sender_broker_url` at `create_pairing_qr(...)` time, the app POSTs an encrypted bootstrap envelope (containing `user_id` + `pairing_key`, sealed with the sender's X25519 bootstrap public key) to your broker after fingerprint confirmation; your sender's `Client.wait_for_pairing(...)` returns the decrypted pair. No copy step. See §8.5 for the broker setup.
+   - **V1 manual:** the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you. This is also the fallback when the broker POST fails in the automated path.
 6. Publish your plugin (`client.publish_plugin(...)`) — save the `plugin_row_id`.
 7. Run `client.send_to(...)` with a test payload.
 8. The server pushes an `inbox.changed` event over the SSE stream the open app is subscribed to (foreground); the phone refreshes its inbox, decrypts the message, fetches your bundle (or applies your template manifest), and shows the native row within ~1s. If the app is backgrounded, FCM wakes it and the inbox refresh happens on the next foreground.
 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
+
+A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `set-pairing <user_id> <pairing_key_hex>` (the example still uses V1 manual pairing) → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip.
 
 ## 8.5 Automated pairing (V1.5)
 
