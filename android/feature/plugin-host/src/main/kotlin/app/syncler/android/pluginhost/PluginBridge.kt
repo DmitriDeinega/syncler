@@ -1,7 +1,5 @@
 package app.syncler.android.pluginhost
 
-import android.os.Handler
-import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import app.syncler.android.pluginhost.capabilities.CameraBridge
@@ -18,7 +16,7 @@ import kotlinx.coroutines.withTimeout
 
 class PluginBridge(
     private val plugin: PluginInstance,
-    private val webViewProvider: () -> WebView?,
+    private val delivery: BridgeDelivery,
     private val scope: CoroutineScope,
     private val networkBridge: NetworkBridge,
     private val storageBridge: StorageBridge,
@@ -30,7 +28,39 @@ class PluginBridge(
     private val messageBridge: MessageBridge,
     private val auditLogger: AuditLogger,
 ) {
-    private val mainHandler = Handler(Looper.getMainLooper())
+    @Deprecated(
+        "Pre-Phase-10b WebView-direct delivery. Use the BridgeDelivery " +
+            "constructor + WebViewBridgeDelivery from PluginLoader.",
+        ReplaceWith("PluginBridge(plugin, WebViewBridgeDelivery(webViewProvider), ...)"),
+    )
+    @Suppress("DEPRECATION")
+    constructor(
+        plugin: PluginInstance,
+        webViewProvider: () -> WebView?,
+        scope: CoroutineScope,
+        networkBridge: NetworkBridge,
+        storageBridge: StorageBridge,
+        notificationBridge: NotificationBridge,
+        cameraBridge: CameraBridge,
+        galleryBridge: GalleryBridge,
+        fileBridge: FileBridge,
+        locationBridge: LocationBridge,
+        messageBridge: MessageBridge,
+        auditLogger: AuditLogger,
+    ) : this(
+        plugin = plugin,
+        delivery = WebViewBridgeDelivery(webViewProvider, auditLogger, plugin.manifest.id),
+        scope = scope,
+        networkBridge = networkBridge,
+        storageBridge = storageBridge,
+        notificationBridge = notificationBridge,
+        cameraBridge = cameraBridge,
+        galleryBridge = galleryBridge,
+        fileBridge = fileBridge,
+        locationBridge = locationBridge,
+        messageBridge = messageBridge,
+        auditLogger = auditLogger,
+    )
 
     @JavascriptInterface
     fun call(method: String, argsJson: String, callbackId: String) {
@@ -79,11 +109,7 @@ class PluginBridge(
     }
 
     private fun deliver(callbackId: String, resultJson: String) {
-        val script = "window.__syncler_internal_callback(${JsonEscaping.quote(callbackId)}, $resultJson)"
-        mainHandler.post {
-            runCatching { webViewProvider()?.evaluateJavascript(script, null) }
-                .onFailure { auditLogger.denied(plugin.manifest.id, "callback_delivery_failed", it.message) }
-        }
+        delivery.deliver(callbackId, resultJson)
     }
 
     companion object {
