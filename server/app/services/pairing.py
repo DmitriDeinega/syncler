@@ -115,6 +115,7 @@ async def complete_pairing(
     pairing_token: bytes,
     encrypted_initial_state: bytes,
     key_generation: int = 1,
+    pairing_id: uuid.UUID | None = None,
 ) -> tuple[Pairing, Sender, PendingPairing]:
     now = datetime.now(UTC)
 
@@ -169,7 +170,11 @@ async def complete_pairing(
         raise PairingAlreadyExistsError("user is already paired with this sender")
 
     pairing = Pairing(
-        id=uuid.uuid4(),
+        # Phase 8d (docs/crypto-spec.md §10.9): the pairing-state AAD
+        # binds pairing_id, so the client must know the UUID BEFORE
+        # encrypting. Accept caller-supplied; fall back to server-
+        # generated for pre-Phase-8d clients.
+        id=pairing_id or uuid.uuid4(),
         user_id=user.id,
         sender_id=sender.id,
         encrypted_state=encrypted_initial_state,

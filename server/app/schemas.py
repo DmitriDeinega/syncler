@@ -35,6 +35,13 @@ class SignupRequest(BaseModel):
     encrypted_master_key: str
     auth_salt: str
     argon2_params_version: Annotated[int, Field(ge=1)]
+    # Phase 8d (docs/crypto-spec.md §10.9): the master-key wrap AAD
+    # binds {"auth_salt_b64": ..., "user_id": ...}. The client must
+    # know the user_id BEFORE wrapping, so we accept a client-
+    # generated UUID v4. None → server generates (pre-Phase-8d
+    # clients). UUID format is validated by the type system; the
+    # uniqueness constraint on users.id catches collisions.
+    user_id: UUID | None = None
 
     @field_validator("auth_key_hash")
     @classmethod
@@ -387,6 +394,11 @@ class PairingCompleteRequest(BaseModel):
     # Phase 8 (docs/crypto-spec.md §10.5): the AAD on encrypted_initial_state
     # binds this generation; mismatch → 409 so the client refetches.
     key_generation_observed: int | None = None
+    # Phase 8d (docs/crypto-spec.md §10.9): the pairing-state AAD
+    # binds the pairing_id. Same chicken-and-egg as user_id at
+    # signup — the client must know the UUID BEFORE encrypting the
+    # initial state. None → server generates (pre-Phase-8d clients).
+    pairing_id: UUID | None = None
 
     @field_validator("pairing_token")
     @classmethod

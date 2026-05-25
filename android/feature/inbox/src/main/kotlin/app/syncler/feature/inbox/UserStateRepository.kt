@@ -243,13 +243,22 @@ class UserStateRepository @Inject constructor(
      */
     suspend fun pull(): Result<Unit> = syncMutex.withLock {
         val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
+        val userId = session.currentUserId() ?: return@withLock Result.success(Unit)
         runCatching {
             val response = api.getUserState()
             // Phase 8 §10.10 — refuse to operate on a stale snapshot
             // (catches a malicious server returning a pre-rotation
             // blob after the client has already rotated up).
             verifyResponseKeyGeneration(response.keyGeneration, source = "state.get")
-            val remoteState = decodeRemote(response.encryptedBlob, masterKey)
+            // Phase 8d §10.9 — decrypt with the row's (key_generation,
+            // state_version, user_id) AAD.
+            val remoteState = decodeRemote(
+                blobB64 = response.encryptedBlob,
+                masterKey = masterKey,
+                stateVersion = response.stateVersion,
+                keyGeneration = response.keyGeneration,
+                userId = userId,
+            )
             val merged = StateMerger.merge(local = _state.value, remote = remoteState)
             _state.value = merged
             persist(merged, remoteVersion = response.stateVersion)
@@ -329,7 +338,15 @@ class UserStateRepository @Inject constructor(
         // Same §10.10 check on this GET — defense in depth before
         // we even merge.
         verifyResponseKeyGeneration(pull.keyGeneration, source = "state.get")
-        val remoteState = decodeRemote(pull.encryptedBlob, masterKey)
+        val pullUserId = session.currentUserId()
+            ?: error("Session lost between PUT and re-pull — refusing to merge")
+        val remoteState = decodeRemote(
+            blobB64 = pull.encryptedBlob,
+            masterKey = masterKey,
+            stateVersion = pull.stateVersion,
+            keyGeneration = pull.keyGeneration,
+            userId = pullUserId,
+        )
         _state.value = StateMerger.merge(local = _state.value, remote = remoteState)
         persist(_state.value, remoteVersion = pull.stateVersion)
 
@@ -367,7 +384,23 @@ class UserStateRepository @Inject constructor(
         expectedVersion: Int,
         masterKey: ByteArray,
     ): retrofit2.Response<app.syncler.core.network.StatePutResponseDto> {
-        val blob = encodeLocal(_state.value, masterKey)
+        val userId = session.currentUserId()
+            ?: error("cannot PUT /v1/state without an unlocked session user_id")
+        // Phase 8d §10.9 — AAD binds (key_generation, state_version,
+        // user_id). ``state_version`` is the POST-write value per the
+        // §10.4 lockstep: the row will carry expectedVersion + 1 after
+        // the server's CAS succeeds. For an initial-insert
+        // (expectedVersion == 0) the server stamps state_version = 1
+        // (see services/state.py).
+        val postWriteVersion = if (expectedVersion == 0) 1 else expectedVersion + 1
+        val keyGen = session.currentKeyGeneration()
+        val blob = encodeLocal(
+            state = _state.value,
+            masterKey = masterKey,
+            stateVersion = postWriteVersion,
+            keyGeneration = keyGen,
+            userId = userId,
+        )
         return api.putUserState(
             StatePutRequestDto(
                 expectedStateVersion = expectedVersion,
@@ -376,7 +409,7 @@ class UserStateRepository @Inject constructor(
                 // generation. The Session's value is set at login from
                 // LoginResponse.key_generation and bumped on every
                 // successful rotation.
-                keyGenerationObserved = session.currentKeyGeneration(),
+                keyGenerationObserved = keyGen,
             ),
         )
     }
@@ -406,18 +439,51 @@ class UserStateRepository @Inject constructor(
     private fun lastKnownRemoteVersion(): Int = prefs.getInt(KEY_REMOTE_VERSION, 0)
     private fun setLastKnownRemoteVersion(v: Int) = prefs.putInt(KEY_REMOTE_VERSION, v)
 
-    private fun encodeLocal(state: EncryptedUserState, masterKey: ByteArray): String {
+    /**
+     * Phase 8d §10.9 — AES-GCM encrypt the local state JSON with AAD
+     * `{key_generation, state_version, user_id}`. ``stateVersion``
+     * is the POST-write value (the version the row will carry after
+     * the server's CAS), per the §10.4 lockstep contract.
+     */
+    private fun encodeLocal(
+        state: EncryptedUserState,
+        masterKey: ByteArray,
+        stateVersion: Int,
+        keyGeneration: Int,
+        userId: String,
+    ): String {
         val plaintext = state.toJson().toByteArray(Charsets.UTF_8)
-        val wire = Aead.encrypt(masterKey, plaintext)
+        val aad = app.syncler.core.crypto.RotationAad.userState(
+            userId = userId,
+            keyGeneration = keyGeneration,
+            stateVersion = stateVersion,
+        )
+        val wire = Aead.encrypt(masterKey, plaintext, aad = aad)
         // java.util.Base64 (not android.util.Base64) — same wire format
         // (RFC 4648 with padding) and works in pure-JVM unit tests too.
         return Base64.getEncoder().encodeToString(wire)
     }
 
-    private fun decodeRemote(blobB64: String, masterKey: ByteArray): EncryptedUserState {
+    /**
+     * Phase 8d §10.9 — decrypt with the EXACT AAD the wrapper used.
+     * ``stateVersion`` + ``keyGeneration`` come from the row the
+     * server returned alongside the blob.
+     */
+    private fun decodeRemote(
+        blobB64: String,
+        masterKey: ByteArray,
+        stateVersion: Int,
+        keyGeneration: Int,
+        userId: String,
+    ): EncryptedUserState {
         if (blobB64.isBlank()) return EncryptedUserState()
         val wire = Base64.getDecoder().decode(blobB64)
-        val plaintext = Aead.decrypt(masterKey, wire)
+        val aad = app.syncler.core.crypto.RotationAad.userState(
+            userId = userId,
+            keyGeneration = keyGeneration,
+            stateVersion = stateVersion,
+        )
+        val plaintext = Aead.decrypt(masterKey, wire, aad = aad)
         return EncryptedUserState.fromJson(plaintext.toString(Charsets.UTF_8))
     }
 

@@ -32,13 +32,21 @@ async def create_user(
     encrypted_master_key: bytes,
     auth_salt: bytes,
     argon2_params_version: int,
+    user_id: UUID | None = None,
 ) -> User:
+    """Insert a new user row.
+
+    Phase 8d: ``user_id`` is now an optional caller-supplied UUID
+    (docs/crypto-spec.md §10.9 — the MK wrap AAD includes user_id,
+    so a Phase-8d-aware client generates the UUID locally and
+    sends it). ``None`` → server generates (pre-Phase-8d behavior).
+    """
     existing_user = await get_user_by_email(db, email)
     if existing_user is not None:
         raise UserAlreadyExistsError
 
     user = User(
-        id=uuid4(),
+        id=user_id or uuid4(),
         email=email,
         auth_key_hash=auth_key_hash,
         encrypted_master_key=encrypted_master_key,

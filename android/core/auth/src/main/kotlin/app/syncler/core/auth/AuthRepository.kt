@@ -2,8 +2,10 @@ package app.syncler.core.auth
 
 import app.syncler.core.crypto.KeyDerivation
 import app.syncler.core.crypto.MasterKey
+import app.syncler.core.crypto.RotationAad
 import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.crypto.toBase64
+import java.util.UUID
 import app.syncler.core.network.AuthFailureHandler
 import app.syncler.core.network.DeviceEnrollRequest
 import app.syncler.core.network.DeviceItem
@@ -76,14 +78,30 @@ class AuthRepository @Inject constructor(
         }
         val masterKey = MasterKey.generate()
         try {
-            val encryptedMasterKey = MasterKey.wrap(masterKey, keys.masterKeyWrapKey)
+            // Phase 8d §10.9 — the MK wrap AAD binds (auth_salt_b64,
+            // user_id). The client must know the user_id BEFORE
+            // wrapping, so we generate a UUID v4 locally. Server's
+            // user_id field on SignupRequest accepts this verbatim
+            // (Phase 8d server change).
+            val userId = UUID.randomUUID().toString()
+            val authSaltB64 = salt.toBase64()
+            val mkWrapAad = RotationAad.masterKeyWrap(
+                userId = userId,
+                authSaltB64 = authSaltB64,
+            )
+            val encryptedMasterKey = MasterKey.wrap(
+                masterKey = masterKey,
+                masterKeyWrapKey = keys.masterKeyWrapKey,
+                aad = mkWrapAad,
+            )
             api.signup(
                 SignupRequest(
                     email = normalizedEmail,
                     authKeyHash = keys.authKey.toBase64(),
                     encryptedMasterKey = encryptedMasterKey.toBase64(),
-                    authSalt = salt.toBase64(),
+                    authSalt = authSaltB64,
                     argon2ParamsVersion = KeyDerivation.PARAMS_VERSION,
+                    userId = userId,
                 ),
             )
 
@@ -126,7 +144,17 @@ class AuthRepository @Inject constructor(
             observed = response.keyGeneration,
             source = "login",
         )
-        val masterKey = MasterKey.unwrap(response.encryptedMasterKey.base64ToBytes(), keys.masterKeyWrapKey)
+        // Phase 8d §10.9 — unwrap with the same AAD shape the
+        // wrapper used at signup / rotation: (auth_salt_b64, user_id).
+        val mkUnwrapAad = RotationAad.masterKeyWrap(
+            userId = response.userId,
+            authSaltB64 = response.authSalt,
+        )
+        val masterKey = MasterKey.unwrap(
+            response.encryptedMasterKey.base64ToBytes(),
+            keys.masterKeyWrapKey,
+            aad = mkUnwrapAad,
+        )
         try {
             // Enroll the device using the bootstrap token directly. We do
             // NOT call session.authenticate first because that would

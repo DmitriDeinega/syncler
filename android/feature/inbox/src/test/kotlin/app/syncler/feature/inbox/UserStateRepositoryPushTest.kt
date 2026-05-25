@@ -86,14 +86,22 @@ class UserStateRepositoryPushTest {
     }
 
     private fun unlockedSession(): Session {
+        // Phase 8d: doPut reads session.currentUserId() to build the
+        // state AAD, so the session token must be a real JWT shape.
+        // Header + body are unsigned (no MAC); Session.currentUserId
+        // only base64-decodes the middle segment.
+        val enc = java.util.Base64.getUrlEncoder().withoutPadding()
+        val header = enc.encodeToString("{\"alg\":\"HS256\"}".toByteArray())
+        val body = enc.encodeToString("{\"sub\":\"user-1\"}".toByteArray())
+        val jwt = "$header.$body.signature"
         val store = object : TokenStore {
-            private var token: String? = "test-token"
+            private var token: String? = jwt
             override fun readToken() = token
             override fun writeToken(token: String) { this.token = token }
             override fun clearToken() { token = null }
         }
         val session = Session(store)
-        session.authenticate(token = "test-token", masterKey = ByteArray(32) { 0x42 })
+        session.authenticate(token = jwt, masterKey = ByteArray(32) { 0x42 })
         return session
     }
 }

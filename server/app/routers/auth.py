@@ -50,6 +50,8 @@ async def signup(
             ),
             auth_salt=decode_base64(payload.auth_salt, field_name="auth_salt", exact=16),
             argon2_params_version=payload.argon2_params_version,
+            # Phase 8d §10.9: respect client-generated user_id when present.
+            user_id=payload.user_id,
         )
     except UserAlreadyExistsError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already exists") from exc

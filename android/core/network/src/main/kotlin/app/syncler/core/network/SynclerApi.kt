@@ -258,6 +258,12 @@ data class PairingCompleteRequestDto(
      * generation; mismatch → 409 so the client refetches.
      */
     @Json(name = "key_generation_observed") val keyGenerationObserved: Int? = null,
+    /**
+     * Phase 8d (§10.9): the pairing-state AAD binds pairing_id, so
+     * the client must know the UUID BEFORE encrypting. Server uses
+     * this value verbatim when present.
+     */
+    @Json(name = "pairing_id") val pairingId: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -348,6 +354,12 @@ data class SignupRequest(
     @Json(name = "encrypted_master_key") val encryptedMasterKey: String,
     @Json(name = "auth_salt") val authSalt: String,
     @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+    /**
+     * Phase 8d (docs/crypto-spec.md §10.9): the master-key wrap AAD
+     * binds user_id, so the client MUST know the UUID before wrapping.
+     * Phase-8d-aware apps generate a fresh UUID v4 here.
+     */
+    @Json(name = "user_id") val userId: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

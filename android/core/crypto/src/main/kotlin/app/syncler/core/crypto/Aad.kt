@@ -81,6 +81,60 @@ fun LiveCardAad.toCanonicalJsonBytes(): ByteArray =
         ),
     )
 
+/**
+ * Phase 8d AADs (docs/crypto-spec.md §10.9). All emit canonical JSON
+ * bytes: keys sorted lexicographically, `(",", ":")` separators, no
+ * trailing whitespace, ASCII (server uses pyjwt-style
+ * `ensure_ascii=True`). UUIDs are formatted lowercase no-brace —
+ * `java.util.UUID.toString()` already produces that shape.
+ */
+object RotationAad {
+    /**
+     * `users.encrypted_master_key` AAD per §10.9. NOT bound to
+     * `key_generation` — the wrapped MK is the chicken-and-egg root.
+     */
+    fun masterKeyWrap(userId: String, authSaltB64: String): ByteArray =
+        canonicalJsonBytes(
+            mapOf(
+                "auth_salt_b64" to authSaltB64,
+                "user_id" to userId,
+            ),
+        )
+
+    /**
+     * `encrypted_user_state.encrypted_blob` AAD per §10.9.
+     * `stateVersion` is the POST-write value (the version the row
+     * will carry AFTER the server's CAS). §10.4 lockstep contract.
+     */
+    fun userState(userId: String, keyGeneration: Int, stateVersion: Int): ByteArray =
+        canonicalJsonBytes(
+            mapOf(
+                "key_generation" to keyGeneration,
+                "state_version" to stateVersion,
+                "user_id" to userId,
+            ),
+        )
+
+    /**
+     * `pairings.encrypted_state` AAD per §10.9. Same lockstep rule
+     * for `stateVersion`. `pairingId` lowercase no-brace UUID.
+     */
+    fun pairingState(
+        userId: String,
+        pairingId: String,
+        keyGeneration: Int,
+        stateVersion: Int,
+    ): ByteArray =
+        canonicalJsonBytes(
+            mapOf(
+                "key_generation" to keyGeneration,
+                "pairing_id" to pairingId,
+                "state_version" to stateVersion,
+                "user_id" to userId,
+            ),
+        )
+}
+
 internal fun canonicalJsonBytes(fields: Map<String, Any>): ByteArray =
     fields.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
         val encodedValue = when (value) {

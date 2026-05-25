@@ -2,6 +2,7 @@ package app.syncler.core.auth
 
 import app.syncler.core.crypto.KeyDerivation
 import app.syncler.core.crypto.MasterKey
+import app.syncler.core.crypto.RotationAad
 import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.crypto.toBase64
 import app.syncler.core.network.RotateMasterKeyRequestDto
@@ -105,8 +106,19 @@ class RotationRepository @Inject constructor(
             // typed error WITHOUT sending the (incorrect) proof to
             // the server (avoiding the server's failed-proof
             // rate-limit increment for a local mistake).
+            //
+            // Phase 8d §10.9 — the wrapped MK is AAD-bound to
+            // (auth_salt_b64, user_id); use the SAME AAD on unwrap.
+            val currentMkAad = RotationAad.masterKeyWrap(
+                userId = userId,
+                authSaltB64 = currentAuthSalt.toBase64(),
+            )
             val unwrapped = try {
-                MasterKey.unwrap(currentEncryptedMasterKey, currentKeys.masterKeyWrapKey)
+                MasterKey.unwrap(
+                    currentEncryptedMasterKey,
+                    currentKeys.masterKeyWrapKey,
+                    aad = currentMkAad,
+                )
             } catch (exc: Exception) {
                 throw WrongCurrentPasswordError()
             }
@@ -118,7 +130,17 @@ class RotationRepository @Inject constructor(
                     KeyDerivation.derive(newPassword, newSalt)
                 }
                 try {
-                    val rewrapped = MasterKey.wrap(unwrapped, newKeys.masterKeyWrapKey)
+                    // Phase 8d §10.9 — new MK wrap binds the NEW
+                    // auth_salt; user_id is unchanged.
+                    val newMkAad = RotationAad.masterKeyWrap(
+                        userId = userId,
+                        authSaltB64 = newSalt.toBase64(),
+                    )
+                    val rewrapped = MasterKey.wrap(
+                        masterKey = unwrapped,
+                        masterKeyWrapKey = newKeys.masterKeyWrapKey,
+                        aad = newMkAad,
+                    )
 
                     // Step 7 — submit. Server runs §10.8.
                     val response = api.rotateMasterKey(

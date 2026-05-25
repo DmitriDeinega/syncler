@@ -16,13 +16,29 @@ object MasterKey {
 
     fun generate(): ByteArray = ByteArray(KEY_SIZE_BYTES).also(secureRandom::nextBytes)
 
-    fun wrap(masterKey: ByteArray, masterKeyWrapKey: ByteArray): ByteArray {
+    /**
+     * Wrap the master key under [masterKeyWrapKey] with optional AAD.
+     * Phase 8d (docs/crypto-spec.md §10.9): pass
+     * ``RotationAad.masterKeyWrap(userId, authSaltB64)`` so the
+     * ciphertext is bound to the user identity + auth salt. ``null``
+     * AAD is the pre-Phase-8d shape (kept for back-compat with old
+     * unrotated blobs during the transition window — but new wraps
+     * MUST provide AAD).
+     */
+    fun wrap(
+        masterKey: ByteArray,
+        masterKeyWrapKey: ByteArray,
+        aad: ByteArray? = null,
+    ): ByteArray {
         require(masterKey.size == KEY_SIZE_BYTES)
-        return Aead.encrypt(masterKeyWrapKey, masterKey)
+        return Aead.encrypt(masterKeyWrapKey, masterKey, aad = aad)
     }
 
-    fun unwrap(encryptedMasterKey: ByteArray, masterKeyWrapKey: ByteArray): ByteArray =
-        Aead.decrypt(masterKeyWrapKey, encryptedMasterKey)
+    fun unwrap(
+        encryptedMasterKey: ByteArray,
+        masterKeyWrapKey: ByteArray,
+        aad: ByteArray? = null,
+    ): ByteArray = Aead.decrypt(masterKeyWrapKey, encryptedMasterKey, aad = aad)
 }
 
 object Aead {

@@ -229,7 +229,12 @@ private class FakeApi(
 
     override suspend fun signup(body: SignupRequest): SignupResponse {
         signupRequest = body
-        return SignupResponse(userId = "user-1", createdAt = "2026-05-20T00:00:00Z")
+        // Phase 8d §10.9: echo back the client-supplied user_id so
+        // the MK wrap AAD (which binds user_id + auth_salt_b64)
+        // matches between signup-wrap and login-unwrap. Fall back
+        // to a stable string for pre-Phase-8d test cases.
+        val echoUserId = body.userId ?: "user-1"
+        return SignupResponse(userId = echoUserId, createdAt = "2026-05-20T00:00:00Z")
     }
 
     override suspend fun preLogin(body: PreLoginRequest): PreLoginResponse {
@@ -247,7 +252,9 @@ private class FakeApi(
         assertEquals(signup.email, body.email)
         assertEquals(signup.authKeyHash, body.authKeyHash)
         return LoginResponse(
-            userId = "user-1",
+            // Phase 8d: echo the user_id the client passed at signup
+            // (so the MK wrap AAD matches on unwrap).
+            userId = signup.userId ?: "user-1",
             sessionToken = "token-1",
             encryptedMasterKey = signup.encryptedMasterKey,
             authSalt = signup.authSalt,

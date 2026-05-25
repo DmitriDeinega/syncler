@@ -310,6 +310,8 @@ async def complete(
             # Phase 8 §10.4 — stamp the new row with the generation just
             # locked. Re-reading inside the user-row lock is race-free.
             key_generation=locked_user.key_generation,
+            # Phase 8d §10.9 — respect client-generated pairing_id when present.
+            pairing_id=payload.pairing_id,
         )
     except PairingTokenNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="pairing token not found") from exc

@@ -60,7 +60,7 @@ class RotationRepositoryTest {
         assertNotEquals(true, before.authSalt!!.contentEquals(after.authSalt))
         assertNotEquals(true, before.encryptedMasterKey!!.contentEquals(after.encryptedMasterKey!!))
         // High-water mark not lowered (server returned same gen).
-        assertEquals(1, fixture.keyGenStore.read("user-1"))
+        assertEquals(1, fixture.keyGenStore.read(fixture.api.signupRequest!!.userId!!))
     }
 
     @Test
@@ -81,7 +81,7 @@ class RotationRepositoryTest {
         assertEquals(null, fixture.api.rotateCallBody)
         // And we MUST NOT have written the new generation to the high-water
         // mark.
-        assertEquals(1, fixture.keyGenStore.read("user-1"))
+        assertEquals(1, fixture.keyGenStore.read(fixture.api.signupRequest!!.userId!!))
     }
 
     @Test
@@ -104,7 +104,7 @@ class RotationRepositoryTest {
         val state = fixture.session.sessionState.value
         assertTrue(state.isUnlocked)
         // High-water mark NOT bumped on failure.
-        assertEquals(1, fixture.keyGenStore.read("user-1"))
+        assertEquals(1, fixture.keyGenStore.read(fixture.api.signupRequest!!.userId!!))
     }
 
     @Test
@@ -189,7 +189,12 @@ private class RotationFakeApi(
 
     override suspend fun signup(body: SignupRequest): SignupResponse {
         signupRequest = body
-        return SignupResponse(userId = "user-1", createdAt = "2026-05-20T00:00:00Z")
+        return SignupResponse(
+            // Phase 8d: echo back the client-supplied user_id so MK
+            // wrap AAD round-trips through login.
+            userId = body.userId ?: "user-1",
+            createdAt = "2026-05-20T00:00:00Z",
+        )
     }
 
     override suspend fun preLogin(body: PreLoginRequest): PreLoginResponse {
@@ -200,7 +205,7 @@ private class RotationFakeApi(
     override suspend fun login(body: LoginRequest): LoginResponse {
         val s = requireNotNull(signupRequest)
         return LoginResponse(
-            userId = "user-1",
+            userId = s.userId ?: "user-1",
             sessionToken = "token-1",
             encryptedMasterKey = s.encryptedMasterKey,
             authSalt = s.authSalt,
@@ -212,16 +217,18 @@ private class RotationFakeApi(
     override suspend fun enrollDevice(
         authHeader: String,
         body: DeviceEnrollRequest,
-    ): DeviceEnrollResponse = DeviceEnrollResponse(
-        deviceId = "device-1",
-        createdAt = "2026-05-20T00:00:00Z",
-        // RotationRepository parses JWT's `sub` claim to scope the
-        // key_generation high-water mark, so we ship a real-shaped JWT
-        // here. Header/body are unsigned (no MAC) — Session.currentUserId
-        // doesn't verify the signature, it just base64-decodes the
-        // middle segment.
-        sessionToken = makeFakeJwt(userId = "user-1"),
-    )
+    ): DeviceEnrollResponse {
+        // Phase 8d: the JWT's `sub` claim must match the user_id
+        // used at signup-wrap time, otherwise the AAD on
+        // rewrap-unwrap won't match. Pull from the signup we
+        // captured.
+        val userId = signupRequest?.userId ?: "user-1"
+        return DeviceEnrollResponse(
+            deviceId = "device-1",
+            createdAt = "2026-05-20T00:00:00Z",
+            sessionToken = makeFakeJwt(userId = userId),
+        )
+    }
 
     override suspend fun rotateMasterKeyChallenge(): RotationChallengeResponseDto =
         RotationChallengeResponseDto(

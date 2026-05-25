@@ -2,7 +2,9 @@ package app.syncler.feature.pairing
 
 import android.net.Uri
 import android.util.Base64
+import app.syncler.core.crypto.Aead
 import app.syncler.core.crypto.BootstrapEnvelope
+import app.syncler.core.crypto.RotationAad
 import app.syncler.core.crypto.Signing
 import app.syncler.core.network.BootstrapEnvelopeDto
 import app.syncler.core.network.BrokerApi
@@ -11,6 +13,7 @@ import app.syncler.core.network.PairingPreviewResponseDto
 import app.syncler.core.network.SynclerApi
 import app.syncler.core.storage.PairedSender
 import app.syncler.core.storage.PairedSenderStore
+import java.util.UUID
 import java.io.IOException
 import java.time.Instant
 import java.time.ZoneOffset
@@ -66,8 +69,33 @@ class PairingRepository @Inject constructor(
         candidate: PairingCandidate,
         preview: PairingPreviewResponseDto,
         pairingKey: ByteArray,
-        encryptedInitialState: ByteArray,
+        initialStatePlaintext: ByteArray,
     ): Result<PairedSender> = runCatching {
+        val masterKey = session.sessionState.value.masterKey
+            ?: error("cannot complete pairing without an unlocked session")
+        val userId = session.currentUserId()
+            ?: error("cannot complete pairing without a session user_id")
+        // Phase 8d §10.9 — generate pairing_id client-side so the
+        // AAD can bind it BEFORE encryption. Server uses our UUID
+        // verbatim (pairing_id field on the request, accepted in
+        // Phase 8d server change).
+        val pairingId = UUID.randomUUID().toString()
+        val keyGen = session.currentKeyGeneration()
+        // §10.4 lockstep: the row's state_version = 1 on initial
+        // insert (services/pairing.py defaults that). AAD binds the
+        // POST-write value.
+        val initialStateVersion = 1
+        val pairingAad = RotationAad.pairingState(
+            userId = userId,
+            pairingId = pairingId,
+            keyGeneration = keyGen,
+            stateVersion = initialStateVersion,
+        )
+        val encryptedInitialState = Aead.encrypt(
+            key = masterKey,
+            plaintext = initialStatePlaintext,
+            aad = pairingAad,
+        )
         val response = api.completePairing(
             PairingCompleteRequestDto(
                 pairingToken = candidate.pairingToken,
@@ -78,7 +106,9 @@ class PairingRepository @Inject constructor(
                 // Phase 8 §10.5 — bind the encrypted_initial_state AAD
                 // to the locked-server generation. Server 409s on
                 // mismatch so the client knows to refetch.
-                keyGenerationObserved = session.currentKeyGeneration(),
+                keyGenerationObserved = keyGen,
+                // Phase 8d §10.9 — client-generated pairing_id.
+                pairingId = pairingId,
             ),
         )
         // Defense-in-depth: confirm the server's complete-response identity
