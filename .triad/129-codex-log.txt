@@ -1,0 +1,3527 @@
+Reading prompt from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e6149-6cbb-7260-ac63-c2e14e09d1a7
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 129 — Phase 9b close-out review
+
+Phase 9b implementation is end-to-end shipped. This is the
+final close-out review covering the complete V2 per-device
+envelope encryption stack: server, Python SDK, Android.
+
+## Commit history since the last triad (128)
+
+| Commit  | Step | Content |
+|---------|------|---------|
+| 1c9cf85 | 7c-pre | Triad 128 fixups: inbox INNER JOIN on delivery_status (V1 LEFT JOIN was returning undecryptable items to newly-enrolled devices), plugin-scoped card upsert (V1 keyed by sender+user+card_key allowed cross-plugin collision), tightened DB unique to (sender, user, plugin, card_key). |
+| 0619bdb | 7b   | Android DeviceEncryptionKeyStore for X25519 keypair persistence via SecurePrefs/EncryptedSharedPreferences. |
+| 816dbfc | 7c+7d | Android V2 wire + InboxRepository V2 decrypt path. DeviceEnrollRequest gains encryption_public_key; new RecipientEnvelopeDto + V2 inbox DTOs (envelope_kind discriminator); InboxRepository picks own envelope by device_id, HPKE-opens CEK, AES-GCM-decrypts payload. Drops V1 candidate-pairing-key loop. DeviceEncryptionKeyStore refactored to interface for testability. |
+
+## What ships for review
+
+Triad 128 already reviewed the server + SDK + Android HPKE
+module + DeviceEncryptionKeyStore (Gemini GREEN, Codex YELLOW
+with 2 fixed items). This consult focuses on the new code at
+1c9cf85 + 816dbfc:
+
+### Server fixups (1c9cf85)
+
+- `server/app/services/messages.py:inbox_for_device` — INNER
+  JOIN on DeliveryStatus (was LEFT JOIN). Server fans out
+  DeliveryStatus rows at publish time for every active device;
+  devices enrolled after a publish won't have a row and
+  therefore won't see undecryptable items.
+- `server/app/services/cards.py:upsert_live_card_v2` — lookup
+  now includes plugin_id.
+- `server/app/models.py:LiveCard.__table_args__` — unique now
+  `(sender_id, user_id, plugin_id, card_key)`.
+- `server/alembic/versions/0011_per_device_encryption.py` —
+  drops old `uq_live_cards_sender_user_key` and creates the
+  new `uq_live_cards_sender_user_plugin_key`. Data wipe at the
+  top of the same migration guarantees no orphan rows when the
+  constraint flips.
+
+### Android V2 wire + decrypt path (816dbfc)
+
+- `android/core/network/.../SynclerApi.kt`:
+  - `DeviceEnrollRequest` adds `encryptionPublicKey` (base64
+    32-byte X25519).
+  - `DeviceEncryptionKeyRotateRequest` (new) for
+    `PUT /v1/auth/devices/me/encryption_key`.
+  - `RecipientEnvelopeDto` (new) — base64 hpke_kem_output (32B)
+    + hpke_ciphertext (48B) + device_id.
+  - `MessageInboxItemDto` / `LiveCardItemDto` rewritten to V2
+    shape (protocol_version, envelope_kind, payload_nonce,
+    payload_ciphertext, recipient_envelopes,
+    recipient_directory_version, envelope_signature).
+  - `InboxFeedItemDto` restructured as discriminated record on
+    envelope_kind; card-specific fields populated only for
+    live_card_upsert.
+- `android/core/storage/.../DeviceEncryptionKeyStore.kt`
+  refactored from `open class` to interface + concrete
+  `SecurePrefsDeviceEncryptionKeyStore`. Hilt @Binds wiring.
+  Tests use a `FakeDeviceEncryptionKeyStore` without needing
+  Context.
+- `android/core/auth/.../AuthRepository.kt` — `enrollDevice`
+  now sends both Ed25519 + X25519 pubkeys.
+- `android/core/crypto/.../Aad.kt` — V2Aad object: canonical
+  bytes for event/live_card payload AAD and per-recipient
+  HPKE info. Byte-identical to server `envelopes_v2.py`.
+- `android/feature/inbox/.../InboxRepository.kt` — V2 decrypt
+  path:
+  1. `openV2EnvelopeOrNull(dto, hpkeInfoFactory, payloadAad)`:
+     finds own envelope by device_id, HPKE-opens CEK with
+     `DeviceEncryptionKeyStore.getOrCreateKeypair()`, then
+     AES-GCM-decrypts payload using CEK + payload_nonce +
+     payload_aad.
+  2. `decryptEventMessage` / `decryptLiveCard` — V2 entry
+     points. PairedSender list consulted only for the sender
+     display name. V1's candidate-pairing-key loop deleted.
+  3. Silent drop if no recipient_envelope matches this device
+     (defense-in-depth; the server INNER JOIN fix should
+     prevent the case from reaching the client).
+
+## Tests passing
+
+- `server/tests/test_phase9_hpke.py` — 10 (HPKE module).
+- `server/tests/test_phase9_recipient_classifier.py` — 10
+  (recipient classifier matrix; Postgres test DB).
+- `server/tests/test_devices.py` — 9 (V2 enroll body).
+- `sdk-python/tests/` — 38.
+- `android/core/crypto/.../HpkeTest.kt` — cross-platform
+  vector + keypair generation + sha256.
+- `android/core/auth/testDebugUnitTest` — all pass.
+- `android/core/storage/testDebugUnitTest` — passes.
+- `android/feature/inbox/testDebugUnitTest` — passes.
+- `:app:assembleDebug` — succeeds.
+
+## Known outstanding work (non-blocking)
+
+- **V1 server test cleanup**: `test_crypto`, `test_messages`,
+  `test_phase3`, `test_phase8_state`, `test_cards` reference
+  the V1 wire shape (encrypted_body / nonce / encrypted_payload)
+  that 50f7fdc deleted. They fail at parse time. Either delete
+  them or rewrite to V2. Tracked as a follow-up; not blocking
+  Phase 9b close-out because V0.1 dev-mode tolerates the
+  testing gap.
+- **PluginLoader / inbox-side SynclerApi.rotateDeviceEncryptionKey
+  caller**: the endpoint exists on Android's Retrofit API
+  surface, but no caller wires it to user UI yet. Rotation is
+  triggered manually only (DeviceEncryptionKeyStore.rotate()
+  call sites are zero outside tests). UX is a Phase 11+ /
+  V2 feature — not Phase 9b scope.
+- **No "ready" SSE handler for `devices.changed`**: the server
+  emits the event when a device enrolls/rotates/revokes (spec
+  §11.13). The Android client doesn't yet refetch its own
+  device list on receipt. Minor — refresh-on-next-pull picks
+  up changes within at most one inbox poll cycle.
+
+## Concerns I want a second opinion on
+
+1. **Open-V2-envelope failure modes.** When HPKE.open throws,
+   InboxRepository.openV2EnvelopeOrNull logs and returns null;
+   the inbox item is silently dropped from the visible list.
+   Same for AES-GCM. The user sees "no message" rather than
+   "couldn't decrypt." Should the UI surface "this message
+   failed to decrypt" so the user knows something is off?
+   (Currently no UI hint at all — a key rotation gap would
+   silently lose messages.)
+
+2. **Ed25519 signature verification on the recipient side.**
+   I'm NOT verifying the envelope's Ed25519 signature in the
+   Android decrypt path. The HPKE info binds
+   `payload_ciphertext_sha256` so a swapped ciphertext fails
+   HPKE-open. The HPKE info also binds device_id so an
+   envelope_swap fails. But a malicious server could forge an
+   entire envelope with a fake Ed25519 signature — the device
+   would HPKE-open successfully if it had been sealed to the
+   real device's pubkey, but the binding of `sender_id` in
+   the info means it'd have to know what sender_id to claim.
+   Need to add Ed25519 verify on the device for full §11.8
+   compliance. Block before close-out, or follow-up?
+
+3. **Recipient-set freshness on the device side.** The device
+   receives `recipient_envelopes` but doesn't currently check
+   that its own device_id is INCLUDED. Of course if it's not
+   included the `openV2EnvelopeOrNull` returns null and the
+   item drops — but a stricter check (assert own device_id is
+   in the array) would catch a class of server bugs. Worth
+   adding?
+
+4. **Cross-platform vector test maintenance.** The 80-byte
+   HPKE-vector hex bytes in
+   `HpkeTest.kt:crossPlatformVector_opens_cek_and_decrypts_payload`
+   are pinned to a specific PyCA 48.0.0 generation. Future
+   `cryptography>=48.x` could in principle change KEM output
+   layout (unlikely but possible). Pin the version range in
+   `server/pyproject.toml` to `cryptography>=48.0.0,<49`? Or
+   leave loose and rely on the test to flag any future drift?
+
+5. **Plugin-scoped delete + V1 carryover.** Codex 128 #2 was
+   fixed for upsert + DB constraint, but the V1
+   `LiveCardDeleteRequest` schema (pre-Phase-9b shipped at
+   Phase 12) does NOT carry plugin_id. The new
+   `LiveCardDeleteRequestV2` DOES. The old V1 schema sits in
+   `app/schemas.py` as dead code now — should I delete it as
+   part of Phase 9c, or leave it for the V1 test cleanup?
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on Phase 9b close-out: GREEN / YELLOW / RED + items.
+2. Anything blocking Phase 9 from closing.
+3. Answers to the 5 concerns above.
+
+If dual-GREEN, Phase 9 (per-device envelope encryption) closes.
+Phase 11 (V1.5 #2 native Kotlin plugin runtime) is the next
+unblocked track.
+
+**Reply text only. Do NOT call any write/mutation tool. Do not commit, edit, or stage anything.**
+
+codex
+I’ll stay in review mode and only read. I’m going to inspect the touched server and Android paths plus the relevant tests/schema so the verdict is grounded in the current tree, not just the summary.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline 1c9cf85 816dbfc' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "inbox_for_device|upsert_live_card_v2|LiveCard|LiveCardDeleteRequest|recipient_envelopes|openV2EnvelopeOrNull|envelope_signature|V2Aad|DeviceEncryptionKeyRotateRequest" server android -S' in D:\Projects\syncler
+ succeeded in 330ms:
+?? .triad/129-codex-log.txt
+?? .triad/129-gemini-log.txt
+?? .triad/129-phase9b-closeout-prompt.md
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ exited 1 in 341ms:
+server\alembic\versions\0011_per_device_encryption.py:82:    # the envelope_signature) in encrypted_body_pointer alongside the
+server\app\jobs\retention.py:9:from app.models import LiveCard, Message, Pairing, RateLimitEvent, RotationChallenge
+server\app\jobs\retention.py:17:    live_cards = await session.execute(delete(LiveCard).where(LiveCard.expires_at < now))
+server\app\crypto\hpke.py:66:    Wire form: see ``LiveCardUpsertRequestV2``/``MessageSendRequestV2``
+server\tests\test_messages.py:117:def _build_envelope_signature(
+server\tests\test_messages.py:154:    signature = _build_envelope_signature(
+server\tests\test_messages.py:169:        "envelope_signature": signature,
+server\tests\test_messages.py:407:        "envelope_signature": _b64(b"\xff" * 64),
+server\tests\test_phase3.py:28:from app.models import LiveCard, Pairing, Plugin
+server\tests\test_phase3.py:309:    body["envelope_signature"] = _b64(private_key.sign(_canonical(envelope)))
+server\tests\test_phase3.py:484:        "envelope_signature": _b64(private_key.sign(alice_envelope)),
+server\tests\test_phase3.py:491:        LiveCard.__table__.select().where(LiveCard.user_id == bob_user_id)
+server\tests\test_phase3.py:498:        LiveCard.__table__.select().where(LiveCard.user_id == alice_user_id)
+server\tests\test_phase3.py:537:        "envelope_signature": _b64(private_key.sign(envelope)),
+server\tests\test_phase3.py:655:        "envelope_signature": _b64(private_key.sign(envelope)),
+server\tests\test_phase3.py:698:    """Per consultation 57, inbox_for_device LEFT JOINs DeliveryStatus and
+server\tests\test_phase3.py:747:        "envelope_signature": sig,
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\UserStateRepositoryPushTest.kt:177:        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:7:import app.syncler.core.crypto.V2Aad
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:102:                    decryptLiveCard(dto, userId, candidates)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:212:        val decrypted = decryptLiveCard(dto, userId, candidates) ?: return
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:379:        val plaintextString = openV2EnvelopeOrNull(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:382:                V2Aad.eventHpkeInfo(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:395:            payloadAad = V2Aad.eventPayloadAad(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:425:    private fun decryptLiveCard(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:437:        val plaintextString = openV2EnvelopeOrNull(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:440:                V2Aad.liveCardHpkeInfo(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:456:            payloadAad = V2Aad.liveCardPayloadAad(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:498:    private fun openV2EnvelopeOrNull(
+server\app\services\messages.py:102:    recipient_envelopes, recipient_directory_version,
+server\app\services\messages.py:103:    envelope_signature) is serialized into the
+server\app\services\messages.py:158:    # recipient_envelopes; the server doesn't filter.
+server\app\services\messages.py:191:async def inbox_for_device(
+server\app\services\messages.py:277:def _build_pointer(encrypted_body: bytes, nonce: bytes, envelope_signature: bytes) -> str:
+server\app\services\messages.py:288:    sig_encoded = base64.b64encode(envelope_signature).decode("ascii")
+server\app\services\messages.py:304:    envelope_signature = base64.b64decode(parts[2])
+server\app\services\messages.py:305:    return encrypted_body, nonce, envelope_signature
+server\tests\test_phase9_recipient_classifier.py:84:        recipient_envelopes=[_env(d1.id), _env(d2.id)],
+server\tests\test_phase9_recipient_classifier.py:99:        recipient_envelopes=[_env(d1.id), _env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:116:        recipient_envelopes=[_env(d1.id), _env(bogus)],
+server\tests\test_phase9_recipient_classifier.py:127:    window. Including it in recipient_envelopes is unknown_recipient."""
+server\tests\test_phase9_recipient_classifier.py:138:        recipient_envelopes=[_env(active.id), _env(long_revoked.id)],
+server\tests\test_phase9_recipient_classifier.py:160:        recipient_envelopes=[_env(active.id), _env(unregistered.id)],
+server\tests\test_phase9_recipient_classifier.py:180:        recipient_envelopes=[_env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:200:        recipient_envelopes=[_env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:221:        recipient_envelopes=[_env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:232:    recipient_envelopes (sender's directory cache was old). The
+server\tests\test_phase9_recipient_classifier.py:246:        recipient_envelopes=[_env(active.id), _env(just_revoked.id)],
+server\tests\test_phase9_recipient_classifier.py:258:        recipient_envelopes=[_env(uuid.uuid4())],
+server\app\services\envelopes_v2.py:64:    recipient_envelopes: list[Any],
+server\app\services\envelopes_v2.py:69:    ``recipient_envelopes`` is the parsed list of
+server\app\services\envelopes_v2.py:81:    incoming: list[uuid.UUID] = [env.device_id for env in recipient_envelopes]
+server\app\services\envelopes_v2.py:88:            message="duplicate device_id in recipient_envelopes",
+server\app\services\envelopes_v2.py:158:                f"active devices missing from recipient_envelopes: {missing}"
+server\app\services\envelopes_v2.py:200:def _serialize_recipient_envelopes(
+server\app\services\envelopes_v2.py:201:    recipient_envelopes: list[Any],
+server\app\services\envelopes_v2.py:213:        for env in recipient_envelopes
+server\app\services\envelopes_v2.py:237:            "recipient_envelopes": _serialize_recipient_envelopes(
+server\app\services\envelopes_v2.py:238:                payload.recipient_envelopes
+server\app\services\envelopes_v2.py:263:            "recipient_envelopes": _serialize_recipient_envelopes(
+server\app\services\envelopes_v2.py:264:                payload.recipient_envelopes
+server\app\services\envelopes_v2.py:302:    recipient_envelopes, recipient_directory_version, envelope_signature.
+server\app\services\envelopes_v2.py:308:            "recipient_envelopes": [
+server\app\services\envelopes_v2.py:314:                for env in payload.recipient_envelopes
+server\app\services\envelopes_v2.py:317:            "envelope_signature": payload.envelope_signature,
+server\app\services\envelopes_v2.py:327:    recipient_envelopes: list[dict[str, str]]
+server\app\services\envelopes_v2.py:329:    envelope_signature: str
+server\app\services\envelopes_v2.py:341:        recipient_envelopes=list(fields["recipient_envelopes"]),
+server\app\services\envelopes_v2.py:343:        envelope_signature=fields["envelope_signature"],
+server\app\services\cards.py:11:from app.models import LiveCard, Pairing, Plugin
+server\app\services\cards.py:43:async def upsert_live_card_v2(
+server\app\services\cards.py:46:    payload: object,  # LiveCardUpsertRequestV2 — avoid circular import
+server\app\services\cards.py:47:) -> LiveCard:
+server\app\services\cards.py:113:        select(LiveCard).where(
+server\app\services\cards.py:115:                LiveCard.sender_id == sender_id,
+server\app\services\cards.py:116:                LiveCard.user_id == user_id,
+server\app\services\cards.py:117:                LiveCard.plugin_id == plugin_id,
+server\app\services\cards.py:118:                LiveCard.card_key == card_key,
+server\app\services\cards.py:138:        card = LiveCard(
+server\app\services\cards.py:175:        select(LiveCard).where(
+server\app\services\cards.py:177:                LiveCard.sender_id == sender_id,
+server\app\services\cards.py:178:                LiveCard.user_id == user_id,
+server\app\services\cards.py:179:                LiveCard.plugin_id == plugin_id,
+server\app\services\cards.py:180:                LiveCard.card_key == card_key,
+server\app\services\cards.py:196:) -> list[LiveCard]:
+server\app\services\cards.py:199:        select(LiveCard).where(
+server\app\services\cards.py:201:                LiveCard.user_id == user_id,
+server\app\services\cards.py:202:                LiveCard.expires_at > now,
+server\app\services\cards.py:212:    expired = await db.execute(select(LiveCard).where(LiveCard.expires_at <= now))
+server\app\schemas.py:157:    envelope_signature: str
+server\app\schemas.py:180:    @field_validator("envelope_signature")
+server\app\schemas.py:182:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:183:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:204:    envelope_signature: str
+server\app\schemas.py:225:class LiveCardUpsertRequest(BaseModel):
+server\app\schemas.py:234:    envelope_signature: str  # base64 64 bytes Ed25519 over canonical upsert body
+server\app\schemas.py:248:    @field_validator("envelope_signature")
+server\app\schemas.py:251:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:255:class LiveCardDeleteRequest(BaseModel):
+server\app\schemas.py:276:    envelope_signature: str
+server\app\schemas.py:278:    @field_validator("envelope_signature")
+server\app\schemas.py:281:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:304:class LiveCardItem(BaseModel):
+server\app\schemas.py:324:class LiveCardInboxItem(LiveCardItem):
+server\app\schemas.py:330:    items: list[MessageInboxItemExtended | LiveCardInboxItem]
+server\app\schemas.py:1089:    recipient_envelopes: Annotated[list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)]
+server\app\schemas.py:1091:    envelope_signature: str  # base64 64-byte Ed25519
+server\app\schemas.py:1112:    @field_validator("envelope_signature")
+server\app\schemas.py:1114:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:1115:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:1122:        for env in self.recipient_envelopes:
+server\app\schemas.py:1124:                raise ValueError(f"duplicate device_id in recipient_envelopes: {env.device_id}")
+server\app\schemas.py:1129:class LiveCardUpsertRequestV2(BaseModel):
+server\app\schemas.py:1144:    recipient_envelopes: Annotated[list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)]
+server\app\schemas.py:1146:    envelope_signature: str
+server\app\schemas.py:1167:    @field_validator("envelope_signature")
+server\app\schemas.py:1169:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:1170:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:1174:    def reject_duplicate_devices(self) -> "LiveCardUpsertRequestV2":
+server\app\schemas.py:1176:        for env in self.recipient_envelopes:
+server\app\schemas.py:1178:                raise ValueError(f"duplicate device_id in recipient_envelopes: {env.device_id}")
+server\app\schemas.py:1183:class LiveCardDeleteRequestV2(BaseModel):
+server\app\schemas.py:1199:    envelope_signature: str
+server\app\schemas.py:1214:    @field_validator("envelope_signature")
+server\app\schemas.py:1216:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:1217:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:1270:class DeviceEncryptionKeyRotateRequest(BaseModel):
+server\app\schemas.py:1309:    recipient_envelopes: list[RecipientEnvelopeWire]
+server\app\schemas.py:1311:    envelope_signature: str  # base64
+server\app\schemas.py:1320:class LiveCardInboxItemV2(BaseModel):
+server\app\schemas.py:1339:    recipient_envelopes: list[RecipientEnvelopeWire]
+server\app\schemas.py:1341:    envelope_signature: str
+server\app\schemas.py:1359:    items: list[MessageInboxItemV2 | LiveCardInboxItemV2]
+server\app\models.py:227:class LiveCard(Base):
+server\app\models.py:260:    # (payload_ciphertext, payload_nonce, recipient_envelopes,
+server\app\models.py:261:    # recipient_directory_version, envelope_signature) is serialized
+server\app\routers\messages.py:26:    LiveCardInboxItemV2,
+server\app\routers\messages.py:50:    inbox_for_device,
+server\app\routers\messages.py:93:    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+server\app\routers\messages.py:118:        recipient_envelopes=payload.recipient_envelopes,
+server\app\routers\messages.py:184:    messages, next_since = await inbox_for_device(
+server\app\routers\messages.py:203:    items: list[MessageInboxItemV2 | LiveCardInboxItemV2] = []
+server\app\routers\messages.py:282:        recipient_envelopes=[
+server\app\routers\messages.py:283:            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+server\app\routers\messages.py:286:        envelope_signature=fields.envelope_signature,
+server\app\routers\messages.py:292:def _live_card_to_inbox_item_v2(card, plugin_identifier: str) -> LiveCardInboxItemV2:  # noqa: ANN001
+server\app\routers\messages.py:295:    return LiveCardInboxItemV2(
+server\app\routers\messages.py:306:        recipient_envelopes=[
+server\app\routers\messages.py:307:            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+server\app\routers\messages.py:310:        envelope_signature=fields.envelope_signature,
+server\app\routers\cards.py:15:    LiveCardDeleteRequestV2,
+server\app\routers\cards.py:16:    LiveCardInboxItemV2,
+server\app\routers\cards.py:17:    LiveCardUpsertRequestV2,
+server\app\routers\cards.py:29:    upsert_live_card_v2,
+server\app\routers\cards.py:49:@router.post("/upsert", status_code=status.HTTP_201_CREATED, response_model=LiveCardInboxItemV2)
+server\app\routers\cards.py:51:    payload: LiveCardUpsertRequestV2,
+server\app\routers\cards.py:55:) -> LiveCardInboxItemV2:
+server\app\routers\cards.py:65:    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+server\app\routers\cards.py:87:        recipient_envelopes=payload.recipient_envelopes,
+server\app\routers\cards.py:114:        card = await upsert_live_card_v2(db, payload=payload)
+server\app\routers\cards.py:132:    item = LiveCardInboxItemV2(
+server\app\routers\cards.py:143:        recipient_envelopes=[RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes],
+server\app\routers\cards.py:145:        envelope_signature=fields.envelope_signature,
+server\app\routers\cards.py:160:    payload: LiveCardDeleteRequestV2,
+server\app\routers\cards.py:179:    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+server\app\routers\devices.py:10:    DeviceEncryptionKeyRotateRequest,
+server\app\routers\devices.py:60:    payload: DeviceEncryptionKeyRotateRequest,
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:62:data class LiveCardAad(
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:71:fun LiveCardAad.toCanonicalJsonBytes(): ByteArray =
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:144:object V2Aad {
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:304:        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+android\core\auth\src\test\kotlin\app\syncler\core\auth\RotationRepositoryTest.kt:428:        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:50:        @Body body: DeviceEncryptionKeyRotateRequest,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:336:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:338:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:345:data class LiveCardItemDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:358:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:360:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:381:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:383:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:469:data class DeviceEncryptionKeyRotateRequest(
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ succeeded in 350ms:
+1c9cf85 phase 9b step 7c-pre: triad 128 fixups (inbox JOIN + card plugin scope)
+ .triad/128-codex-log.txt                           | 7174 ++++++++++++++++++++
+ .triad/128-gemini-log.txt                          |   28 +
+ .triad/128-phase9b-midtrack-review-prompt.md       |  185 +
+ .../alembic/versions/0011_per_device_encryption.py |   17 +
+ server/app/models.py                               |    9 +-
+ server/app/services/cards.py                       |    6 +-
+ server/app/services/messages.py                    |   18 +-
+ 7 files changed, 7427 insertions(+), 10 deletions(-)
+816dbfc phase 9b step 7c+7d: Android V2 wire + InboxRepository V2 decrypt path
+ .../kotlin/app/syncler/core/auth/AuthRepository.kt |  11 +-
+ .../app/syncler/core/auth/AuthRepositoryTest.kt    |  28 ++-
+ .../syncler/core/auth/RotationRepositoryTest.kt    |   4 +
+ .../src/main/kotlin/app/syncler/core/crypto/Aad.kt | 108 ++++++++++
+ .../kotlin/app/syncler/core/network/SynclerApi.kt  |  86 ++++++--
+ .../core/storage/DeviceEncryptionKeyStore.kt       | 126 +++++------
+ .../app/syncler/feature/inbox/InboxRepository.kt   | 240 ++++++++++++++-------
+ .../feature/inbox/UserStateRepositoryPushTest.kt   |   3 +
+ 8 files changed, 445 insertions(+), 161 deletions(-)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+2026-05-25T22:37:51.440114Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+server\alembic\versions\0011_per_device_encryption.py:82:    # the envelope_signature) in encrypted_body_pointer alongside the
+server\app\jobs\retention.py:9:from app.models import LiveCard, Message, Pairing, RateLimitEvent, RotationChallenge
+server\app\jobs\retention.py:17:    live_cards = await session.execute(delete(LiveCard).where(LiveCard.expires_at < now))
+server\app\crypto\hpke.py:66:    Wire form: see ``LiveCardUpsertRequestV2``/``MessageSendRequestV2``
+server\tests\test_messages.py:117:def _build_envelope_signature(
+server\tests\test_messages.py:154:    signature = _build_envelope_signature(
+server\tests\test_messages.py:169:        "envelope_signature": signature,
+server\tests\test_messages.py:407:        "envelope_signature": _b64(b"\xff" * 64),
+server\tests\test_phase3.py:28:from app.models import LiveCard, Pairing, Plugin
+server\tests\test_phase3.py:309:    body["envelope_signature"] = _b64(private_key.sign(_canonical(envelope)))
+server\tests\test_phase3.py:484:        "envelope_signature": _b64(private_key.sign(alice_envelope)),
+server\tests\test_phase3.py:491:        LiveCard.__table__.select().where(LiveCard.user_id == bob_user_id)
+server\tests\test_phase3.py:498:        LiveCard.__table__.select().where(LiveCard.user_id == alice_user_id)
+server\tests\test_phase3.py:537:        "envelope_signature": _b64(private_key.sign(envelope)),
+server\tests\test_phase3.py:655:        "envelope_signature": _b64(private_key.sign(envelope)),
+server\tests\test_phase3.py:698:    """Per consultation 57, inbox_for_device LEFT JOINs DeliveryStatus and
+server\tests\test_phase3.py:747:        "envelope_signature": sig,
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\UserStateRepositoryPushTest.kt:177:        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:7:import app.syncler.core.crypto.V2Aad
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:102:                    decryptLiveCard(dto, userId, candidates)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:212:        val decrypted = decryptLiveCard(dto, userId, candidates) ?: return
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:379:        val plaintextString = openV2EnvelopeOrNull(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:382:                V2Aad.eventHpkeInfo(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:395:            payloadAad = V2Aad.eventPayloadAad(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:425:    private fun decryptLiveCard(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:437:        val plaintextString = openV2EnvelopeOrNull(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:440:                V2Aad.liveCardHpkeInfo(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:456:            payloadAad = V2Aad.liveCardPayloadAad(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:498:    private fun openV2EnvelopeOrNull(
+server\app\services\messages.py:102:    recipient_envelopes, recipient_directory_version,
+server\app\services\messages.py:103:    envelope_signature) is serialized into the
+server\app\services\messages.py:158:    # recipient_envelopes; the server doesn't filter.
+server\app\services\messages.py:191:async def inbox_for_device(
+server\app\services\messages.py:277:def _build_pointer(encrypted_body: bytes, nonce: bytes, envelope_signature: bytes) -> str:
+server\app\services\messages.py:288:    sig_encoded = base64.b64encode(envelope_signature).decode("ascii")
+server\app\services\messages.py:304:    envelope_signature = base64.b64decode(parts[2])
+server\app\services\messages.py:305:    return encrypted_body, nonce, envelope_signature
+server\tests\test_phase9_recipient_classifier.py:84:        recipient_envelopes=[_env(d1.id), _env(d2.id)],
+server\tests\test_phase9_recipient_classifier.py:99:        recipient_envelopes=[_env(d1.id), _env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:116:        recipient_envelopes=[_env(d1.id), _env(bogus)],
+server\tests\test_phase9_recipient_classifier.py:127:    window. Including it in recipient_envelopes is unknown_recipient."""
+server\tests\test_phase9_recipient_classifier.py:138:        recipient_envelopes=[_env(active.id), _env(long_revoked.id)],
+server\tests\test_phase9_recipient_classifier.py:160:        recipient_envelopes=[_env(active.id), _env(unregistered.id)],
+server\tests\test_phase9_recipient_classifier.py:180:        recipient_envelopes=[_env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:200:        recipient_envelopes=[_env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:221:        recipient_envelopes=[_env(d1.id)],
+server\tests\test_phase9_recipient_classifier.py:232:    recipient_envelopes (sender's directory cache was old). The
+server\tests\test_phase9_recipient_classifier.py:246:        recipient_envelopes=[_env(active.id), _env(just_revoked.id)],
+server\tests\test_phase9_recipient_classifier.py:258:        recipient_envelopes=[_env(uuid.uuid4())],
+server\app\services\envelopes_v2.py:64:    recipient_envelopes: list[Any],
+server\app\services\envelopes_v2.py:69:    ``recipient_envelopes`` is the parsed list of
+server\app\services\envelopes_v2.py:81:    incoming: list[uuid.UUID] = [env.device_id for env in recipient_envelopes]
+server\app\services\envelopes_v2.py:88:            message="duplicate device_id in recipient_envelopes",
+server\app\services\envelopes_v2.py:158:                f"active devices missing from recipient_envelopes: {missing}"
+server\app\services\envelopes_v2.py:200:def _serialize_recipient_envelopes(
+server\app\services\envelopes_v2.py:201:    recipient_envelopes: list[Any],
+server\app\services\envelopes_v2.py:213:        for env in recipient_envelopes
+server\app\services\envelopes_v2.py:237:            "recipient_envelopes": _serialize_recipient_envelopes(
+server\app\services\envelopes_v2.py:238:                payload.recipient_envelopes
+server\app\services\envelopes_v2.py:263:            "recipient_envelopes": _serialize_recipient_envelopes(
+server\app\services\envelopes_v2.py:264:                payload.recipient_envelopes
+server\app\services\envelopes_v2.py:302:    recipient_envelopes, recipient_directory_version, envelope_signature.
+server\app\services\envelopes_v2.py:308:            "recipient_envelopes": [
+server\app\services\envelopes_v2.py:314:                for env in payload.recipient_envelopes
+server\app\services\envelopes_v2.py:317:            "envelope_signature": payload.envelope_signature,
+server\app\services\envelopes_v2.py:327:    recipient_envelopes: list[dict[str, str]]
+server\app\services\envelopes_v2.py:329:    envelope_signature: str
+server\app\services\envelopes_v2.py:341:        recipient_envelopes=list(fields["recipient_envelopes"]),
+server\app\services\envelopes_v2.py:343:        envelope_signature=fields["envelope_signature"],
+server\app\services\cards.py:11:from app.models import LiveCard, Pairing, Plugin
+server\app\services\cards.py:43:async def upsert_live_card_v2(
+server\app\services\cards.py:46:    payload: object,  # LiveCardUpsertRequestV2 — avoid circular import
+server\app\services\cards.py:47:) -> LiveCard:
+server\app\services\cards.py:113:        select(LiveCard).where(
+server\app\services\cards.py:115:                LiveCard.sender_id == sender_id,
+server\app\services\cards.py:116:                LiveCard.user_id == user_id,
+server\app\services\cards.py:117:                LiveCard.plugin_id == plugin_id,
+server\app\services\cards.py:118:                LiveCard.card_key == card_key,
+server\app\services\cards.py:138:        card = LiveCard(
+server\app\services\cards.py:175:        select(LiveCard).where(
+server\app\services\cards.py:177:                LiveCard.sender_id == sender_id,
+server\app\services\cards.py:178:                LiveCard.user_id == user_id,
+server\app\services\cards.py:179:                LiveCard.plugin_id == plugin_id,
+server\app\services\cards.py:180:                LiveCard.card_key == card_key,
+server\app\services\cards.py:196:) -> list[LiveCard]:
+server\app\services\cards.py:199:        select(LiveCard).where(
+server\app\services\cards.py:201:                LiveCard.user_id == user_id,
+server\app\services\cards.py:202:                LiveCard.expires_at > now,
+server\app\services\cards.py:212:    expired = await db.execute(select(LiveCard).where(LiveCard.expires_at <= now))
+server\app\schemas.py:157:    envelope_signature: str
+server\app\schemas.py:180:    @field_validator("envelope_signature")
+server\app\schemas.py:182:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:183:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:204:    envelope_signature: str
+server\app\schemas.py:225:class LiveCardUpsertRequest(BaseModel):
+server\app\schemas.py:234:    envelope_signature: str  # base64 64 bytes Ed25519 over canonical upsert body
+server\app\schemas.py:248:    @field_validator("envelope_signature")
+server\app\schemas.py:251:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:255:class LiveCardDeleteRequest(BaseModel):
+server\app\schemas.py:276:    envelope_signature: str
+server\app\schemas.py:278:    @field_validator("envelope_signature")
+server\app\schemas.py:281:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:304:class LiveCardItem(BaseModel):
+server\app\schemas.py:324:class LiveCardInboxItem(LiveCardItem):
+server\app\schemas.py:330:    items: list[MessageInboxItemExtended | LiveCardInboxItem]
+server\app\schemas.py:1089:    recipient_envelopes: Annotated[list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)]
+server\app\schemas.py:1091:    envelope_signature: str  # base64 64-byte Ed25519
+server\app\schemas.py:1112:    @field_validator("envelope_signature")
+server\app\schemas.py:1114:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:1115:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:1122:        for env in self.recipient_envelopes:
+server\app\schemas.py:1124:                raise ValueError(f"duplicate device_id in recipient_envelopes: {env.device_id}")
+server\app\schemas.py:1129:class LiveCardUpsertRequestV2(BaseModel):
+server\app\schemas.py:1144:    recipient_envelopes: Annotated[list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)]
+server\app\schemas.py:1146:    envelope_signature: str
+server\app\schemas.py:1167:    @field_validator("envelope_signature")
+server\app\schemas.py:1169:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:1170:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:1174:    def reject_duplicate_devices(self) -> "LiveCardUpsertRequestV2":
+server\app\schemas.py:1176:        for env in self.recipient_envelopes:
+server\app\schemas.py:1178:                raise ValueError(f"duplicate device_id in recipient_envelopes: {env.device_id}")
+server\app\schemas.py:1183:class LiveCardDeleteRequestV2(BaseModel):
+server\app\schemas.py:1199:    envelope_signature: str
+server\app\schemas.py:1214:    @field_validator("envelope_signature")
+server\app\schemas.py:1216:    def validate_envelope_signature(cls, value: str) -> str:
+server\app\schemas.py:1217:        decode_base64(value, field_name="envelope_signature", exact=64)
+server\app\schemas.py:1270:class DeviceEncryptionKeyRotateRequest(BaseModel):
+server\app\schemas.py:1309:    recipient_envelopes: list[RecipientEnvelopeWire]
+server\app\schemas.py:1311:    envelope_signature: str  # base64
+server\app\schemas.py:1320:class LiveCardInboxItemV2(BaseModel):
+server\app\schemas.py:1339:    recipient_envelopes: list[RecipientEnvelopeWire]
+server\app\schemas.py:1341:    envelope_signature: str
+server\app\schemas.py:1359:    items: list[MessageInboxItemV2 | LiveCardInboxItemV2]
+server\app\models.py:227:class LiveCard(Base):
+server\app\models.py:260:    # (payload_ciphertext, payload_nonce, recipient_envelopes,
+server\app\models.py:261:    # recipient_directory_version, envelope_signature) is serialized
+server\app\routers\messages.py:26:    LiveCardInboxItemV2,
+server\app\routers\messages.py:50:    inbox_for_device,
+server\app\routers\messages.py:93:    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+server\app\routers\messages.py:118:        recipient_envelopes=payload.recipient_envelopes,
+server\app\routers\messages.py:184:    messages, next_since = await inbox_for_device(
+server\app\routers\messages.py:203:    items: list[MessageInboxItemV2 | LiveCardInboxItemV2] = []
+server\app\routers\messages.py:282:        recipient_envelopes=[
+server\app\routers\messages.py:283:            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+server\app\routers\messages.py:286:        envelope_signature=fields.envelope_signature,
+server\app\routers\messages.py:292:def _live_card_to_inbox_item_v2(card, plugin_identifier: str) -> LiveCardInboxItemV2:  # noqa: ANN001
+server\app\routers\messages.py:295:    return LiveCardInboxItemV2(
+server\app\routers\messages.py:306:        recipient_envelopes=[
+server\app\routers\messages.py:307:            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+server\app\routers\messages.py:310:        envelope_signature=fields.envelope_signature,
+server\app\routers\cards.py:15:    LiveCardDeleteRequestV2,
+server\app\routers\cards.py:16:    LiveCardInboxItemV2,
+server\app\routers\cards.py:17:    LiveCardUpsertRequestV2,
+server\app\routers\cards.py:29:    upsert_live_card_v2,
+server\app\routers\cards.py:49:@router.post("/upsert", status_code=status.HTTP_201_CREATED, response_model=LiveCardInboxItemV2)
+server\app\routers\cards.py:51:    payload: LiveCardUpsertRequestV2,
+server\app\routers\cards.py:55:) -> LiveCardInboxItemV2:
+server\app\routers\cards.py:65:    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+server\app\routers\cards.py:87:        recipient_envelopes=payload.recipient_envelopes,
+server\app\routers\cards.py:114:        card = await upsert_live_card_v2(db, payload=payload)
+server\app\routers\cards.py:132:    item = LiveCardInboxItemV2(
+server\app\routers\cards.py:143:        recipient_envelopes=[RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes],
+server\app\routers\cards.py:145:        envelope_signature=fields.envelope_signature,
+server\app\routers\cards.py:160:    payload: LiveCardDeleteRequestV2,
+server\app\routers\cards.py:179:    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+server\app\routers\devices.py:10:    DeviceEncryptionKeyRotateRequest,
+server\app\routers\devices.py:60:    payload: DeviceEncryptionKeyRotateRequest,
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:62:data class LiveCardAad(
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:71:fun LiveCardAad.toCanonicalJsonBytes(): ByteArray =
+android\core\crypto\src\main\kotlin\app\syncler\core\crypto\Aad.kt:144:object V2Aad {
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:304:        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+android\core\auth\src\test\kotlin\app\syncler\core\auth\RotationRepositoryTest.kt:428:        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:50:        @Body body: DeviceEncryptionKeyRotateRequest,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:336:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:338:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:345:data class LiveCardItemDto(
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:358:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:360:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:381:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:383:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:469:data class DeviceEncryptionKeyRotateRequest(
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+codex
+The tree has only untracked triad log/prompt files visible; I won’t touch them. The initial search confirms the expected V2 paths and also shows old V1 tests still present, so I’m reading the exact decrypt, AAD, schema, and server query code next.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxRepository.kt | Select-Object -Skip 340 -First 210" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\app\\services\\messages.py | Select-Object -Skip 180 -First 90" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\app\\services\\cards.py | Select-Object -Skip 90 -First 115" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\core\\crypto\\src\\main\\kotlin\\app\\syncler\\core\\crypto\\Aad.kt" in D:\Projects\syncler
+ succeeded in 427ms:
+package app.syncler.core.crypto
+
+/**
+ * AAD (AES-GCM additional authenticated data).
+ *
+ * Protocol context bound to the ciphertext but NOT including the ciphertext
+ * itself. All fields are sender-known at signing time. Server-generated
+ * metadata (message_id, created_at, schema_version) is NOT part of AAD ‚?"
+ * replay protection is handled by the server's per-sender nonce registry.
+ */
+data class MessageAad(
+    val senderId: String,
+    val userId: String,
+    val pluginId: String,
+    val minPluginVersion: String,
+    /** ISO-8601 UTC, must be a future instant ‚%? 30d from now. */
+    val expiresAt: String,
+)
+
+fun MessageAad.toCanonicalJsonBytes(): ByteArray =
+    canonicalJsonBytes(
+        mapOf(
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "plugin_id" to pluginId,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+/**
+ * Envelope (Ed25519 signing input) ‚?" AAD plus base64 ciphertext and nonce.
+ */
+data class MessageEnvelope(
+    val senderId: String,
+    val userId: String,
+    val pluginId: String,
+    val minPluginVersion: String,
+    val expiresAt: String,
+    /** Base64 of the AES-GCM ciphertext_with_tag (no nonce prefix). */
+    val encryptedBody: String,
+    /** Base64 of the 12-byte nonce. */
+    val nonce: String,
+)
+
+fun MessageEnvelope.toCanonicalJsonBytes(): ByteArray =
+    canonicalJsonBytes(
+        mapOf(
+            "encrypted_body" to encryptedBody,
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "nonce" to nonce,
+            "plugin_id" to pluginId,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+/**
+ * AAD for persistent live cards (Phase 3b).
+ */
+data class LiveCardAad(
+    val senderId: String,
+    val userId: String,
+    val pluginId: String,
+    val cardKey: String,
+    val sequenceNumber: Long,
+    val expiresAt: String,
+)
+
+fun LiveCardAad.toCanonicalJsonBytes(): ByteArray =
+    canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to "live",
+            "expires_at" to expiresAt,
+            "plugin_id" to pluginId,
+            "sequence_number" to sequenceNumber,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+/**
+ * Phase 8d AADs (docs/crypto-spec.md ?10.9). All emit canonical JSON
+ * bytes: keys sorted lexicographically, `(",", ":")` separators, no
+ * trailing whitespace, ASCII (server uses pyjwt-style
+ * `ensure_ascii=True`). UUIDs are formatted lowercase no-brace ‚?"
+ * `java.util.UUID.toString()` already produces that shape.
+ */
+object RotationAad {
+    /**
+     * `users.encrypted_master_key` AAD per ?10.9. NOT bound to
+     * `key_generation` ‚?" the wrapped MK is the chicken-and-egg root.
+     */
+    fun masterKeyWrap(userId: String, authSaltB64: String): ByteArray =
+        canonicalJsonBytes(
+            mapOf(
+                "auth_salt_b64" to authSaltB64,
+                "user_id" to userId,
+            ),
+        )
+
+    /**
+     * `encrypted_user_state.encrypted_blob` AAD per ?10.9.
+     * `stateVersion` is the POST-write value (the version the row
+     * will carry AFTER the server's CAS). ?10.4 lockstep contract.
+     */
+    fun userState(userId: String, keyGeneration: Int, stateVersion: Int): ByteArray =
+        canonicalJsonBytes(
+            mapOf(
+                "key_generation" to keyGeneration,
+                "state_version" to stateVersion,
+                "user_id" to userId,
+            ),
+        )
+
+    /**
+     * `pairings.encrypted_state` AAD per ?10.9. Same lockstep rule
+     * for `stateVersion`. `pairingId` lowercase no-brace UUID.
+     */
+    fun pairingState(
+        userId: String,
+        pairingId: String,
+        keyGeneration: Int,
+        stateVersion: Int,
+    ): ByteArray =
+        canonicalJsonBytes(
+            mapOf(
+                "key_generation" to keyGeneration,
+                "pairing_id" to pairingId,
+                "state_version" to stateVersion,
+                "user_id" to userId,
+            ),
+        )
+}
+
+/**
+ * Phase 9b V2 canonical bytes (docs/crypto-spec.md ?11.3, ?11.7).
+ * `aad` and `info` builders for the per-device envelope path.
+ * Cross-platform invariant: byte-identical to the server's
+ * `app/services/envelopes_v2.py` + SDK's `crypto.py`.
+ */
+object V2Aad {
+    /** Event payload AAD (AES-GCM) per spec ?11.7. */
+    fun eventPayloadAad(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        expiresAt: String,
+        minPluginVersion: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "envelope_kind" to "event",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Live-card upsert payload AAD per spec ?11.7. */
+    fun liveCardPayloadAad(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardKey: String,
+        cardType: String,
+        sequenceNumber: Long,
+        expiresAt: String,
+        minPluginVersion: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to cardType,
+            "envelope_kind" to "live_card_upsert",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "sequence_number" to sequenceNumber,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Per-recipient HPKE info for event publish per spec ?11.3. */
+    fun eventHpkeInfo(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        expiresAt: String,
+        minPluginVersion: String,
+        payloadNonceB64: String,
+        payloadCiphertextSha256Hex: String,
+        deviceId: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "device_id" to deviceId,
+            "envelope_kind" to "event",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "payload_ciphertext_sha256" to payloadCiphertextSha256Hex,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Per-recipient HPKE info for live_card_upsert per spec ?11.3. */
+    fun liveCardHpkeInfo(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardKey: String,
+        cardType: String,
+        sequenceNumber: Long,
+        expiresAt: String,
+        minPluginVersion: String,
+        payloadNonceB64: String,
+        payloadCiphertextSha256Hex: String,
+        deviceId: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to cardType,
+            "device_id" to deviceId,
+            "envelope_kind" to "live_card_upsert",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "payload_ciphertext_sha256" to payloadCiphertextSha256Hex,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "sequence_number" to sequenceNumber,
+            "user_id" to userId,
+        ),
+    )
+}
+
+internal fun canonicalJsonBytes(fields: Map<String, Any>): ByteArray =
+    fields.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
+        val encodedValue = when (value) {
+            is Int -> value.toString()
+            is Long -> value.toString()
+            is String -> "\"${value.jsonEscape()}\""
+            else -> error("unsupported AAD value type: ${value::class.simpleName}")
+        }
+        "\"$key\":$encodedValue"
+    }.encodeToByteArray()
+
+private fun String.jsonEscape(): String = buildString {
+    for (char in this@jsonEscape) {
+        when (char) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\b' -> append("\\b")
+            '' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (char.code < 0x20 || char.code > 0x7E) {
+                append("\\u%04x".format(char.code))
+            } else {
+                append(char)
+            }
+        }
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 482ms:
+        select(Plugin).where(
+            and_(
+                Plugin.id == plugin_id,
+                Plugin.sender_id == sender_id,
+                Plugin.card_type == "live",
+                Plugin.revoked_at.is_(None),
+            )
+        )
+    )
+    plugin = result.scalar_one_or_none()
+    if plugin is None:
+        raise PluginInactiveError(
+            "plugin missing, revoked, not live-type, or not owned by sender"
+        )
+
+    pointer = build_v2_pointer(payload)
+
+    # Phase 9b (Codex 128 #2): upsert is now plugin-scoped. The V1
+    # lookup by (sender_id, user_id, card_key) could conflict across
+    # two plugins from the same sender that happened to use the same
+    # card_key. V2 delete already scopes by plugin_id; upsert mirrors.
+    existing_result = await db.execute(
+        select(LiveCard).where(
+            and_(
+                LiveCard.sender_id == sender_id,
+                LiveCard.user_id == user_id,
+                LiveCard.plugin_id == plugin_id,
+                LiveCard.card_key == card_key,
+            )
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        if sequence_number <= existing.sequence_number:
+            raise SequenceNumberRegressionError(
+                f"sequence_number {sequence_number} not greater than "
+                f"{existing.sequence_number}"
+            )
+        existing.encrypted_body_pointer = pointer
+        existing.card_type = payload.card_type
+        existing.min_plugin_version = payload.min_plugin_version
+        existing.sequence_number = sequence_number
+        existing.updated_at = now
+        existing.expires_at = expires_at
+        card = existing
+    else:
+        card = LiveCard(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            sender_id=sender_id,
+            plugin_id=plugin_id,
+            card_key=card_key,
+            encrypted_body_pointer=pointer,
+            card_type=payload.card_type,
+            min_plugin_version=payload.min_plugin_version,
+            sequence_number=sequence_number,
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_at,
+        )
+        db.add(card)
+
+    await db.commit()
+    await db.refresh(card)
+    return card
+
+
+async def delete_live_card_v2(
+    db: AsyncSession,
+    *,
+    sender_id: uuid.UUID,
+    user_id: uuid.UUID,
+    plugin_id: uuid.UUID,
+    card_key: str,
+) -> bool:
+    """Phase 9b V2 live-card delete (spec ?11.6). Plugin-scoped lookup
+    closes the cross-plugin-replay gap Codex flagged at triad 125 #1.
+
+    Returns True if a card was actually deleted, False if nothing
+    matched (the request remains a 204 either way ‚?" V2 mirrors V1's
+    idempotent delete semantics).
+    """
+    result = await db.execute(
+        select(LiveCard).where(
+            and_(
+                LiveCard.sender_id == sender_id,
+                LiveCard.user_id == user_id,
+                LiveCard.plugin_id == plugin_id,
+                LiveCard.card_key == card_key,
+            )
+        )
+    )
+    card = result.scalar_one_or_none()
+    if card is None:
+        return False
+    await db.delete(card)
+    await db.commit()
+    return True
+
+
+async def get_live_cards_for_user(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+) -> list[LiveCard]:
+    now = datetime.now(UTC)
+    result = await db.execute(
+        select(LiveCard).where(
+            and_(
+                LiveCard.user_id == user_id,
+                LiveCard.expires_at > now,
+            )
+        )
+    )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 475ms:
+     * the bundle is refused (compromised revocation); the UI uses
+     * `revocationReason` to decide what banner to show in that case.
+     */
+    data class CachedBundle(
+        val bundleJs: String?,
+        val endpoints: List<String>,
+        val bundleHashHex: String?,
+        val revocationReason: String?,
+        /**
+         * Phase 3a. "script" (use bundleJs in a WebView) or "template" (use
+         * `template` with the native Compose [TemplateCard] renderer). Falls
+         * back to "script" when the server doesn't supply a value.
+         */
+        val renderer: String = "script",
+        /**
+         * Phase 3a. The template manifest block. Non-null only when
+         * `renderer == "template"`; the server validator enforces the pairing
+         * at publish time.
+         */
+        val template: TemplateBlockDto? = null,
+    )
+
+    /**
+     * Phase 9b V2 event-message decrypt (spec ?11.4). Looks up THIS
+     * device's recipient_envelope in `dto.recipientEnvelopes`,
+     * HPKE-opens the wrapped CEK, then AES-GCM-decrypts the payload.
+     * The candidates list is consulted only for the sender display
+     * name ‚?" V1's pairing_key candidate loop is gone.
+     */
+    private fun decryptEventMessage(
+        dto: InboxFeedItemDto,
+        userId: String,
+        candidates: List<PairedSender>,
+    ): InboxItem? {
+        val senderName = candidates
+            .sortedWith { a, b -> compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt) }
+            .firstOrNull()?.senderName.orEmpty()
+
+        val plaintextString = openV2EnvelopeOrNull(
+            dto = dto,
+            hpkeInfoFactory = { deviceId ->
+                V2Aad.eventHpkeInfo(
+                    senderId = dto.senderId,
+                    userId = userId,
+                    pluginId = dto.pluginId,
+                    expiresAt = dto.expiresAt,
+                    minPluginVersion = dto.minPluginVersion ?: "",
+                    payloadNonceB64 = dto.payloadNonce,
+                    payloadCiphertextSha256Hex = Hpke.sha256Hex(
+                        dto.payloadCiphertext.base64ToBytes()
+                    ),
+                    deviceId = deviceId,
+                )
+            },
+            payloadAad = V2Aad.eventPayloadAad(
+                senderId = dto.senderId,
+                userId = userId,
+                pluginId = dto.pluginId,
+                expiresAt = dto.expiresAt,
+                minPluginVersion = dto.minPluginVersion ?: "",
+            ),
+        ) ?: return null
+
+        return InboxItem(
+            id = dto.id,
+            senderId = dto.senderId,
+            senderName = senderName,
+            pluginId = dto.pluginId,
+            pluginIdentifier = dto.pluginIdentifier,
+            payloadJson = plaintextString,
+            sentAt = dto.sentAt ?: "",
+            expiresAt = dto.expiresAt,
+            type = "event",
+            bundleJs = null,
+            declaredEndpoints = emptyList(),
+            bundleHash = null,
+            revocationReason = null,
+            renderer = "script",
+            template = null,
+            hostPreview = HostPreviewParser.parse(plaintextString),
+        )
+    }
+
+    /** Phase 9b V2 live-card decrypt (spec ?11.5). Same flow as event. */
+    private fun decryptLiveCard(
+        dto: InboxFeedItemDto,
+        userId: String,
+        candidates: List<PairedSender>,
+    ): InboxItem? {
+        val senderName = candidates
+            .sortedWith { a, b -> compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt) }
+            .firstOrNull()?.senderName.orEmpty()
+        val cardKey = dto.cardKey ?: return null
+        val cardType = dto.cardType ?: return null
+        val sequenceNumber = dto.sequenceNumber ?: return null
+
+        val plaintextString = openV2EnvelopeOrNull(
+            dto = dto,
+            hpkeInfoFactory = { deviceId ->
+                V2Aad.liveCardHpkeInfo(
+                    senderId = dto.senderId,
+                    userId = userId,
+                    pluginId = dto.pluginId,
+                    cardKey = cardKey,
+                    cardType = cardType,
+                    sequenceNumber = sequenceNumber,
+                    expiresAt = dto.expiresAt,
+                    minPluginVersion = dto.minPluginVersion ?: "",
+                    payloadNonceB64 = dto.payloadNonce,
+                    payloadCiphertextSha256Hex = Hpke.sha256Hex(
+                        dto.payloadCiphertext.base64ToBytes()
+                    ),
+                    deviceId = deviceId,
+                )
+            },
+            payloadAad = V2Aad.liveCardPayloadAad(
+                senderId = dto.senderId,
+                userId = userId,
+                pluginId = dto.pluginId,
+                cardKey = cardKey,
+                cardType = cardType,
+                sequenceNumber = sequenceNumber,
+                expiresAt = dto.expiresAt,
+                minPluginVersion = dto.minPluginVersion ?: "",
+            ),
+        ) ?: return null
+
+        return InboxItem(
+            id = dto.id,
+            senderId = dto.senderId,
+            senderName = senderName,
+            pluginId = dto.pluginId,
+            pluginIdentifier = dto.pluginIdentifier,
+            payloadJson = plaintextString,
+            sentAt = dto.updatedAt ?: dto.expiresAt,
+            expiresAt = dto.expiresAt,
+            type = "live",
+            cardKey = dto.cardKey,
+            sequenceNumber = dto.sequenceNumber,
+            updatedAt = dto.updatedAt,
+            bundleJs = null,
+            declaredEndpoints = emptyList(),
+            bundleHash = null,
+            revocationReason = null,
+            renderer = "script",
+            template = null,
+            hostPreview = HostPreviewParser.parse(plaintextString),
+        )
+    }
+
+    /**
+     * Phase 9b V2 shared open path. Looks up THIS device's recipient
+     * envelope by device_id, HPKE-opens the wrapped CEK, then
+     * AES-256-GCM-decrypts the payload. Returns the plaintext JSON
+     * string, or null if the device has no envelope on this item OR
+     * the open / AEAD fails (logged, treated as undecryptable).
+     */
+    private fun openV2EnvelopeOrNull(
+        dto: InboxFeedItemDto,
+        hpkeInfoFactory: (deviceId: String) -> ByteArray,
+        payloadAad: ByteArray,
+    ): String? {
+        val deviceId = deviceIdentityStore.read() ?: run {
+            Timber.tag(TAG).w("no device_id on this device; cannot decrypt V2 envelope")
+            return null
+        }
+        val ownEnvelope = dto.recipientEnvelopes.firstOrNull {
+            it.deviceId.equals(deviceId, ignoreCase = true)
+        }
+        if (ownEnvelope == null) {
+            Timber.tag(TAG).d(
+                "no recipient_envelope for device %s on item %s",
+                deviceId, dto.id,
+            )
+            return null
+        }
+
+        val keypair = deviceEncryptionKeyStore.getOrCreateKeypair()
+        val cek = runCatching {
+            Hpke.openCekForDevice(
+                privateKeyRaw = keypair.privateKey,
+                hpkeKemOutput = ownEnvelope.hpkeKemOutput.base64ToBytes(),
+                hpkeCiphertext = ownEnvelope.hpkeCiphertext.base64ToBytes(),
+                info = hpkeInfoFactory(deviceId),
+            )
+        }.getOrElse {
+            Timber.tag(TAG).w(it, "HPKE open failed for item %s", dto.id)
+            return null
+        }
+
+        return runCatching {
+            val nonce = dto.payloadNonce.base64ToBytes()
+            val ciphertext = dto.payloadCiphertext.base64ToBytes()
+            val plaintext = Aead.decrypt(cek, nonce + ciphertext, payloadAad)
+            plaintext.toString(Charsets.UTF_8)
+        }.getOrElse {
+            Timber.tag(TAG).w(it, "AES-GCM decrypt failed for item %s", dto.id)
+            null
+        }
+    }
+
+    private fun parseInstantOrNull(s: String): Instant? =
+        runCatching { Instant.parse(s) }.getOrNull()
+
+    companion object {
+        const val TAG = "InboxRepo"
+    }
+}
+
+data class InboxItem(
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 480ms:
+                Message.expires_at > now,
+            ),
+        ),
+    )
+    message = result.scalar_one_or_none()
+    if message is None:
+        raise MessageNotFoundError(f"message {message_id} not found")
+    return message
+
+
+async def inbox_for_device(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    device_id: uuid.UUID,
+    since: datetime | None,
+    limit: int = 50,
+) -> tuple[list[Message], datetime | None]:
+    now = datetime.now(UTC)
+    # Phase 9b ?11.4 (Codex 128 #1): INNER JOIN now ‚?" V2 envelopes are
+    # per-device, so a message without a DeliveryStatus row for this
+    # device has no recipient_envelope for it either. The store_message_v2
+    # path fans out DeliveryStatus rows for every device active at publish
+    # time; devices enrolled AFTER a publish won't have a row and
+    # therefore won't see undecryptable messages.
+    #
+    # `dismissed_at.is_(None)` still drops cross-device dismissed rows so
+    # that machinery survives the join change.
+    query = (
+        select(Message)
+        .join(
+            DeliveryStatus,
+            and_(
+                DeliveryStatus.message_id == Message.id,
+                DeliveryStatus.device_id == device_id,
+            ),
+        )
+        .where(
+            and_(
+                Message.user_id == user_id,
+                Message.expires_at > now,
+                DeliveryStatus.dismissed_at.is_(None),
+            ),
+        )
+        .order_by(Message.sent_at.asc())
+        .limit(limit)
+    )
+    if since is not None:
+        query = query.where(Message.sent_at > since)
+
+    result = await db.execute(query)
+    messages = list(result.scalars().all())
+    next_since = messages[-1].sent_at if messages else since
+    return messages, next_since
+
+
+async def assert_device_belongs_to_user(
+    db: AsyncSession, *, user_id: uuid.UUID, device_id: uuid.UUID
+) -> Device:
+    """Confirm the device exists and belongs to the authenticated user."""
+    result = await db.execute(
+        select(Device).where(
+            and_(Device.id == device_id, Device.user_id == user_id),
+        ),
+    )
+    device = result.scalar_one_or_none()
+    if device is None:
+        raise DeviceOwnershipError(f"device {device_id} not found for this user")
+    return device
+
+
+async def mark_dismissed(
+    db: AsyncSession,
+    *,
+    message_id: uuid.UUID,
+    device_id: uuid.UUID,
+) -> DeliveryStatus:
+    result = await db.execute(
+        select(DeliveryStatus).where(
+            and_(
+                DeliveryStatus.message_id == message_id,
+                DeliveryStatus.device_id == device_id,
+            ),
+        ),
+    )
+    status = result.scalar_one_or_none()
+    if status is None:
+        raise MessageNotFoundError("delivery_status row not found")
+
+    if status.dismissed_at is None:
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The core V2 open path is doing the expected recipient-envelope selection and CEK/payload open, with no recipient-side signature verification and silent null on decrypt failure as described. I’m checking DTO discriminators and server V2 validation now for any actual close-out blocker.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxRepository.kt | Select-Object -First 160" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\app\\services\\envelopes_v2.py | Select-Object -Skip 220 -First 130" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\core\\network\\src\\main\\kotlin\\app\\syncler\\core\\network\\SynclerApi.kt | Select-Object -Skip 300 -First 190" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\app\\routers\\messages.py | Select-Object -Skip 70 -First 250" in D:\Projects\syncler
+ succeeded in 501ms:
+package app.syncler.feature.inbox
+
+import app.syncler.core.auth.DeviceIdentityStore
+import app.syncler.core.auth.Session
+import app.syncler.core.crypto.Aead
+import app.syncler.core.crypto.Hpke
+import app.syncler.core.crypto.V2Aad
+import app.syncler.core.crypto.base64ToBytes
+import app.syncler.core.network.InboxFeedItemDto
+import app.syncler.core.network.InboxFeedResponseDto
+import app.syncler.core.network.MessageInboxItemDto
+import app.syncler.core.network.RecipientEnvelopeDto
+import app.syncler.core.network.SynclerApi
+import app.syncler.core.network.TemplateBlockDto
+import app.syncler.core.storage.DeviceEncryptionKeyStore
+import app.syncler.core.storage.PairedSender
+import app.syncler.core.storage.PairedSenderStore
+import app.syncler.core.storage.compareIsoTimestamps
+import app.syncler.feature.inbox.BuildConfig
+import java.security.MessageDigest
+import java.time.Instant
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.ConnectionSpec
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import timber.log.Timber
+
+/**
+ * Pulls messages from /v1/messages/inbox on demand, decrypts each one with the
+ * matching paired sender's pairing key, and (lazily) downloads the plugin
+ * bundle so the inbox UI can render it via a WebView.
+ *
+ * Bundle cache lives for the process lifetime; on app restart we re-fetch.
+ * That's fine for V1 ?'‚,ª‚?? caching across launches is an M11+ refinement that
+ * needs invalidation tied to plugin version updates.
+ */
+@Singleton
+class InboxRepository @Inject constructor(
+    private val api: SynclerApi,
+    private val session: Session,
+    private val pairedSenderStore: PairedSenderStore,
+    private val deviceIdentityStore: DeviceIdentityStore,
+    private val deviceEncryptionKeyStore: DeviceEncryptionKeyStore,
+) {
+    private val _items = MutableStateFlow<List<InboxItem>>(emptyList())
+    val items: StateFlow<List<InboxItem>> = _items.asStateFlow()
+
+    private val bundleHttp = OkHttpClient.Builder()
+        // Release builds refuse cleartext outright; debug allows it so devs
+        // can host bundles on a LAN box. Matches PluginLoader.requireHttps.
+        .connectionSpecs(
+            if (BuildConfig.DEBUG) {
+                listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+            } else {
+                listOf(ConnectionSpec.MODERN_TLS)
+            },
+        )
+        .build()
+    /**
+     * Bundle cache keyed by SHA-256 hash (lowercase hex). Multiple plugin
+     * versions coexist: a new publish doesn't evict the old version, so old
+     * messages keep rendering against the EXACT bundle they were originally
+     * validated for (Codex's M11.3 concern: avoid history drift when a
+     * plugin author publishes a render-incompatible v2).
+     *
+     * In-memory only in V1 ?'‚,ª‚?? survives process lifetime, lost on restart.
+     * Disk persistence with size-based eviction is V1.5 (see also
+     * `docs/integration-guide.md` ?ý?9 "Common errors" for the user-visible
+     * "Plugin couldn't be re-fetched" path).
+     */
+    private val bundleByHash = mutableMapOf<String, CachedBundle>()
+    private val pluginMutex = Mutex()
+
+    private var lastSince: String? = null
+    private val pollMutex = Mutex()
+
+    suspend fun refresh(): Result<Int> = pollMutex.withLock {
+        runCatching {
+            val response = api.inbox(since = lastSince)
+            val userId = session.currentUserId() ?: return@runCatching 0
+            val pairingsBySender = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }
+
+            var sawMissingPairing = false
+
+            val newDecrypted = response.items.mapNotNull { dto ->
+                val candidates = pairingsBySender[dto.senderId].orEmpty()
+                if (candidates.isEmpty()) {
+                    Timber.tag(TAG).w("no paired sender for senderId=%s; skipping", dto.senderId)
+                    sawMissingPairing = true
+                    return@mapNotNull null
+                }
+
+                val decrypted = if (dto.envelopeKind == "live_card_upsert") {
+                    decryptLiveCard(dto, userId, candidates)
+                } else {
+                    decryptEventMessage(dto, userId, candidates)
+                }
+
+                if (decrypted == null) {
+                    Timber.tag(TAG).w(
+                        "could not decrypt %s %s from sender %s",
+                        dto.envelopeKind, dto.id, dto.senderId,
+                    )
+                    return@mapNotNull null
+                }
+
+                // Resolve plugin bundle by historical row UUID (NOT by current
+                // /latest) so old messages render against the exact bundle
+                // they were validated for. Codex review 40: a sender publishing
+                // v2 must not retroactively change v1 messages' render output.
+                val plugin = fetchPluginByRowOrNull(dto.pluginId)
+                decrypted.copy(
+                    bundleJs = plugin?.bundleJs,
+                    declaredEndpoints = plugin?.endpoints.orEmpty(),
+                    renderer = plugin?.renderer ?: "script",
+                    template = plugin?.template,
+                    bundleHash = plugin?.bundleHashHex,
+                    revocationReason = plugin?.revocationReason,
+                )
+            }
+
+            if (newDecrypted.isNotEmpty()) {
+                // Merge with existing items. Live cards overwrite by cardKey;
+                // event messages merge by ID.
+                val existing = _items.value
+                val eventMessages = (newDecrypted.filter { it.type == "event" } + existing.filter { it.type == "event" })
+                    .distinctBy { it.id }
+
+                // Live cards: newer sequence number wins.
+                val liveCards = (newDecrypted.filter { it.type == "live" } + existing.filter { it.type == "live" })
+                    .groupBy { it.cardKey }
+                    .map { (_, versions) ->
+                        versions.sortedByDescending { it.sequenceNumber ?: -1 }[0]
+                    }
+
+                val merged = eventMessages + liveCards
+
+                // Sort: live cards pinned above events.
+                // Within events: sentAt descending.
+                // Within live cards: updatedAt descending.
+                _items.value = merged.sortedWith(
+                    compareByDescending<InboxItem> { it.type == "live" }
+                        .thenByDescending { if (it.type == "live") parseInstantOrNull(it.updatedAt ?: "") else parseInstantOrNull(it.sentAt) }
+                        .thenByDescending { it.id },
+                )
+            }
+            if (sawMissingPairing) {
+                Timber.tag(TAG).w(
+                    "holding lastSince at %s ?'‚,ª‚?? at least one item had no pairing candidate; will re-fetch next refresh once pairings sync",
+                    lastSince,
+                )
+            } else {
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 506ms:
+    Spec ?11.8.
+
+    Caller passes ``MessageSendRequestV2``. base64 strings on the wire
+    flow through unchanged so the sender + server compute the same bytes
+    deterministically.
+    """
+    return _canonical_json(
+        {
+            "envelope_kind": "event",
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
+            "min_plugin_version": payload.min_plugin_version or "",
+            "payload_ciphertext": payload.payload_ciphertext,
+            "payload_nonce": payload.payload_nonce,
+            "plugin_id": str(payload.plugin_id),
+            "protocol_version": payload.protocol_version,
+            "recipient_directory_version": payload.recipient_directory_version,
+            "recipient_envelopes": _serialize_recipient_envelopes(
+                payload.recipient_envelopes
+            ),
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+        }
+    )
+
+
+def build_live_card_upsert_envelope_bytes(payload: Any) -> bytes:
+    """Canonical Ed25519 signing input for ``envelope_kind="live_card_upsert"``.
+    Adds ``card_key``, ``card_type``, ``sequence_number`` to the event
+    shape.
+    """
+    return _canonical_json(
+        {
+            "card_key": payload.card_key,
+            "card_type": payload.card_type,
+            "envelope_kind": "live_card_upsert",
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
+            "min_plugin_version": payload.min_plugin_version or "",
+            "payload_ciphertext": payload.payload_ciphertext,
+            "payload_nonce": payload.payload_nonce,
+            "plugin_id": str(payload.plugin_id),
+            "protocol_version": payload.protocol_version,
+            "recipient_directory_version": payload.recipient_directory_version,
+            "recipient_envelopes": _serialize_recipient_envelopes(
+                payload.recipient_envelopes
+            ),
+            "sender_id": str(payload.sender_id),
+            "sequence_number": payload.sequence_number,
+            "user_id": str(payload.user_id),
+        }
+    )
+
+
+def build_live_card_delete_envelope_bytes(payload: Any) -> bytes:
+    """Canonical Ed25519 signing input for ``envelope_kind="live_card_delete"``.
+    Spec ?11.6.
+    """
+    return _canonical_json(
+        {
+            "card_key": payload.card_key,
+            "envelope_kind": "live_card_delete",
+            "expires_at": payload.expires_at.isoformat().replace("+00:00", "Z"),
+            "nonce": payload.nonce,
+            "plugin_id": str(payload.plugin_id),
+            "protocol_version": payload.protocol_version,
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pointer storage for Message.encrypted_body_pointer
+# ---------------------------------------------------------------------------
+
+
+def build_v2_pointer(payload: Any) -> str:
+    """Serialize a V2 publish payload to the Message.encrypted_body_pointer
+    column. Format: ``v2:<base64 canonical JSON>``.
+
+    The pointer stores everything the inbox needs to reconstruct the
+    full V2 envelope on fetch: payload_ciphertext, payload_nonce,
+    recipient_envelopes, recipient_directory_version, envelope_signature.
+    """
+    blob = _canonical_json(
+        {
+            "payload_ciphertext": payload.payload_ciphertext,
+            "payload_nonce": payload.payload_nonce,
+            "recipient_envelopes": [
+                {
+                    "device_id": str(env.device_id),
+                    "hpke_kem_output": env.hpke_kem_output,
+                    "hpke_ciphertext": env.hpke_ciphertext,
+                }
+                for env in payload.recipient_envelopes
+            ],
+            "recipient_directory_version": payload.recipient_directory_version,
+            "envelope_signature": payload.envelope_signature,
+        }
+    )
+    return "v2:" + base64.b64encode(blob).decode("ascii")
+
+
+@dataclass(frozen=True)
+class V2PointerFields:
+    payload_ciphertext: str
+    payload_nonce: str
+    recipient_envelopes: list[dict[str, str]]
+    recipient_directory_version: int
+    envelope_signature: str
+
+
+def parse_v2_pointer(pointer: str) -> V2PointerFields:
+    """Inverse of ``build_v2_pointer``. Raises ValueError on malformed input."""
+    if not pointer.startswith("v2:"):
+        raise ValueError("not a v2 pointer")
+    blob = base64.b64decode(pointer[len("v2:"):])
+    fields = json.loads(blob.decode("utf-8"))
+    return V2PointerFields(
+        payload_ciphertext=fields["payload_ciphertext"],
+        payload_nonce=fields["payload_nonce"],
+        recipient_envelopes=list(fields["recipient_envelopes"]),
+        recipient_directory_version=int(fields["recipient_directory_version"]),
+        envelope_signature=fields["envelope_signature"],
+    )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 510ms:
+async def send_message(
+    payload: MessageSendRequestV2,
+    request: Request,
+    _: None = Depends(rate_limit("message_send_ip")),
+    db: AsyncSession = Depends(get_db),
+) -> MessageSendResponse:
+    """Phase 9b V2 publish (spec ?11.4). Per-recipient HPKE envelopes,
+    Ed25519 signature over the full sorted envelope (?11.8),
+    recipient-set classifier (?11.10), nonce-replay table on
+    payload_nonce.
+    """
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    # Spec ?11.8: verify the Ed25519 envelope signature BEFORE trusting any
+    # envelope field for routing/storage/HPKE info reconstruction
+    # (Codex 127 guardrail #4).
+    envelope_bytes = build_event_envelope_bytes(payload)
+    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature")
+
+    # Per-sender rate limit AFTER signature verification.
+    request.state.sender_id = str(payload.sender_id)
+    request.state.user_id = str(payload.user_id)
+    from app.middleware.rate_limit import check_rate_limit
+    from app.middleware.rate_limit_config import RATE_LIMITS
+    await check_rate_limit(db, request, RATE_LIMITS["message_send"])
+    await check_rate_limit(db, request, RATE_LIMITS["message_send_user_hour"])
+
+    # Nonce-replay check on payload_nonce (the AES-GCM nonce).
+    payload_nonce_bytes = decode_base64(
+        payload.payload_nonce, field_name="payload_nonce", exact=12
+    )
+    if not await record_nonce_or_reject(db, payload.sender_id, payload_nonce_bytes):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+
+    # Recipient-set classifier (?11.10). Runs in the same transaction
+    # as store_message_v2 below so the directory_version + active set
+    # are consistent (Codex 127 guardrail #3).
+    classification = await classify_recipient_set(
+        db,
+        user_id=payload.user_id,
+        recipient_envelopes=payload.recipient_envelopes,
+        sender_directory_version=payload.recipient_directory_version,
+    )
+    if isinstance(classification, RecipientSetError):
+        if classification.http_status == 409:
+            body = StaleRecipientSetError(
+                message=classification.message,
+                current_directory_version=classification.current_directory_version,
+                missing_device_ids=classification.missing_device_ids,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=body.model_dump(mode="json"),
+                headers={
+                    "X-Stale-Directory-Version": str(
+                        classification.current_directory_version
+                    ),
+                },
+            )
+        raise HTTPException(
+            status_code=classification.http_status,
+            detail={
+                "error": classification.code,
+                "message": classification.message,
+                "current_directory_version": classification.current_directory_version,
+            },
+        )
+
+    try:
+        message = await store_message_v2(db, payload=payload)
+    except ExpiredEnvelopeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except PairingMissingError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="no active pairing") from exc
+    except PluginInactiveError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing, revoked, or not owned by sender") from exc
+    except NoActiveDeviceWithPluginError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="recipient has no active devices") from exc
+    except NonceReplayError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
+
+    await push_message_to_user_devices(db, message=message)
+    # SSE hint: nudge any device the recipient has in foreground to pull
+    # /v1/messages/inbox now. Devices in background rely on the FCM
+    # wakeup already triggered by push_message_to_user_devices.
+    await get_event_bus().publish_to_user(
+        user_id=message.user_id,
+        event_type="inbox.changed",
+        data={"message_id": str(message.id), "sent_at": message.sent_at.isoformat()},
+    )
+    return MessageSendResponse(message_id=message.id, expires_at=message.expires_at)
+
+
+@router.get("/inbox", response_model=InboxFeedResponseV2)
+async def inbox(
+    since: datetime | None = Query(None),
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> InboxFeedResponseV2:
+    """Phase 9b V2 inbox feed (spec ?11.4 + ?11.5). Returns the FULL
+    V2 envelope for each message / live card so the device can verify
+    the Ed25519 signature, pick its own recipient_envelope by
+    device_id, HPKE-open the CEK, and AES-GCM-decrypt the payload.
+    """
+    await touch_device_last_seen(db, device_id=ctx.device.id)
+
+    messages, next_since = await inbox_for_device(
+        db,
+        user_id=ctx.user.id,
+        device_id=ctx.device.id,
+        since=since,
+    )
+
+    live_cards = await get_live_cards_for_user(db, user_id=ctx.user.id)
+
+    plugin_ids = list({m.plugin_id for m in messages} | {c.plugin_id for c in live_cards})
+    identifier_by_id: dict[uuid.UUID, str] = {}
+    if plugin_ids:
+        from app.models import Plugin
+        from sqlalchemy import select as sql_select
+        rows = await db.execute(
+            sql_select(Plugin.id, Plugin.plugin_identifier).where(Plugin.id.in_(plugin_ids))
+        )
+        identifier_by_id = {row[0]: row[1] for row in rows.all()}
+
+    items: list[MessageInboxItemV2 | LiveCardInboxItemV2] = []
+
+    for m in messages:
+        items.append(_message_to_inbox_item_v2(m, identifier_by_id.get(m.plugin_id, "")))
+
+    for c in live_cards:
+        items.append(_live_card_to_inbox_item_v2(c, identifier_by_id.get(c.plugin_id, "")))
+
+    return InboxFeedResponseV2(items=items, next_since=next_since)
+
+
+@router.get("/{message_id}", response_model=MessageInboxItemV2)
+async def get_message(
+    message_id: uuid.UUID,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> MessageInboxItemV2:
+    try:
+        message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+    plugin_row = await db.execute(
+        sql_select(Plugin.plugin_identifier).where(Plugin.id == message.plugin_id)
+    )
+    identifier = plugin_row.scalar_one_or_none() or ""
+    return _message_to_inbox_item_v2(message, identifier)
+
+
+@router.post("/{message_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+async def dismiss_message(
+    message_id: uuid.UUID,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    # Device comes from the JWT ?'‚,ª‚?? no query param, no ownership check (the
+    # auth dependency already verified the device exists, belongs to the
+    # user, and is not revoked).
+    try:
+        message = await get_message_for_user(db, user_id=ctx.user.id, message_id=message_id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message not found") from exc
+
+    try:
+        await mark_dismissed(db, message_id=message_id, device_id=ctx.device.id)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery row not found") from exc
+
+    # Fan out the dismiss event to other devices. The plugin's dismissBehavior
+    # is encoded on the device side (in the plugin manifest), but the platform
+    # always sends the event ?'‚,ª‚?? devices decide locally whether to act on it.
+    await push_dismiss_to_other_devices(db, message=message, dismissing_device_id=ctx.device.id)
+    # SSE hint: nudge OTHER foreground devices to update their local
+    # dismiss state. The dismissing device knows already; we mark its id
+    # so the client-side handler can no-op for self-originated events.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="dismiss",
+        data={"message_id": str(message_id), "source_device_id": str(ctx.device.id)},
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _message_to_inbox_item_v2(message, plugin_identifier: str) -> MessageInboxItemV2:  # noqa: ANN001
+    """Phase 9b V2 inbox projection (spec ?11.4). Reconstructs the full
+    V2 envelope from the stored pointer; device gets every recipient's
+    envelope (full fanout) so signature verification can reconstruct
+    the canonical signed envelope bytes byte-for-byte.
+    """
+    fields = parse_v2_pointer(message.encrypted_body_pointer)
+    return MessageInboxItemV2(
+        id=message.id,
+        sender_id=message.sender_id,
+        plugin_id=message.plugin_id,
+        plugin_identifier=plugin_identifier,
+        min_plugin_version=message.min_plugin_version,
+        payload_nonce=fields.payload_nonce,
+        payload_ciphertext=fields.payload_ciphertext,
+        recipient_envelopes=[
+            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+        ],
+        recipient_directory_version=fields.recipient_directory_version,
+        envelope_signature=fields.envelope_signature,
+        sent_at=message.sent_at,
+        expires_at=message.expires_at,
+    )
+
+
+def _live_card_to_inbox_item_v2(card, plugin_identifier: str) -> LiveCardInboxItemV2:  # noqa: ANN001
+    """Phase 9b V2 live-card projection (spec ?11.5)."""
+    fields = parse_v2_pointer(card.encrypted_body_pointer)
+    return LiveCardInboxItemV2(
+        id=card.id,
+        sender_id=card.sender_id,
+        plugin_id=card.plugin_id,
+        plugin_identifier=plugin_identifier,
+        min_plugin_version=card.min_plugin_version,
+        card_key=card.card_key,
+        card_type=card.card_type,
+        sequence_number=card.sequence_number,
+        payload_nonce=fields.payload_nonce,
+        payload_ciphertext=fields.payload_ciphertext,
+        recipient_envelopes=[
+            RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes
+        ],
+        recipient_directory_version=fields.recipient_directory_version,
+        envelope_signature=fields.envelope_signature,
+        updated_at=card.updated_at,
+        expires_at=card.expires_at,
+    )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 522ms:
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "created_at") val createdAt: String?,
+    @Json(name = "revoked_at") val revokedAt: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class PairingStateResponseDto(
+    @Json(name = "pairing_id") val pairingId: String,
+    @Json(name = "encrypted_state") val encryptedState: String,
+    @Json(name = "state_version") val stateVersion: Int,
+    @Json(name = "key_generation") val keyGeneration: Int,
+)
+
+/** Phase 9b V2 per-device HPKE envelope (spec ?11.4). */
+@JsonClass(generateAdapter = true)
+data class RecipientEnvelopeDto(
+    @Json(name = "device_id") val deviceId: String,
+    /** Base64 32-byte X25519 KEM output (sender's ephemeral pubkey). */
+    @Json(name = "hpke_kem_output") val hpkeKemOutput: String,
+    /** Base64 48-byte HPKE wrap (32-byte CEK + 16-byte AEAD tag). */
+    @Json(name = "hpke_ciphertext") val hpkeCiphertext: String,
+)
+
+/** Phase 9b V2 inbox event message (spec ?11.4). */
+@JsonClass(generateAdapter = true)
+data class MessageInboxItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String?,
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "envelope_kind") val envelopeKind: String = "event",
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
+    @Json(name = "sent_at") val sentAt: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+/** Phase 9b V2 live-card inbox item (spec ?11.5). */
+@JsonClass(generateAdapter = true)
+data class LiveCardItemDto(
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String?,
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "envelope_kind") val envelopeKind: String = "live_card_upsert",
+    @Json(name = "card_key") val cardKey: String,
+    @Json(name = "card_type") val cardType: String,
+    @Json(name = "sequence_number") val sequenceNumber: Long,
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
+    @Json(name = "updated_at") val updatedAt: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+/**
+ * Phase 9b V2 unified inbox item discriminated by `envelope_kind`
+ * ("event" | "live_card_upsert"). Nullable fields are present in
+ * one shape or the other.
+ */
+@JsonClass(generateAdapter = true)
+data class InboxFeedItemDto(
+    @Json(name = "envelope_kind") val envelopeKind: String,
+    val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String? = null,
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
+    @Json(name = "expires_at") val expiresAt: String,
+
+    // Event-only:
+    @Json(name = "sent_at") val sentAt: String? = null,
+
+    // Live-card-only:
+    @Json(name = "card_key") val cardKey: String? = null,
+    @Json(name = "card_type") val cardType: String? = null,
+    @Json(name = "sequence_number") val sequenceNumber: Long? = null,
+    @Json(name = "updated_at") val updatedAt: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class InboxFeedResponseDto(
+    val items: List<InboxFeedItemDto>,
+    @Json(name = "next_since") val nextSince: String?,
+)
+
+@JsonClass(generateAdapter = true)
+data class SignupRequest(
+    val email: String,
+    @Json(name = "auth_key_hash") val authKeyHash: String,
+    @Json(name = "encrypted_master_key") val encryptedMasterKey: String,
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+    /**
+     * Phase 8d (docs/crypto-spec.md ?10.9): the master-key wrap AAD
+     * binds user_id, so the client MUST know the UUID before wrapping.
+     * Phase-8d-aware apps generate a fresh UUID v4 here.
+     */
+    @Json(name = "user_id") val userId: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class SignupResponse(
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "created_at") val createdAt: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PreLoginRequest(
+    val email: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class PreLoginResponse(
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class LoginRequest(
+    val email: String,
+    @Json(name = "auth_key_hash") val authKeyHash: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class LoginResponse(
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "session_token") val sessionToken: String,
+    @Json(name = "encrypted_master_key") val encryptedMasterKey: String,
+    @Json(name = "auth_salt") val authSalt: String,
+    @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+    /**
+     * Phase 8 (docs/crypto-spec.md ?10.10): the generation the wrapped
+     * MK + user-state blob are encrypted under. The client compares
+     * this to its locally-persisted high-water mark BEFORE unwrapping
+     * the MK (downgrade defense).
+     */
+    @Json(name = "key_generation") val keyGeneration: Int = 1,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceEnrollRequest(
+    /** Ed25519 device-bound JWT pubkey (base64, 32 bytes). */
+    @Json(name = "public_key") val publicKey: String,
+    /**
+     * Phase 9b ?11.12: X25519 encryption pubkey (base64, 32 bytes)
+     * for receiving HPKE-sealed per-device envelopes.
+     */
+    @Json(name = "encryption_public_key") val encryptionPublicKey: String,
+    @Json(name = "fcm_token") val fcmToken: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceEncryptionKeyRotateRequest(
+    /** Spec ?11.12. New X25519 pubkey (base64, 32 bytes). */
+    @Json(name = "encryption_public_key") val encryptionPublicKey: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceEnrollResponse(
+    @Json(name = "device_id") val deviceId: String,
+    @Json(name = "created_at") val createdAt: String,
+    // Device-bound JWT. Replaces the bootstrap token from /v1/auth/login so
+    // subsequent requests to sensitive endpoints carry the `did` claim.
+    @Json(name = "session_token") val sessionToken: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceItem(
+    val id: String,
+    @Json(name = "created_at") val createdAt: String?,
+    @Json(name = "last_seen") val lastSeen: String?,
+    @Json(name = "revoked_at") val revokedAt: String?,
+    @Json(name = "has_fcm_token") val hasFcmToken: Boolean,
+)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\alembic\\versions\\0011_per_device_encryption.py | Select-Object -First 145" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\pyproject.toml | Select-String -Pattern \"cryptography|dependencies\" -Context 2,2" in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\pyproject.toml | Select-String -Pattern \"cryptography|dependencies\" -Context 2,2"` rejected: blocked by policy
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\app\\models.py | Select-Object -Skip 220 -First 55" in D:\Projects\syncler
+2026-05-25T22:38:15.879043Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\pyproject.toml | Select-String -Pattern \"cryptography|dependencies\" -Context 2,2"` rejected: blocked by policy
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxRepository.kt | Select-Object -Skip 120 -First 120" in D:\Projects\syncler
+ succeeded in 482ms:
+                    bundleJs = plugin?.bundleJs,
+                    declaredEndpoints = plugin?.endpoints.orEmpty(),
+                    renderer = plugin?.renderer ?: "script",
+                    template = plugin?.template,
+                    bundleHash = plugin?.bundleHashHex,
+                    revocationReason = plugin?.revocationReason,
+                )
+            }
+
+            if (newDecrypted.isNotEmpty()) {
+                // Merge with existing items. Live cards overwrite by cardKey;
+                // event messages merge by ID.
+                val existing = _items.value
+                val eventMessages = (newDecrypted.filter { it.type == "event" } + existing.filter { it.type == "event" })
+                    .distinctBy { it.id }
+
+                // Live cards: newer sequence number wins.
+                val liveCards = (newDecrypted.filter { it.type == "live" } + existing.filter { it.type == "live" })
+                    .groupBy { it.cardKey }
+                    .map { (_, versions) ->
+                        versions.sortedByDescending { it.sequenceNumber ?: -1 }[0]
+                    }
+
+                val merged = eventMessages + liveCards
+
+                // Sort: live cards pinned above events.
+                // Within events: sentAt descending.
+                // Within live cards: updatedAt descending.
+                _items.value = merged.sortedWith(
+                    compareByDescending<InboxItem> { it.type == "live" }
+                        .thenByDescending { if (it.type == "live") parseInstantOrNull(it.updatedAt ?: "") else parseInstantOrNull(it.sentAt) }
+                        .thenByDescending { it.id },
+                )
+            }
+            if (sawMissingPairing) {
+                Timber.tag(TAG).w(
+                    "holding lastSince at %s ?'‚,ª‚?? at least one item had no pairing candidate; will re-fetch next refresh once pairings sync",
+                    lastSince,
+                )
+            } else {
+                response.nextSince?.let { lastSince = it }
+            }
+            newDecrypted.size
+        }.onFailure { Timber.tag(TAG).w(it, "refresh failed") }
+    }
+
+    /**
+     * Revoke every active pairing for a sender. Mirrors `PairingRepository.revoke`
+     * (which is the canonical path called from the device-management screen)
+     * so the server-side tombstone always lands BEFORE the local synced
+     * removal ?'‚,ª‚?? without that ordering, an offline device that hadn't sync'd
+     * yet could resurrect the pairing on its next refresh, and the receiving
+     * sender would keep being able to send messages we'd now decrypt.
+     *
+     * Closes Codex consultation 62 RED #7. Per-pairing errors are logged and
+     * skipped so one network failure doesn't leave an inconsistent set of
+     * pairings half-revoked; the next sheet-revoke retry picks them up.
+     */
+    suspend fun revokeSender(senderId: String) {
+        val active = pairedSenderStore.activePairingsForSender(senderId)
+        active.forEach { pairing ->
+            val response = runCatching { api.revokePairing(pairing.pairingId) }
+            response.onFailure {
+                Timber.tag(TAG).w(it, "server revoke failed for pairing %s; keeping local", pairing.pairingId)
+                return@forEach
+            }
+            val resp = response.getOrNull()
+            if (resp == null || !resp.isSuccessful) {
+                Timber.tag(TAG).w(
+                    "server revoke for pairing %s returned %s; keeping local",
+                    pairing.pairingId,
+                    resp?.code()?.toString() ?: "no-response",
+                )
+                return@forEach
+            }
+            pairedSenderStore.remove(pairing.pairingId)
+        }
+    }
+
+    suspend fun upsertCard(data: String) {
+        val userId = session.currentUserId() ?: return
+        val dto = runCatching {
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            moshi.adapter(InboxFeedItemDto::class.java).fromJson(data)
+        }.getOrNull() ?: return
+
+        val candidates = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }[dto.senderId].orEmpty()
+        if (candidates.isEmpty()) return
+
+        val decrypted = decryptLiveCard(dto, userId, candidates) ?: return
+        val plugin = fetchPluginByRowOrNull(dto.pluginId)
+        val item = decrypted.copy(
+            bundleJs = plugin?.bundleJs,
+            declaredEndpoints = plugin?.endpoints.orEmpty(),
+            renderer = plugin?.renderer ?: "script",
+            template = plugin?.template,
+            bundleHash = plugin?.bundleHashHex,
+            revocationReason = plugin?.revocationReason,
+        )
+
+        _items.value = pollMutex.withLock {
+            val existing = _items.value
+            val currentCard = existing.find { it.type == "live" && it.cardKey == item.cardKey && it.senderId == item.senderId }
+
+            if (currentCard != null && (item.sequenceNumber ?: 0L) <= (currentCard.sequenceNumber ?: 0L)) {
+                return@withLock existing
+            }
+
+            val filtered = if (currentCard != null) existing.filter { it !== currentCard } else existing
+            (filtered + item).sortedWith(
+                compareByDescending<InboxItem> { it.type == "live" }
+                    .thenByDescending { if (it.type == "live") parseInstantOrNull(it.updatedAt ?: "") else parseInstantOrNull(it.sentAt) }
+                    .thenByDescending { it.id },
+            )
+        }
+    }
+
+    suspend fun deleteCard(senderId: String, cardKey: String) {
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 484ms:
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    actioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveCard(Base):
+    __tablename__ = "live_cards"
+    # Phase 9b (Codex 128 #2): unique now includes plugin_id so two
+    # plugins from the same sender can't collide on a shared card_key.
+    # V1 unique was (sender_id, user_id, card_key); migration 0011
+    # tightens it.
+    __table_args__ = (
+        UniqueConstraint(
+            "sender_id", "user_id", "plugin_id", "card_key",
+            name="uq_live_cards_sender_user_plugin_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id"),
+        nullable=False,
+        index=True,
+    )
+    plugin_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("plugins.id"),
+        nullable=False,
+    )
+    card_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # Phase 9b V2 wire (docs/crypto-spec.md ?11.5). The full envelope
+    # (payload_ciphertext, payload_nonce, recipient_envelopes,
+    # recipient_directory_version, envelope_signature) is serialized
+    # into encrypted_body_pointer via build_v2_pointer. The old
+    # encrypted_payload/nonce columns are gone.
+    encrypted_body_pointer: Mapped[str] = mapped_column(Text, nullable=False)
+    card_type: Mapped[str] = mapped_column(Text, nullable=False)
+    min_plugin_version: Mapped[str | None] = mapped_column(Text)
+    sequence_number: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 497ms:
+"""Phase 9b ‚?" per-device envelope encryption schema
+
+Implements docs/crypto-spec.md ?11:
+
+  - devices.encryption_public_key BYTEA NULL (32-byte X25519)
+    CHECK octet_length(encryption_public_key) = 32 (when not null)
+  - devices.updated_at TIMESTAMP for the sender directory response
+  - users.device_directory_version BIGINT NOT NULL DEFAULT 0
+    Monotonic counter bumped on any enrollment / revocation /
+    encryption_public_key rotation. Used by senders to detect a
+    stale recipient set (?11.10).
+  - data migration: delete all rows from live_cards (they're V1-
+    encrypted with pairing_key which the new client can't derive;
+    V0.1 dev-mode tolerates this per spec ?11.14).
+
+The encryption_public_key column is NULL for V1 dev devices that
+existed before this migration. The new client re-enrolls on
+first launch and populates the column; a follow-up migration
+(0012) will tighten to NOT NULL once all active devices have
+re-enrolled. Until then, server-side publish validation skips
+devices with NULL encryption_public_key from the active set
+(?11.10's active_devices filter).
+
+Plan: docs/crypto-spec.md ?11. Triad consults 123-127.
+"""
+
+from __future__ import annotations
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "0011_per_device_encryption"
+down_revision = "0010_master_key_rotation"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.add_column(
+        "devices",
+        sa.Column("encryption_public_key", sa.LargeBinary(), nullable=True),
+    )
+    op.create_check_constraint(
+        "ck_devices_encryption_public_key_length",
+        "devices",
+        "encryption_public_key IS NULL OR octet_length(encryption_public_key) = 32",
+    )
+    op.add_column(
+        "devices",
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+    )
+
+    op.add_column(
+        "users",
+        sa.Column(
+            "device_directory_version",
+            sa.BigInteger(),
+            nullable=False,
+            server_default="0",
+        ),
+    )
+
+    # V0.1 dev-mode: V1 live cards are encrypted with pairing_key the
+    # new client cannot derive. Drop them; the next sender publish
+    # repopulates under the V2 envelope. See ?11.14.
+    op.execute("DELETE FROM live_cards")
+
+    # Same reasoning for messages: V1 wire format is incompatible.
+    # Empty inbox on first V2 launch is the expected dev-mode behavior.
+    op.execute("DELETE FROM delivery_status")
+    op.execute("DELETE FROM messages")
+
+    # Restructure live_cards for V2 wire. The V1 columns
+    # (encrypted_payload, nonce) carried the raw pairing-key-AEAD wire;
+    # V2 stores the full envelope (including per-device HPKE wraps and
+    # the envelope_signature) in encrypted_body_pointer alongside the
+    # card metadata fields. The table is already empty from the
+    # DELETE above, so the schema change is destruction-safe.
+    op.drop_column("live_cards", "encrypted_payload")
+    op.drop_column("live_cards", "nonce")
+    op.add_column(
+        "live_cards",
+        sa.Column("encrypted_body_pointer", sa.Text(), nullable=False, server_default=""),
+    )
+    op.add_column(
+        "live_cards",
+        sa.Column("card_type", sa.Text(), nullable=False, server_default="standard_card"),
+    )
+    op.add_column(
+        "live_cards",
+        sa.Column("min_plugin_version", sa.Text(), nullable=True),
+    )
+    # Drop the server_defaults; they were only there to satisfy NOT
+    # NULL on the (empty) table at migration time. New rows must
+    # supply values explicitly.
+    op.alter_column("live_cards", "encrypted_body_pointer", server_default=None)
+    op.alter_column("live_cards", "card_type", server_default=None)
+
+    # Phase 9b (Codex 128 #2): tighten the unique to include plugin_id.
+    # V1 unique was (sender_id, user_id, card_key) which let two plugins
+    # from the same sender collide on a shared card_key. V2 upsert and
+    # delete both scope by plugin_id; the constraint mirrors.
+    op.drop_constraint("uq_live_cards_sender_user_key", "live_cards", type_="unique")
+    op.create_unique_constraint(
+        "uq_live_cards_sender_user_plugin_key",
+        "live_cards",
+        ["sender_id", "user_id", "plugin_id", "card_key"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_constraint("uq_live_cards_sender_user_plugin_key", "live_cards", type_="unique")
+    op.create_unique_constraint(
+        "uq_live_cards_sender_user_key",
+        "live_cards",
+        ["sender_id", "user_id", "card_key"],
+    )
+    op.drop_column("live_cards", "min_plugin_version")
+    op.drop_column("live_cards", "card_type")
+    op.drop_column("live_cards", "encrypted_body_pointer")
+    op.add_column("live_cards", sa.Column("encrypted_payload", sa.LargeBinary(), nullable=False, server_default=b""))
+    op.add_column("live_cards", sa.Column("nonce", sa.LargeBinary(), nullable=False, server_default=b""))
+    op.drop_column("users", "device_directory_version")
+    op.drop_column("devices", "updated_at")
+    op.drop_constraint(
+        "ck_devices_encryption_public_key_length",
+        "devices",
+        type_="check",
+    )
+    op.drop_column("devices", "encryption_public_key")
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"cryptography\" server\\pyproject.toml sdk-python\\pyproject.toml pyproject.toml" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"verify_message_envelope|build_event_envelope_bytes|build_live_card_upsert_envelope_bytes|build_live_card_delete_envelope_bytes|delete_live_card_v2|LiveCardDeleteRequest\\b|LiveCardDeleteRequestV2\" server\\app" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"data class FakeDeviceEncryptionKeyStore|FakeDeviceEncryptionKeyStore|crossPlatformVector|InboxRepository\" android\\feature\\inbox\\src\\test android\\core\\crypto\\src\\test android\\core\\storage\\src\\test" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"could not decrypt|HPKE open failed|AES-GCM|lastSince|recipient_envelope|envelopeSignature|signature|protocolVersion|envelopeKind\" android\\feature\\inbox\\src\\test android\\core\\crypto\\src\\test android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxRepository.kt" in D:\Projects\syncler
+ succeeded in 406ms:
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\HpkeTest.kt:22:    fun crossPlatformVector_opens_cek_and_decrypts_payload() {
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 401ms:
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:82:    private var lastSince: String? = null
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:87:            val response = api.inbox(since = lastSince)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:101:                val decrypted = if (dto.envelopeKind == "live_card_upsert") {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:109:                        "could not decrypt %s %s from sender %s",
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:110:                        dto.envelopeKind, dto.id, dto.senderId,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:157:                    "holding lastSince at %s ג€” at least one item had no pairing candidate; will re-fetch next refresh once pairings sync",
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:158:                    lastSince,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:161:                response.nextSince?.let { lastSince = it }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:365:     * device's recipient_envelope in `dto.recipientEnvelopes`,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:366:     * HPKE-opens the wrapped CEK, then AES-GCM-decrypts the payload.
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:512:                "no recipient_envelope for device %s on item %s",
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:527:            Timber.tag(TAG).w(it, "HPKE open failed for item %s", dto.id)
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:537:            Timber.tag(TAG).w(it, "AES-GCM decrypt failed for item %s", dto.id)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:129:        // AES-GCM is deterministic — same inputs → same ciphertext.
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:142:    fun `ed25519 verify accepts spec signature`() {
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:145:        val signature = Signing.signWithSeed(ed25519PrivateSeed, message)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:148:        assertEquals(ED25519_SIG_HEX, signature.toHex())
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:149:        assertTrue(Signing.verify(publicKey, message, signature))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:150:        assertFalse(Signing.verify(publicKey, message + byteArrayOf(0), signature))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:155:        // 1. Ed25519 signature
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:160:        val signature = Signing.signWithSeed(BOOTSTRAP_ED25519_SEED, sigInput)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:161:        assertEquals(BOOTSTRAP_SIG_HEX, signature.toHex())
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:162:        assertTrue(Signing.verify(pubKey, sigInput, signature))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:167:        // chooses fixed eph_seed + nonce so the deterministic AES-GCM
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:55:        val signature = Signing.signWithSeed(seed, message)
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:61:            signature.toHex(),
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:63:        assertTrue(Signing.verify(publicKey, message, signature))
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\CryptoTest.kt:64:        assertFalse(Signing.verify(publicKey, message + byteArrayOf(0), signature))
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\UserStateRepositoryPushTest.kt:96:        val jwt = "$header.$body.signature"
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ exited 1 in 411ms:
+server\pyproject.toml:16:    "cryptography>=48.0.0",
+sdk-python\pyproject.toml:8:    "cryptography==45.0.3",
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+rg: pyproject.toml: The system cannot find the file specified. (os error 2)
+
+ succeeded in 418ms:
+server\app\schemas.py:255:class LiveCardDeleteRequest(BaseModel):
+server\app\schemas.py:1183:class LiveCardDeleteRequestV2(BaseModel):
+server\app\crypto\signatures.py:16:def verify_message_envelope(public_key: bytes, envelope: bytes, signature: bytes) -> bool:
+server\app\services\cards.py:159:async def delete_live_card_v2(
+server\app\services\envelopes_v2.py:219:def build_event_envelope_bytes(payload: Any) -> bytes:
+server\app\services\envelopes_v2.py:246:def build_live_card_upsert_envelope_bytes(payload: Any) -> bytes:
+server\app\services\envelopes_v2.py:273:def build_live_card_delete_envelope_bytes(payload: Any) -> bytes:
+server\app\routers\plugins.py:12:from app.crypto.signatures import verify_message_envelope
+server\app\routers\plugins.py:109:    if not verify_message_envelope(sender.public_key, _publish_envelope(payload), sender_sig):
+server\app\routers\plugins.py:252:    if not verify_message_envelope(sender.public_key, _revoke_envelope(payload), sender_sig):
+server\app\routers\cards.py:10:from app.crypto.signatures import verify_message_envelope
+server\app\routers\cards.py:15:    LiveCardDeleteRequestV2,
+server\app\routers\cards.py:28:    delete_live_card_v2,
+server\app\routers\cards.py:33:    build_live_card_delete_envelope_bytes,
+server\app\routers\cards.py:34:    build_live_card_upsert_envelope_bytes,
+server\app\routers\cards.py:64:    envelope_bytes = build_live_card_upsert_envelope_bytes(payload)
+server\app\routers\cards.py:66:    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+server\app\routers\cards.py:160:    payload: LiveCardDeleteRequestV2,
+server\app\routers\cards.py:178:    envelope_bytes = build_live_card_delete_envelope_bytes(payload)
+server\app\routers\cards.py:180:    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+server\app\routers\cards.py:204:    await delete_live_card_v2(
+server\app\routers\senders.py:21:from app.crypto.signatures import verify_message_envelope
+server\app\routers\senders.py:101:    if not verify_message_envelope(sender.public_key, sig_input, bootstrap_sig_raw):
+server\app\routers\senders.py:192:    if not verify_message_envelope(
+server\app\routers\pairing.py:15:from app.crypto.signatures import verify_message_envelope
+server\app\routers\pairing.py:169:    if not verify_message_envelope(sender.public_key, _initiate_envelope_bytes(payload), signature):
+server\app\routers\messages.py:20:from app.crypto.signatures import verify_message_envelope
+server\app\routers\messages.py:38:    build_event_envelope_bytes,
+server\app\routers\messages.py:92:    envelope_bytes = build_event_envelope_bytes(payload)
+server\app\routers\messages.py:94:    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+2026-05-25T22:38:32.384528Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+server\pyproject.toml:16:    "cryptography>=48.0.0",
+sdk-python\pyproject.toml:8:    "cryptography==45.0.3",
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+rg: pyproject.toml: The system cannot find the file specified. (os error 2)
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\core\\storage\\src\\main\\kotlin\\app\\syncler\\core\\storage\\DeviceEncryptionKeyStore.kt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\core\\crypto\\src\\test\\kotlin\\app\\syncler\\core\\crypto\\HpkeTest.kt | Select-Object -First 110" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\core\\auth\\src\\main\\kotlin\\app\\syncler\\core\\auth\\AuthRepository.kt | Select-Object -Skip 90 -First 70" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path server\\app\\routers\\cards.py | Select-Object -Skip 45 -First 180" in D:\Projects\syncler
+ succeeded in 399ms:
+package app.syncler.core.storage
+
+import android.util.Base64
+import app.syncler.core.crypto.Hpke
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Phase 9b ?11.1: per-device X25519 keypair store for the HPKE
+ * recipient role.
+ *
+ * The X25519 private key is the SOLE secret on the device that lets
+ * a sender's message decrypt; losing it (uninstall, factory reset)
+ * means messages encrypted to the old key become undecryptable on
+ * this device (spec ?11.14). Documented as expected V0.1 behavior.
+ *
+ * Storage lives in the existing [SecurePrefs] (androidx.security
+ * EncryptedSharedPreferences) alongside session tokens etc. ‚?" the
+ * master key wrapping that prefs file is what protects the X25519
+ * private key on disk.
+ *
+ * Interface-based so tests can substitute a fake without having to
+ * provide a real [SecurePrefs] (which needs a Context).
+ */
+interface DeviceEncryptionKeyStore {
+
+    /**
+     * Get the existing keypair OR generate + persist a fresh one on
+     * first call. Used at enrollment time (the new POST
+     * /v1/auth/devices/enroll body sends the X25519 public key)
+     * AND at inbox-decrypt time (private key opens incoming HPKE
+     * envelopes).
+     */
+    fun getOrCreateKeypair(): Keypair
+
+    /**
+     * Rotate the keypair. Discards the existing one and creates a
+     * fresh pair. Caller MUST also send the new public key to the
+     * server via PUT /v1/auth/devices/me/encryption_key. Old
+     * messages encrypted to the previous key become undecryptable
+     * on this device after rotation.
+     */
+    fun rotate(): Keypair
+
+    /** Wipe ‚?" used by logout / clear local state. */
+    fun clear()
+
+    data class Keypair(
+        val privateKey: ByteArray,
+        val publicKey: ByteArray,
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is Keypair) return false
+            return privateKey.contentEquals(other.privateKey) &&
+                publicKey.contentEquals(other.publicKey)
+        }
+
+        override fun hashCode(): Int =
+            31 * privateKey.contentHashCode() + publicKey.contentHashCode()
+    }
+}
+
+
+@Singleton
+class SecurePrefsDeviceEncryptionKeyStore @Inject constructor(
+    private val securePrefs: SecurePrefs,
+) : DeviceEncryptionKeyStore {
+
+    override fun getOrCreateKeypair(): DeviceEncryptionKeyStore.Keypair {
+        val storedPrivate = securePrefs.getString(KEY_PRIVATE)
+        val storedPublic = securePrefs.getString(KEY_PUBLIC)
+        if (storedPrivate != null && storedPublic != null) {
+            val sk = Base64.decode(storedPrivate, Base64.NO_WRAP)
+            val pk = Base64.decode(storedPublic, Base64.NO_WRAP)
+            if (sk.size == Hpke.X25519_PRIVATE_KEY_BYTES && pk.size == Hpke.X25519_PUBLIC_KEY_BYTES) {
+                return DeviceEncryptionKeyStore.Keypair(sk, pk)
+            }
+            // Corrupted entry ‚?" fall through to regenerate.
+        }
+        val (sk, pk) = Hpke.generateX25519Keypair()
+        securePrefs.putString(KEY_PRIVATE, Base64.encodeToString(sk, Base64.NO_WRAP))
+        securePrefs.putString(KEY_PUBLIC, Base64.encodeToString(pk, Base64.NO_WRAP))
+        return DeviceEncryptionKeyStore.Keypair(sk, pk)
+    }
+
+    override fun rotate(): DeviceEncryptionKeyStore.Keypair {
+        val (sk, pk) = Hpke.generateX25519Keypair()
+        securePrefs.putString(KEY_PRIVATE, Base64.encodeToString(sk, Base64.NO_WRAP))
+        securePrefs.putString(KEY_PUBLIC, Base64.encodeToString(pk, Base64.NO_WRAP))
+        return DeviceEncryptionKeyStore.Keypair(sk, pk)
+    }
+
+    override fun clear() {
+        securePrefs.remove(KEY_PRIVATE)
+        securePrefs.remove(KEY_PUBLIC)
+    }
+
+    private companion object {
+        const val KEY_PRIVATE = "syncler.v2.device.x25519_private"
+        const val KEY_PUBLIC = "syncler.v2.device.x25519_public"
+    }
+}
+
+
+@Module
+@InstallIn(SingletonComponent::class)
+abstract class DeviceEncryptionKeyStoreModule {
+
+    @dagger.Binds
+    @Singleton
+    abstract fun bindDeviceEncryptionKeyStore(
+        impl: SecurePrefsDeviceEncryptionKeyStore,
+    ): DeviceEncryptionKeyStore
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 468ms:
+package app.syncler.core.crypto
+
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Test
+
+/**
+ * Phase 9b HPKE cross-platform vector. The bytes below were
+ * generated by the server-side PyCA implementation
+ * (`server/app/crypto/hpke.py`); Android MUST recover the same
+ * CEK and payload using BC's HPKE primitives. If this test
+ * fails, the cross-platform invariant is broken and senders'
+ * messages won't decrypt on Android.
+ */
+class HpkeTest {
+
+    @Test
+    fun crossPlatformVector_opens_cek_and_decrypts_payload() {
+        val sk = hexBytes("0001020304050607080910111213141516171819202122232425262728293031")
+        val pk = hexBytes("c1e0c8f5681ecdbdfeed4aaa5499ce9754d0f4719a9e0c1781cd78fed23da714")
+        val expectedCek = hexBytes("11".repeat(32))
+        val info = hexBytes(
+            "7b226465766963655f6964223a2234343434343434342d343434342d343434342d343434342d343434343434343434343434222c22656e76656c6f70655f6b696e64223a226576656e74222c22657870697265735f6174223a22323032362d30362d30315430303a30303a30305a222c226d696e5f706c7567696e5f76657273696f6e223a22222c227061796c6f61645f636970686572746578745f736861323536223a2232336639633435366439353035643337373339653233353865326638306362353534396264363866303332616131663737613334663831336137303233383531222c227061796c6f61645f6e6f6e6365223a2241414141414141414141414141414141222c22706c7567696e5f6964223a2233333333333333332d333333332d333333332d333333332d333333333333333333333333222c2270726f746f636f6c5f76657273696f6e223a322c2273656e6465725f6964223a2231313131313131312d313131312d313131312d313131312d313131313131313131313131222c22757365725f6964223a2232323232323232322d323232322d323232322d323232322d323232323232323232323232227d"
+        )
+        val hpkeKemOutput = hexBytes("11d2932fa315ed4aecc98b8d7cc3a6fc71e486305ffb2c032d9ff5bc7969fc4e")
+        val hpkeCiphertext = hexBytes("dc0026d224313589a5cdd3210e49270c34a39631fa6143e0fcb0dac3819f5ae265b88683b834861c152fa78924158a4d")
+        val payloadCiphertext = hexBytes("acaf720b8e8ffeeb6e69ce28ab9ebbfb970ffdf36e354a2cf8f67cf550df066c39c8648e")
+        val payloadAad = hexBytes(
+            "7b22656e76656c6f70655f6b696e64223a226576656e74222c22657870697265735f6174223a22323032362d30362d30315430303a30303a30305a222c226d696e5f706c7567696e5f76657273696f6e223a22222c22706c7567696e5f6964223a2233333333333333332d333333332d333333332d333333332d333333333333333333333333222c2270726f746f636f6c5f76657273696f6e223a322c2273656e6465725f6964223a2231313131313131312d313131312d313131312d313131312d313131313131313131313131222c22757365725f6964223a2232323232323232322d323232322d323232322d323232322d323232323232323232323232227d"
+        )
+        val payloadNonce = ByteArray(12) // all zeros
+
+        val recoveredCek = Hpke.openCekForDevice(
+            privateKeyRaw = sk,
+            hpkeKemOutput = hpkeKemOutput,
+            hpkeCiphertext = hpkeCiphertext,
+            info = info,
+        )
+        assertArrayEquals(
+            "Recovered CEK must equal the sender-side CEK",
+            expectedCek, recoveredCek,
+        )
+
+        // AES-256-GCM decrypt the payload using the recovered CEK +
+        // payload_nonce + payload_aad.
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(recoveredCek, "AES"),
+            GCMParameterSpec(128, payloadNonce),
+        )
+        cipher.updateAAD(payloadAad)
+        val plaintext = cipher.doFinal(payloadCiphertext)
+        assertArrayEquals(
+            "Payload plaintext must match the sender's input",
+            "hello cross-platform".toByteArray(Charsets.UTF_8), plaintext,
+        )
+    }
+
+    @Test
+    fun generateKeypair_returns_32_byte_components() {
+        val (sk, pk) = Hpke.generateX25519Keypair()
+        assertEquals(32, sk.size)
+        assertEquals(32, pk.size)
+    }
+
+    @Test
+    fun sha256Hex_is_lowercase_64_chars() {
+        val digest = Hpke.sha256Hex("".toByteArray())
+        assertEquals(64, digest.length)
+        assertEquals(digest, digest.lowercase())
+        assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", digest)
+    }
+
+    private fun hexBytes(hex: String): ByteArray {
+        require(hex.length % 2 == 0) { "hex length must be even" }
+        return ByteArray(hex.length / 2) { i ->
+            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 487ms:
+                authSaltB64 = authSaltB64,
+            )
+            val encryptedMasterKey = MasterKey.wrap(
+                masterKey = masterKey,
+                masterKeyWrapKey = keys.masterKeyWrapKey,
+                aad = mkWrapAad,
+            )
+            api.signup(
+                SignupRequest(
+                    email = normalizedEmail,
+                    authKeyHash = keys.authKey.toBase64(),
+                    encryptedMasterKey = encryptedMasterKey.toBase64(),
+                    authSalt = authSaltB64,
+                    argon2ParamsVersion = KeyDerivation.PARAMS_VERSION,
+                    userId = userId,
+                ),
+            )
+
+            val loginResult = login(normalizedEmail, password).getOrThrow()
+            SignupResult(userId = loginResult.userId)
+        } finally {
+            masterKey.fill(0)
+            keys.authKey.fill(0)
+            keys.masterKeyWrapKey.fill(0)
+        }
+    }
+
+    suspend fun login(email: String, password: CharArray): Result<LoginResult> = runCatching {
+        val normalizedEmail = normalizedEmail(email)
+        val preLogin = api.preLogin(PreLoginRequest(email = normalizedEmail))
+        require(preLogin.argon2ParamsVersion == KeyDerivation.PARAMS_VERSION) {
+            "Unsupported Argon2 params version: ${preLogin.argon2ParamsVersion}"
+        }
+        val salt = preLogin.authSalt.base64ToBytes()
+        val keys = withContext(Dispatchers.Default) {
+            KeyDerivation.derive(password, salt)
+        }
+        val response = api.login(
+            LoginRequest(
+                email = normalizedEmail,
+                authKeyHash = keys.authKey.toBase64(),
+            ),
+        )
+        require(response.argon2ParamsVersion == KeyDerivation.PARAMS_VERSION) {
+            "Unsupported Argon2 params version: ${response.argon2ParamsVersion}"
+        }
+        // Phase 8 ?10.10 ‚?" downgrade defense. BEFORE we unwrap the MK
+        // (which would silently succeed under a stale generation),
+        // the server-returned key_generation MUST be >= our locally-
+        // persisted high-water mark for this user. Otherwise the
+        // server returned a stale wrapped MK + state, and the client
+        // would happily operate on a frozen snapshot.
+        keyGenerationStore.verifyAndBump(
+            userId = response.userId,
+            observed = response.keyGeneration,
+            source = "login",
+        )
+        // Phase 8d ?10.9 ‚?" unwrap with the same AAD shape the
+        // wrapper used at signup / rotation: (auth_salt_b64, user_id).
+        val mkUnwrapAad = RotationAad.masterKeyWrap(
+            userId = response.userId,
+            authSaltB64 = response.authSalt,
+        )
+        val masterKey = MasterKey.unwrap(
+            response.encryptedMasterKey.base64ToBytes(),
+            keys.masterKeyWrapKey,
+            aad = mkUnwrapAad,
+        )
+        try {
+            // Enroll the device using the bootstrap token directly. We do
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 491ms:
+router = APIRouter(tags=["cards"])
+
+
+@router.post("/upsert", status_code=status.HTTP_201_CREATED, response_model=LiveCardInboxItemV2)
+async def upsert(
+    payload: LiveCardUpsertRequestV2,
+    request: Request,
+    _: None = Depends(rate_limit("card_upsert_ip")),
+    db: AsyncSession = Depends(get_db),
+) -> LiveCardInboxItemV2:
+    """Phase 9b V2 live-card upsert (spec ?11.5)."""
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    envelope_bytes = build_live_card_upsert_envelope_bytes(payload)
+    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature"
+        )
+
+    request.state.sender_id = str(payload.sender_id)
+    request.state.user_id = str(payload.user_id)
+    request.state.card_key = payload.card_key
+    from app.middleware.rate_limit import check_rate_limit
+    from app.middleware.rate_limit_config import RATE_LIMITS
+    await check_rate_limit(db, request, RATE_LIMITS["card_upsert"])
+
+    payload_nonce_bytes = decode_base64(
+        payload.payload_nonce, field_name="payload_nonce", exact=12
+    )
+    if not await record_nonce_or_reject(db, payload.sender_id, payload_nonce_bytes):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used")
+
+    classification = await classify_recipient_set(
+        db,
+        user_id=payload.user_id,
+        recipient_envelopes=payload.recipient_envelopes,
+        sender_directory_version=payload.recipient_directory_version,
+    )
+    if isinstance(classification, RecipientSetError):
+        if classification.http_status == 409:
+            body = StaleRecipientSetError(
+                message=classification.message,
+                current_directory_version=classification.current_directory_version,
+                missing_device_ids=classification.missing_device_ids,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=body.model_dump(mode="json"),
+                headers={
+                    "X-Stale-Directory-Version": str(classification.current_directory_version),
+                },
+            )
+        raise HTTPException(
+            status_code=classification.http_status,
+            detail={
+                "error": classification.code,
+                "message": classification.message,
+                "current_directory_version": classification.current_directory_version,
+            },
+        )
+
+    try:
+        card = await upsert_live_card_v2(db, payload=payload)
+    except PluginInactiveError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except PairingMissingError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except ExpiredEnvelopeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except SequenceNumberRegressionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+    plugin_row = await db.execute(
+        sql_select(Plugin.plugin_identifier).where(Plugin.id == card.plugin_id)
+    )
+    identifier = plugin_row.scalar_one_or_none() or ""
+
+    fields = parse_v2_pointer(card.encrypted_body_pointer)
+    item = LiveCardInboxItemV2(
+        id=card.id,
+        sender_id=card.sender_id,
+        plugin_id=card.plugin_id,
+        plugin_identifier=identifier,
+        min_plugin_version=card.min_plugin_version,
+        card_key=card.card_key,
+        card_type=card.card_type,
+        sequence_number=card.sequence_number,
+        payload_nonce=fields.payload_nonce,
+        payload_ciphertext=fields.payload_ciphertext,
+        recipient_envelopes=[RecipientEnvelopeWire(**env) for env in fields.recipient_envelopes],
+        recipient_directory_version=fields.recipient_directory_version,
+        envelope_signature=fields.envelope_signature,
+        updated_at=card.updated_at,
+        expires_at=card.expires_at,
+    )
+
+    await get_event_bus().publish_to_user(
+        user_id=card.user_id,
+        event_type="card.upsert",
+        data=item.model_dump(mode="json"),
+    )
+    return item
+
+
+@router.post("/delete", status_code=status.HTTP_204_NO_CONTENT)
+async def delete(
+    payload: LiveCardDeleteRequestV2,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Phase 9b V2 live-card delete (spec ?11.6).
+
+    Delete envelope adds `plugin_id` over V1; the lookup now scopes by
+    `(sender_id, user_id, plugin_id, card_key)` so a captured delete
+    can't replay against a different plugin's card with the same
+    `card_key`.
+    """
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    envelope_bytes = build_live_card_delete_envelope_bytes(payload)
+    signature = decode_base64(payload.envelope_signature, field_name="envelope_signature", exact=64)
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature"
+        )
+
+    # Same freshness + replay rules as the upsert path.
+    now = datetime.now(UTC)
+    if payload.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="expires_at is not in the future"
+        )
+    if payload.expires_at > now + MAX_TTL:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"expires_at exceeds the {int(MAX_TTL.total_seconds() // 3600)}h live-card cap"
+            ),
+        )
+    nonce_bytes = decode_base64(payload.nonce, field_name="nonce", exact=12)
+    if not await record_nonce_or_reject(db, payload.sender_id, nonce_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="nonce already used"
+        )
+
+    await delete_live_card_v2(
+        db,
+        sender_id=payload.sender_id,
+        user_id=payload.user_id,
+        plugin_id=payload.plugin_id,
+        card_key=payload.card_key,
+    )
+    # The service only commits when a row was actually deleted. The
+    # nonce row we just recorded needs an explicit commit either way
+    # so a replay-stalled-by-no-such-card path doesn't leak the nonce
+    # back via rollback. Same close-the-replay-gap argument as V1
+    # Phase 12.
+    await db.commit()
+
+    await get_event_bus().publish_to_user(
+        user_id=payload.user_id,
+        event_type="card.delete",
+        data={
+            "sender_id": str(payload.sender_id),
+            "plugin_id": str(payload.plugin_id),
+            "card_key": payload.card_key,
+        },
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Path android\\core\\auth\\src\\main\\kotlin\\app\\syncler\\core\\auth\\AuthRepository.kt | Select-Object -Skip 150 -First 75" in D:\Projects\syncler
+ succeeded in 382ms:
+            userId = response.userId,
+            authSaltB64 = response.authSalt,
+        )
+        val masterKey = MasterKey.unwrap(
+            response.encryptedMasterKey.base64ToBytes(),
+            keys.masterKeyWrapKey,
+            aad = mkUnwrapAad,
+        )
+        try {
+            // Enroll the device using the bootstrap token directly. We do
+            // NOT call session.authenticate first because that would
+            // briefly publish an unlocked Session carrying the user-only
+            // bootstrap token. Observers (UserStateRepository pull, inbox
+            // refresh on resume) could fire requests against sensitive
+            // routes in that window and get 401 device_required (Codex
+            // consultation 51 YELLOW #4).
+            //
+            // Pass the bootstrap token via @Header on enrollDevice; the
+            // auth interceptor honors a pre-set Authorization header
+            // instead of overwriting it.
+            // Phase 9b ?11.12: enroll sends BOTH the Ed25519 device-bound
+            // JWT pubkey AND the X25519 HPKE encryption pubkey. The
+            // X25519 keypair is generated + persisted on first call to
+            // DeviceEncryptionKeyStore.getOrCreateKeypair().
+            val encryptionKeypair = deviceEncryptionKeyStore.getOrCreateKeypair()
+            val enrollResponse = api.enrollDevice(
+                authHeader = "Bearer ${response.sessionToken}",
+                body = DeviceEnrollRequest(
+                    publicKey = deviceKeyProvider.publicKey().toBase64(),
+                    encryptionPublicKey = encryptionKeypair.publicKey.toBase64(),
+                ),
+            )
+            deviceIdentityStore.write(enrollResponse.deviceId)
+            // Single atomic transition: locked ‚+' unlocked WITH the
+            // device-bound token already installed. No observer ever
+            // sees the bootstrap token in an unlocked session.
+            session.authenticate(
+                token = enrollResponse.sessionToken,
+                masterKey = masterKey,
+                // Phase 8 ‚?" every state-mutating call needs to know
+                // the current generation. The Session is the canonical
+                // in-memory source.
+                keyGeneration = response.keyGeneration,
+                // Phase 8 ‚?" cache the salt + wrapped MK so the
+                // "Change password" flow can re-rewrap without
+                // bouncing through pre-login ‚+' login again.
+                authSalt = salt,
+                encryptedMasterKey = response.encryptedMasterKey.base64ToBytes(),
+            )
+
+            // Phase 1 legacy migration with explicit ownership proof.
+            // Fetches the server-side pairing list (scoped to the user
+            // we just authenticated) and asks the PairedSenderStore to
+            // import only legacy local entries whose pairingId is
+            // server-recognized for THIS user. Closes the multi-user
+            // race Codex flagged in consultation 54.
+            //
+            // Network failure or no-op (no legacy + already migrated)
+            // is silently swallowed; the store's phase1MigrationDoneAt
+            // gate is idempotent so we retry harmlessly on next login.
+            runCatching {
+                val owned = api.listPairings()
+                    .filter { it.revokedAt == null }
+                    .map { it.id }
+                    .toSet()
+                pairedSenderStore.migratePhase1Owned(owned)
+            }.onFailure { Timber.tag("AuthRepo").w(it, "phase 1 migration deferred") }
+        } finally {
+            masterKey.fill(0)
+            keys.authKey.fill(0)
+            keys.masterKeyWrapKey.fill(0)
+        }
+        LoginResult(userId = response.userId)
+    }
+
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"LiveCardDeleteRequest\\b|LiveCardDeleteRequestV2\\b|payload: LiveCardDeleteRequestV2\" server\\app\\schemas.py server\\app\\routers\\cards.py" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"cryptography\" server\\pyproject.toml sdk-python\\pyproject.toml" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"get_live_cards_for_user|live_cards = await get_live_cards_for_user|response.nextSince|decrypted == null|ownEnvelope == null|envelopeSignature|recipientEnvelopes\" server\\app\\services\\cards.py server\\app\\routers\\messages.py android\\feature\\inbox\\src\\main\\kotlin\\app\\syncler\\feature\\inbox\\InboxRepository.kt android\\core\\network\\src\\main\\kotlin\\app\\syncler\\core\\network\\SynclerApi.kt" in D:\Projects\syncler
+ succeeded in 323ms:
+server\app\routers\cards.py:15:    LiveCardDeleteRequestV2,
+server\app\routers\cards.py:160:    payload: LiveCardDeleteRequestV2,
+server\app\schemas.py:255:class LiveCardDeleteRequest(BaseModel):
+server\app\schemas.py:1183:class LiveCardDeleteRequestV2(BaseModel):
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 324ms:
+sdk-python\pyproject.toml:8:    "cryptography==45.0.3",
+server\pyproject.toml:16:    "cryptography>=48.0.0",
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 321ms:
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:336:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:338:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:358:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:360:    @Json(name = "envelope_signature") val envelopeSignature: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:381:    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:383:    @Json(name = "envelope_signature") val envelopeSignature: String,
+server\app\services\cards.py:192:async def get_live_cards_for_user(
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:107:                if (decrypted == null) {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:161:                response.nextSince?.let { lastSince = it }
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:365:     * device's recipient_envelope in `dto.recipientEnvelopes`,
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:507:        val ownEnvelope = dto.recipientEnvelopes.firstOrNull {
+android\feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:510:        if (ownEnvelope == null) {
+server\app\routers\messages.py:34:from app.services.cards import get_live_cards_for_user
+server\app\routers\messages.py:191:    live_cards = await get_live_cards_for_user(db, user_id=ctx.user.id)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+**Verdict: RED for Phase 9 close-out.**
+
+Blocking item: Android does not verify the V2 Ed25519 envelope signature before displaying decrypted payloads. Because HPKE base mode is not sender-authenticated, a malicious server with the device’s public encryption key can seal a new CEK/payload to the device and claim any `sender_id`. Server-side ingress verification does not protect against this recipient-side threat. This is core §11.8 compliance, not polish.
+
+Second serious item: decrypt failures are silently dropped, but `lastSince` still advances when there was no missing pairing ([InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:107), [line 161](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:161)). A transient/corrupt/key-mismatch event can be permanently skipped from normal polling. I would fix this before close-out too, either by holding the cursor on any event decrypt failure or surfacing a durable failed item.
+
+**Answers**
+
+1. Yes, surface decrypt failure, or at minimum retain retry visibility. For events, do not advance `lastSince` on HPKE/AES failure. “No message” is too silent for key rotation gaps and data corruption.
+
+2. Block before close-out. Add recipient-side Ed25519 verification over the full canonical V2 envelope before trusting/displaying plaintext. The DTO already carries `envelope_signature` ([SynclerApi.kt](D:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/SynclerApi.kt:383)); the missing piece is reconstructing the signed bytes and verifying against the trusted paired sender public key.
+
+3. Worth adding as an explicit diagnostic, but not a cryptographic blocker by itself because `firstOrNull` already fails closed ([InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:507)). Note: live cards are still fetched user-wide, not device-filtered ([messages.py](D:/Projects/syncler/server/app/routers/messages.py:191), [cards.py](D:/Projects/syncler/server/app/services/cards.py:192)), so newly enrolled devices can still receive undecryptable live-card rows and drop them.
+
+4. I would pin server `cryptography` to `<49` for Phase 9 stability. Current server is loose `cryptography>=48.0.0`; SDK is already pinned. The vector test will catch drift, but pinning avoids surprise breakage during unrelated installs.
+
+5. Delete old `LiveCardDeleteRequest` during Phase 9c/V1 cleanup, not as a close-out blocker. Runtime routing uses `LiveCardDeleteRequestV2` ([cards.py](D:/Projects/syncler/server/app/routers/cards.py:160)); the V1 class is dead schema clutter.
+tokens used
+65,028
+**Verdict: RED for Phase 9 close-out.**
+
+Blocking item: Android does not verify the V2 Ed25519 envelope signature before displaying decrypted payloads. Because HPKE base mode is not sender-authenticated, a malicious server with the device’s public encryption key can seal a new CEK/payload to the device and claim any `sender_id`. Server-side ingress verification does not protect against this recipient-side threat. This is core §11.8 compliance, not polish.
+
+Second serious item: decrypt failures are silently dropped, but `lastSince` still advances when there was no missing pairing ([InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:107), [line 161](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:161)). A transient/corrupt/key-mismatch event can be permanently skipped from normal polling. I would fix this before close-out too, either by holding the cursor on any event decrypt failure or surfacing a durable failed item.
+
+**Answers**
+
+1. Yes, surface decrypt failure, or at minimum retain retry visibility. For events, do not advance `lastSince` on HPKE/AES failure. “No message” is too silent for key rotation gaps and data corruption.
+
+2. Block before close-out. Add recipient-side Ed25519 verification over the full canonical V2 envelope before trusting/displaying plaintext. The DTO already carries `envelope_signature` ([SynclerApi.kt](D:/Projects/syncler/android/core/network/src/main/kotlin/app/syncler/core/network/SynclerApi.kt:383)); the missing piece is reconstructing the signed bytes and verifying against the trusted paired sender public key.
+
+3. Worth adding as an explicit diagnostic, but not a cryptographic blocker by itself because `firstOrNull` already fails closed ([InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:507)). Note: live cards are still fetched user-wide, not device-filtered ([messages.py](D:/Projects/syncler/server/app/routers/messages.py:191), [cards.py](D:/Projects/syncler/server/app/services/cards.py:192)), so newly enrolled devices can still receive undecryptable live-card rows and drop them.
+
+4. I would pin server `cryptography` to `<49` for Phase 9 stability. Current server is loose `cryptography>=48.0.0`; SDK is already pinned. The vector test will catch drift, but pinning avoids surprise breakage during unrelated installs.
+
+5. Delete old `LiveCardDeleteRequest` during Phase 9c/V1 cleanup, not as a close-out blocker. Runtime routing uses `LiveCardDeleteRequestV2` ([cards.py](D:/Projects/syncler/server/app/routers/cards.py:160)); the V1 class is dead schema clutter.

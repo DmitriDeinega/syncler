@@ -211,6 +211,77 @@ object V2Aad {
         ),
     )
 
+    /**
+     * Phase 9b §11.8: canonical bytes the sender signed for an event
+     * publish. The Android client reconstructs this from the V2 inbox
+     * DTO and verifies the Ed25519 signature against the trusted
+     * paired sender's public key BEFORE displaying the decrypted
+     * payload — without this verification a malicious server could
+     * forge envelopes using the device's public encryption key.
+     *
+     * `recipient_envelopes` MUST be sorted by lowercase device_id
+     * (the same order the server's `_serialize_recipient_envelopes`
+     * produces); the client passes the already-sorted list.
+     */
+    fun eventSignedEnvelopeBytes(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        expiresAt: String,
+        minPluginVersion: String,
+        payloadNonceB64: String,
+        payloadCiphertextB64: String,
+        recipientEnvelopesSerialized: List<Map<String, String>>,
+        recipientDirectoryVersion: Long,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "envelope_kind" to "event",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "payload_ciphertext" to payloadCiphertextB64,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "recipient_directory_version" to recipientDirectoryVersion,
+            "recipient_envelopes" to recipientEnvelopesSerialized,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Spec §11.8: canonical bytes for live_card_upsert. */
+    fun liveCardUpsertSignedEnvelopeBytes(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardKey: String,
+        cardType: String,
+        sequenceNumber: Long,
+        expiresAt: String,
+        minPluginVersion: String,
+        payloadNonceB64: String,
+        payloadCiphertextB64: String,
+        recipientEnvelopesSerialized: List<Map<String, String>>,
+        recipientDirectoryVersion: Long,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to cardType,
+            "envelope_kind" to "live_card_upsert",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "payload_ciphertext" to payloadCiphertextB64,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "recipient_directory_version" to recipientDirectoryVersion,
+            "recipient_envelopes" to recipientEnvelopesSerialized,
+            "sender_id" to senderId,
+            "sequence_number" to sequenceNumber,
+            "user_id" to userId,
+        ),
+    )
+
     /** Per-recipient HPKE info for live_card_upsert per spec §11.3. */
     fun liveCardHpkeInfo(
         senderId: String,
@@ -244,15 +315,24 @@ object V2Aad {
 }
 
 internal fun canonicalJsonBytes(fields: Map<String, Any>): ByteArray =
-    fields.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
-        val encodedValue = when (value) {
-            is Int -> value.toString()
-            is Long -> value.toString()
-            is String -> "\"${value.jsonEscape()}\""
-            else -> error("unsupported AAD value type: ${value::class.simpleName}")
+    encodeCanonicalValue(fields).encodeToByteArray()
+
+private fun encodeCanonicalValue(value: Any): String = when (value) {
+    is Int -> value.toString()
+    is Long -> value.toString()
+    is String -> "\"${value.jsonEscape()}\""
+    is Map<*, *> -> {
+        @Suppress("UNCHECKED_CAST")
+        val map = value as Map<String, Any>
+        map.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (k, v) ->
+            "\"$k\":${encodeCanonicalValue(v)}"
         }
-        "\"$key\":$encodedValue"
-    }.encodeToByteArray()
+    }
+    is List<*> -> value.joinToString(prefix = "[", postfix = "]", separator = ",") { item ->
+        encodeCanonicalValue(item ?: error("null in canonical list"))
+    }
+    else -> error("unsupported canonical JSON value type: ${value::class.simpleName}")
+}
 
 private fun String.jsonEscape(): String = buildString {
     for (char in this@jsonEscape) {

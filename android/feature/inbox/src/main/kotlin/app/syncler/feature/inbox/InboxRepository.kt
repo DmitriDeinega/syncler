@@ -4,6 +4,7 @@ import app.syncler.core.auth.DeviceIdentityStore
 import app.syncler.core.auth.Session
 import app.syncler.core.crypto.Aead
 import app.syncler.core.crypto.Hpke
+import app.syncler.core.crypto.Signing
 import app.syncler.core.crypto.V2Aad
 import app.syncler.core.crypto.base64ToBytes
 import app.syncler.core.network.InboxFeedItemDto
@@ -89,12 +90,33 @@ class InboxRepository @Inject constructor(
             val pairingsBySender = pairedSenderStore.pairedSenders.value.groupBy { it.senderId }
 
             var sawMissingPairing = false
+            // Triad 129 (Codex RED #2): if ANY event message fails
+            // decrypt, hold the cursor at lastSince so the next poll
+            // re-fetches it. Live cards aren't cursor-tracked
+            // (they're fetched whole each poll) so this only affects
+            // event flow.
+            var sawDecryptFailure = false
 
             val newDecrypted = response.items.mapNotNull { dto ->
                 val candidates = pairingsBySender[dto.senderId].orEmpty()
                 if (candidates.isEmpty()) {
                     Timber.tag(TAG).w("no paired sender for senderId=%s; skipping", dto.senderId)
                     sawMissingPairing = true
+                    return@mapNotNull null
+                }
+
+                // Triad 129 (Codex RED #1, spec §11.8): verify the
+                // Ed25519 envelope signature against the trusted
+                // paired sender's public key BEFORE consulting any
+                // unsigned envelope field. Without this a malicious
+                // server holding the device's public encryption key
+                // could forge messages with any claimed sender_id.
+                if (!verifyV2Signature(dto, candidates)) {
+                    Timber.tag(TAG).w(
+                        "rejected V2 envelope %s for sender %s: bad signature",
+                        dto.id, dto.senderId,
+                    )
+                    if (dto.envelopeKind != "live_card_upsert") sawDecryptFailure = true
                     return@mapNotNull null
                 }
 
@@ -109,6 +131,7 @@ class InboxRepository @Inject constructor(
                         "could not decrypt %s %s from sender %s",
                         dto.envelopeKind, dto.id, dto.senderId,
                     )
+                    if (dto.envelopeKind != "live_card_upsert") sawDecryptFailure = true
                     return@mapNotNull null
                 }
 
@@ -152,10 +175,10 @@ class InboxRepository @Inject constructor(
                         .thenByDescending { it.id },
                 )
             }
-            if (sawMissingPairing) {
+            if (sawMissingPairing || sawDecryptFailure) {
                 Timber.tag(TAG).w(
-                    "holding lastSince at %s ג€” at least one item had no pairing candidate; will re-fetch next refresh once pairings sync",
-                    lastSince,
+                    "holding lastSince at %s — sawMissingPairing=%s, sawDecryptFailure=%s; will re-fetch next refresh",
+                    lastSince, sawMissingPairing, sawDecryptFailure,
                 )
             } else {
                 response.nextSince?.let { lastSince = it }
@@ -486,6 +509,71 @@ class InboxRepository @Inject constructor(
             template = null,
             hostPreview = HostPreviewParser.parse(plaintextString),
         )
+    }
+
+    /**
+     * Phase 9b §11.8 + Triad 129 (Codex RED #1) — verify the
+     * Ed25519 envelope signature against the trusted paired
+     * sender's public key. MUST run before any other envelope
+     * field is consulted for routing / HPKE info reconstruction.
+     *
+     * Returns true only if the signature is valid for any of the
+     * paired sender records. Wraps in runCatching so a malformed
+     * signature/key never bubbles up as a crash; the inbox refresh
+     * just drops the bad item.
+     */
+    private fun verifyV2Signature(
+        dto: InboxFeedItemDto,
+        candidates: List<PairedSender>,
+    ): Boolean {
+        val signatureBytes = runCatching { dto.envelopeSignature.base64ToBytes() }.getOrNull() ?: return false
+        val sortedRecipients = dto.recipientEnvelopes
+            .map { mapOf(
+                "device_id" to it.deviceId.lowercase(),
+                "hpke_ciphertext" to it.hpkeCiphertext,
+                "hpke_kem_output" to it.hpkeKemOutput,
+            ) }
+            .sortedBy { it.getValue("device_id") }
+
+        val canonicalBytes: ByteArray = when (dto.envelopeKind) {
+            "event" -> V2Aad.eventSignedEnvelopeBytes(
+                senderId = dto.senderId,
+                userId = session.currentUserId() ?: return false,
+                pluginId = dto.pluginId,
+                expiresAt = dto.expiresAt,
+                minPluginVersion = dto.minPluginVersion ?: "",
+                payloadNonceB64 = dto.payloadNonce,
+                payloadCiphertextB64 = dto.payloadCiphertext,
+                recipientEnvelopesSerialized = sortedRecipients,
+                recipientDirectoryVersion = dto.recipientDirectoryVersion,
+            )
+            "live_card_upsert" -> V2Aad.liveCardUpsertSignedEnvelopeBytes(
+                senderId = dto.senderId,
+                userId = session.currentUserId() ?: return false,
+                pluginId = dto.pluginId,
+                cardKey = dto.cardKey ?: return false,
+                cardType = dto.cardType ?: return false,
+                sequenceNumber = dto.sequenceNumber ?: return false,
+                expiresAt = dto.expiresAt,
+                minPluginVersion = dto.minPluginVersion ?: "",
+                payloadNonceB64 = dto.payloadNonce,
+                payloadCiphertextB64 = dto.payloadCiphertext,
+                recipientEnvelopesSerialized = sortedRecipients,
+                recipientDirectoryVersion = dto.recipientDirectoryVersion,
+            )
+            else -> return false  // unknown envelope_kind
+        }
+
+        // Try every paired sender record's public key — a sender
+        // pairing rotation could leave multiple active records;
+        // any matching verify passes. The senderId on the DTO
+        // already narrowed the candidate list to records for that
+        // sender, so this is a no-op in steady state.
+        return candidates.any { paired ->
+            runCatching {
+                Signing.verify(paired.senderPublicKey, canonicalBytes, signatureBytes)
+            }.getOrDefault(false)
+        }
     }
 
     /**
