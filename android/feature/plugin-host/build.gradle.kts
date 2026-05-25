@@ -38,6 +38,8 @@ dependencies {
     implementation(project(":core:crypto"))
     implementation(project(":core:storage"))
     implementation(project(":core:network"))
+    // Phase 10b: AIDL stubs the host uses to bind PluginSandboxService.
+    implementation(project(":core:plugin-aidl"))
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.material3)
