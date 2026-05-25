@@ -69,6 +69,10 @@ dependencies {
     implementation(project(":feature:inbox"))
     implementation(project(":feature:pairing"))
     implementation(project(":feature:plugin-host"))
+    // Phase 10b (Codex 117 #1): the :app APK must package the
+    // sandbox module so PluginSandboxService is reachable by name
+    // when PluginSandboxConnection.bindService() fires.
+    implementation(project(":feature:plugin-sandbox"))
     implementation(project(":feature:settings"))
 
     implementation(platform(libs.androidx.compose.bom))

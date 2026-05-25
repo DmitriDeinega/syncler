@@ -61,6 +61,18 @@ class SandboxRouter(
      */
     suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
         val sandbox = connection.acquire()
+        // Triad 117: pre-register the handle BEFORE the AIDL call so
+        // a synchronous-or-oneway callback firing mid-load doesn't
+        // arrive at the stub with no handle visible. On failure we
+        // remove the handle in the catch — `releaseHandle` is
+        // idempotent so a late `onPluginUnloaded` from the sandbox's
+        // synchronous load-fail teardown won't double-release.
+        val handle = SandboxHandle(
+            sandboxToken = parcel.sandboxToken,
+            pluginId = parcel.pluginId,
+            router = this,
+        )
+        handles[parcel.sandboxToken] = handle
         try {
             val callback = PluginHostCallbackStub(parcel.sandboxToken)
             val returnedToken = sandbox.loadPlugin(parcel, callback)
@@ -68,16 +80,14 @@ class SandboxRouter(
                 "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
                     "${parcel.sandboxToken} — fatal sandbox bug"
             }
-            val handle = SandboxHandle(
-                sandboxToken = parcel.sandboxToken,
-                pluginId = parcel.pluginId,
-                router = this,
-            )
-            handles[parcel.sandboxToken] = handle
             return handle
         } catch (exc: Throwable) {
-            // bindService succeeded but loadPlugin failed — release
-            // the connection ref so we don't leak.
+            // bindService succeeded but loadPlugin failed — undo
+            // the pre-registration + release the connection ref.
+            // If the sandbox's load-fail teardown fires a oneway
+            // onPluginUnloaded after this, releaseHandle's
+            // remove-returns-null guard skips the spurious release.
+            handles.remove(parcel.sandboxToken)
             connection.release()
             throw exc
         }
@@ -127,20 +137,46 @@ class SandboxRouter(
         }
     }
 
+    /**
+     * Idempotent release. Triad 117 finding (Codex #3, Gemini #3):
+     * only release when the handle is actually present in the map.
+     * A stray `onPluginUnloaded` for an unknown token (e.g. from
+     * the sandbox's sync load-fail teardown after the host catch
+     * block already cleaned up) must not over-release the
+     * connection ref count.
+     */
     private fun releaseHandle(sandboxToken: Int) {
-        handles.remove(sandboxToken)
-        scope.launch { connection.release() }
+        val removed = handles.remove(sandboxToken)
+        if (removed != null) {
+            scope.launch { connection.release() }
+        } else {
+            Timber.tag(TAG).w(
+                "releaseHandle for unknown token=%d — skipping release (idempotent guard)",
+                sandboxToken,
+            )
+        }
     }
 
+    /**
+     * Sandbox process died — `ServiceConnection.onServiceDisconnected`
+     * fired. Triad 117 (Codex #2, Gemini CRITICAL): every active
+     * handle leaked an `acquire()` that will never be balanced by
+     * the (now-impossible) `onPluginUnloaded`. We MUST release each
+     * one explicitly here, otherwise the ref count stays > 0 forever
+     * and the idle-unbind path can never fire on a future
+     * load → unload cycle.
+     */
     private fun handleSandboxDeath() {
-        // Snapshot + clear, then notify each handle's bridge
-        // dispatcher with a synthetic "plugin_crashed" so it can
-        // drain pending-callback maps.
+        // Snapshot + clear under the same operation. Each removed
+        // handle gets a paired connection.release() + a synthetic
+        // onPluginCrashed so the bridge dispatcher's pending-call
+        // maps can drain.
         val dead = handles.values.toList()
         handles.clear()
         dead.forEach { handle ->
             scope.launch {
                 bridgeDispatcher.onPluginCrashed(handle.sandboxToken, "process_died")
+                connection.release()
             }
         }
     }
@@ -175,17 +211,34 @@ class SandboxRouter(
         }
 
         override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onWebViewError for stale token=%d — dropping",
+                    sandboxToken,
+                )
+                return
+            }
             scope.launch { bridgeDispatcher.onWebViewError(sandboxToken, code, message) }
         }
 
         override fun onPluginReady(sandboxToken: Int) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onPluginReady for stale token=%d — dropping",
+                    sandboxToken,
+                )
+                return
+            }
             scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
         }
 
         override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+            // releaseHandle is idempotent — even if a stale crash
+            // fires after a successful unload, we won't double-
+            // release. Lifecycle dispatch still happens so callers
+            // get a "plugin gone" signal even for stale tokens
+            // (defensive — they may have stashed the token).
             scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
-            // Drop the handle proactively — onPluginCrashed implies
-            // the sandbox isn't going to fire onPluginUnloaded.
             releaseHandle(sandboxToken)
         }
 
