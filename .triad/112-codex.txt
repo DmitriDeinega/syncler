@@ -1,0 +1,11 @@
+1. Phase 12 fixups: **GREEN**
+No blocking items found. Delete helper shape, docstring, timezone-aware validation, and naive `expires_at` regression test line up with the server envelope.
+
+2. Phase 13: **YELLOW**
+Item: [server/app/routers/messages.py](D:/Projects/syncler/server/app/routers/messages.py:137) still maps `PairingMissingError` to **403**, while the Phase 13 description/spec says post-revoke sends get **410**. Cards do return 410 at [server/app/routers/cards.py](D:/Projects/syncler/server/app/routers/cards.py:122), but the normal message-send path does not. Security-wise the revoked pairing is still blocked because [server/app/services/messages.py](D:/Projects/syncler/server/app/services/messages.py:60) filters `Pairing.revoked_at.is_(None)`, but the protocol/status contract is not what the Phase 13 text claims.
+
+3. Anything missing
+Add/adjust a test that performs `root_compromise_rotation`, then attempts a sender-controlled `/v1/messages/send` using the old pairing and asserts the intended status, ideally 410, plus no message row persisted. The current new test proves rows are revoked, but not the externally visible sender behavior.
+
+4. Anything new
+No issue with SDK non-notification, CAS-before-revoke, or dead re-encrypted pairing ciphertext. I would not version `assemble_live_card_delete_envelope`; Phase 12 is the first spec-covered shape.
