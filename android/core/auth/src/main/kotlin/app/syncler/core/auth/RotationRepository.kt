@@ -345,8 +345,16 @@ class RotationRepository @Inject constructor(
             // can wipe them regardless of where we throw.
             var newWrapKey: ByteArray? = null
             var newAuthKey: ByteArray? = null
-            val newMasterKey = MasterKey.generate()
+            // Codex/Gemini 110 RED: MasterKey.generate() can throw
+            // (OOM, SecureRandom provider fault). If it runs OUTSIDE
+            // the try block, the finally never fires and
+            // statePlaintext leaks. Declare nullable here, allocate
+            // INSIDE the try below, null-check in cleanup. Inside
+            // the try the local `mk` aliases the non-null value so
+            // we don't lose smart-cast across lambda captures.
+            var newMasterKeyCleanup: ByteArray? = null
             try {
+                val newMasterKey: ByteArray = MasterKey.generate().also { newMasterKeyCleanup = it }
                 // Step 5 — fetch active pairings + each pairing's state.
                 val pairingList = api.listPairings().filter { it.revokedAt == null }
                 for (item in pairingList) {
@@ -508,8 +516,10 @@ class RotationRepository @Inject constructor(
                 // touched regardless of which step threw. Codex 109
                 // YELLOW + Gemini 109 YELLOW called this out: the
                 // previous inline `.fill(0)` was only reached on the
-                // happy path.
-                newMasterKey.fill(0)
+                // happy path. Codex/Gemini 110 RED additionally
+                // required MasterKey.generate() to live INSIDE the
+                // try so a throw there doesn't bypass cleanup.
+                newMasterKeyCleanup?.fill(0)
                 statePlaintext.fill(0)
                 snapshots.forEach { it.plaintext.fill(0) }
                 // Hygiene reuses currentKeys.masterKeyWrapKey for
