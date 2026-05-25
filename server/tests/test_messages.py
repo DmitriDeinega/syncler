@@ -198,6 +198,43 @@ async def test_send_message_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_send_returns_410_when_pairing_revoked(
+    app_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Phase 13 (Codex 112): after a pairing is revoked (e.g. by
+    root_compromise_rotation, or any direct revoke), the sender's
+    next send returns 410 Gone — NOT 403. Cards already returned
+    410; messages now matches. Sender SDK / docs expect the same
+    status across both surfaces.
+    """
+    user_id, session_token = await _signup_and_login(app_client)
+    await _enroll_device(app_client, session_token)
+    sender_id, private_key = await _register_sender(app_client)
+    plugin_id = await _seed_pairing_and_plugin(
+        db_session, user_id=user_id, sender_id=sender_id,
+    )
+    # Revoke the pairing directly (simulates the post-rotation state).
+    from sqlalchemy import update as sa_update
+    from datetime import UTC
+    await db_session.execute(
+        sa_update(Pairing)
+        .where(Pairing.user_id == user_id, Pairing.sender_id == sender_id)
+        .values(revoked_at=datetime.now(UTC)),
+    )
+    await db_session.commit()
+
+    body = await _send_payload(
+        sender_id=sender_id,
+        user_id=user_id,
+        plugin_id=plugin_id,
+        private_key=private_key,
+    )
+    response = await app_client.post("/v1/messages/send", json=body)
+    assert response.status_code == 410, response.text
+    assert "no active pairing" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_send_rejects_replayed_nonce(
     app_client: AsyncClient, db_session: AsyncSession
 ) -> None:

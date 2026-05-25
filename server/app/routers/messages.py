@@ -135,7 +135,13 @@ async def send_message(
     except ExpiredEnvelopeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except PairingMissingError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no active pairing") from exc
+        # Phase 13 (Codex 112): unify with /v1/cards/upsert which already
+        # uses 410 Gone. After root_compromise_rotation revokes every
+        # pairing, the legitimate sender's next send returns 410 and
+        # they re-pair from scratch. "Gone" is the right semantic — the
+        # pairing once existed; "Forbidden" would suggest the sender
+        # never had authorization.
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="no active pairing") from exc
     except PluginInactiveError as exc:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="plugin missing, revoked, or not owned by sender") from exc
     except NoActiveDeviceWithPluginError as exc:
