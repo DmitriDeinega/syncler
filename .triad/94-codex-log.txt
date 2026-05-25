@@ -1,0 +1,3218 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e5c8e-4b6a-7120-8768-f39577e378d7
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — READ THIS BEFORE DOING ANYTHING ELSE
+
+You are in REVIEW MODE. Your ONLY output is a text reply to the
+prompt below. You are FORBIDDEN from:
+
+  - Writing or editing ANY file (no write_file, no edit_file, no
+    str_replace, no create_file, no apply_diff).
+  - Running ANY shell command that mutates state (no git commit,
+    no git add, no git checkout, no git push, no git stash, no
+    mkdir, no pip install, no npm install, no rm, no mv, no touch,
+    no chmod).
+  - Creating or modifying ANY directory.
+
+You MAY use:
+  - read_file / cat / Get-Content
+  - grep / ripgrep / Select-String
+  - list_directory / ls / Get-ChildItem
+  - git status / git log / git diff / git show (read-only)
+
+Reply text only.
+=================================================================
+
+# Consultation 94 — Phase 6 code review (V1.5 DX follow-ups)
+
+Phase 6 plan reached dual-GREEN at consult 93 (Codex 93 YELLOW on
+Item B's localhost broker URL — folded into impl as the existing
+`SYNCLER_LAN_HOST` env-var pattern; rest GREEN). This consultation
+reviews the actual code.
+
+## Files changed
+
+### `sdk-python/syncler/broker_storage.py`
+- New `UnknownPairingIdError` exception class.
+- `BrokerStorage` Protocol now has `is_reserved(pairing_id) -> bool`.
+- `reserve()` semantic upgraded from "optional no-op" to real
+  pending-set tracking.
+- `complete()` raises `UnknownPairingIdError` if called for an
+  unreserved + uncompleted ID (defense-in-depth alongside the
+  broker handler's 404 gate).
+- `InMemoryBrokerStorage`:
+  - `_reserved: set[str]` added, locked under existing `_lock`.
+  - `reserve()` adds to set; idempotent.
+  - `is_reserved()` returns True if reserved OR completed (so
+    re-POSTs after completion get to the CAS layer, not bounced
+    as 404 — Gemini 93 + Codex 93 note).
+  - `complete()` first checks both `_reserved` and `_entries`;
+    raises `UnknownPairingIdError` if neither.
+- Doc-string updated: removed the "V1.5 fixed-config deviation"
+  language; pointer to Phase 6 registry semantics.
+- `__all__` includes `UnknownPairingIdError`.
+
+### `sdk-python/syncler/broker/app.py`
+- Imports `UnknownPairingIdError`.
+- Handler has a new pre-decrypt gate (after JSON parse + shape
+  validation, BEFORE base64 length checks + decrypt):
+  ```python
+  if not storage.is_reserved(body["pairing_id"]):
+      raise HTTPException(status_code=404, detail="pairing slot not found")
+  ```
+  Detail body is opaque — does NOT echo the requested `pairing_id`
+  (Codex 93).
+- `complete()` call wrapped to catch `UnknownPairingIdError` →
+  HTTP 404 with the same opaque message (race condition between
+  the gate and the call).
+- Module doc-string updated to add the 404 status, remove the
+  "V1.5 deviation" language, mention the registry as the gate.
+
+### `sdk-python/syncler/client.py`
+- No behavior change — the existing
+  `if sender_broker_url is not None and self._broker_storage is not None:
+      self._broker_storage.reserve(self._pending_pairing_id)`
+  block at line 188 already does the right thing per the new
+  Protocol. Verified by tests below.
+
+### `sdk-python/tests/test_broker_app.py`
+- Storage fixture now pre-reserves the canonical test
+  `_PAIRING_ID` so existing happy-path tests still work.
+- New `test_unreserved_pairing_id_returns_404_opaque`: builds a
+  cryptographically valid envelope for a different (unreserved)
+  pairing_id; asserts 404 + the body does NOT echo the ID.
+- New `test_replay_after_completion_does_not_404`: completes
+  once; re-POSTs; asserts is_reserved stays True after completion
+  and the second POST reaches the CAS layer (200, not 404).
+
+### `sdk-python/tests/test_bootstrap.py`
+- `test_in_memory_broker_storage_cas` extended: asserts
+  `complete()` on unreserved raises `UnknownPairingIdError`;
+  reserves first; asserts `is_reserved` stays True after
+  completion.
+- New `test_in_memory_broker_storage_reserve_idempotent`: covers
+  double-reserve, reserve-after-complete, and `is_reserved` for
+  an unknown ID returning False.
+- New `test_client_create_pairing_qr_reserves_pairing_id`: patches
+  `client.session.post` to return a known pairing_id; asserts
+  `storage.is_reserved(pairing_id)` is True after
+  `create_pairing_qr(sender_broker_url=...)`. Closes the Codex 93
+  missing-test item.
+- New `test_client_create_pairing_qr_does_not_reserve_without_broker_url`:
+  V1 manual-pairing path — no reserve when sender_broker_url is
+  None.
+
+### `examples/trading-bot/bot.py`
+- New module constants: `BOOTSTRAP_PRIV_FILE` (default
+  `~/.syncler/keys/trading-bot-bootstrap.bin`), `BROKER_PORT`
+  (default 8002 via `SYNCLER_BROKER_PORT`), `SENDER_BROKER_URL`
+  (default `http://${SYNCLER_LAN_HOST}:8002/` — matches the
+  existing ack-server convention; Codex 93 YELLOW addressed).
+- New `_load_or_create_bootstrap_keypair(state)`: idempotent;
+  persists raw X25519 private key to disk with 0600 best-effort
+  (Codex 93: noted the Windows ACL limitation in the doc-string +
+  README); persists pub hex to state.json.
+- New `_ensure_bootstrap_key_registered(client, state, pub_raw)`:
+  idempotent server registration; tracks `bootstrap_key_id_hex`
+  in state for rotation detection.
+- New `_start_broker_thread(priv, pub_raw, url, storage)`:
+  spawns uvicorn in a daemon thread of the bot's process so the
+  Client and the broker share `InMemoryBrokerStorage`. Fail-fast
+  port-bind check before spawn (Codex 93 hang-prevention). Waits
+  briefly for `server.started` so the device's POST doesn't race
+  startup.
+- `cmd_pair` rewritten:
+  1. Load/create bootstrap keypair.
+  2. Register bootstrap key if not already.
+  3. Build new Client with `InMemoryBrokerStorage`.
+  4. Start broker thread.
+  5. `create_pairing_qr(sender_broker_url=...)` — which calls
+     `storage.reserve(pairing_id)`.
+  6. Block on `wait_for_pairing(timeout_seconds=120)`.
+  7. Persist user_id + pairing_key_hex to state.json.
+  - On TimeoutError, prints fallback hint pointing at
+    `set-pairing`.
+- `cmd_set_pairing` preserved as V1 manual fallback with a
+  doc-string explaining when it's needed.
+- `cmd_loop` unchanged — still reads `user_id` + `pairing_key_hex`
+  from state.json; both automated and manual paths populate them.
+
+### `examples/trading-bot/README.md`
+- §3 rewritten to describe the new automated flow: bootstrap
+  keypair persistence, in-process broker, wait_for_pairing, with
+  Windows ACL caveat called out. `set-pairing` documented as the
+  V1 fallback.
+
+### `docs/crypto-spec.md` §9.3
+- "V1.5 deviation: fixed-config broker" subsection replaced with
+  "Single fixed `sender_broker_url` and the pending-pairing
+  registry" — explains the AAD-binding half is still satisfied
+  by the fixed URL, the "reject unknown pairing_id" half is now
+  enforced by the registry. V2 per-pairing-URLs are still listed
+  as deferred (separate from the registry work, which is now
+  shipped).
+
+### `docs/integration-guide.md`
+- §8 trailing pointer no longer says "the example still uses V1
+  manual pairing"; now describes the trading-bot as using the
+  automated flow with set-pairing as fallback.
+- §8.5 "Production hardening" callout rewritten: registry
+  multi-worker requirement (Client.reserve in one process must
+  be visible to broker.is_reserved in another), rate limiter
+  still mandatory as the CPU defense, link to crypto-spec §9.3.
+
+### `docs/ROADMAP.md` #7
+- Strikes the "example still uses V1 manual pairing" parenthetical;
+  notes Phase 6 migrated `pair` to the automated flow with the
+  `set-pairing` fallback preserved.
+
+## Test counts (local)
+
+- `sdk-python/tests/`: 38/38 passing.
+- New tests:
+  - `test_unreserved_pairing_id_returns_404_opaque`
+  - `test_replay_after_completion_does_not_404`
+  - `test_in_memory_broker_storage_reserve_idempotent`
+  - `test_client_create_pairing_qr_reserves_pairing_id`
+  - `test_client_create_pairing_qr_does_not_reserve_without_broker_url`
+- Updated tests:
+  - `test_in_memory_broker_storage_cas` extended with reserve/
+    is_reserved/UnknownPairingIdError assertions
+  - `test_broker_app.py` fixture pre-reserves canonical pairing_id
+
+`bot.py` imports cleanly (`python -c "import bot"` passes).
+
+## What I need
+
+Per reviewer, per file area:
+1. `broker_storage.py` — GREEN / YELLOW / RED. Is the Protocol
+   change documented sufficiently for third-party implementers?
+   Is `is_reserved` returning True for completed IDs the right
+   call?
+2. `broker/app.py` — GREEN / YELLOW / RED. Is the 404 gate at the
+   right position in the handler pipeline (after JSON parse +
+   shape + type checks, before base64 length + decrypt)? Is the
+   opaque body correct? Is the UnknownPairingIdError race-recovery
+   path correct?
+3. `client.py` (no change) + `test_bootstrap.py` (new tests) —
+   GREEN / YELLOW / RED. Do the tests actually prove the wiring?
+4. `examples/trading-bot/bot.py` — GREEN / YELLOW / RED. Is the
+   in-process broker thread + storage sharing correct? Does the
+   timeout fallback message guide the user to the right place?
+   Any bind-race / startup-race concerns?
+5. Docs (crypto-spec §9.3, integration-guide §8 + §8.5, ROADMAP,
+   trading-bot README) — GREEN / YELLOW / RED.
+6. Anything missing from the consult 93 plan.
+7. Anything new (security, footgun, doc accuracy).
+8. Commit-readiness vote.
+
+Reply text only. Do NOT call any write/mutation tool.
+
+codex
+I’ll review in read-only mode and check the changed areas against the behavior described. I’ll use only file reads, search, and git diff/status/show style commands.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff -- sdk-python/syncler/broker_storage.py sdk-python/syncler/broker/app.py sdk-python/syncler/client.py sdk-python/tests/test_broker_app.py sdk-python/tests/test_bootstrap.py examples/trading-bot/bot.py examples/trading-bot/README.md docs/crypto-spec.md docs/integration-guide.md docs/ROADMAP.md' in D:\Projects\syncler
+ succeeded in 293ms:
+ M docs/ROADMAP.md
+ M docs/crypto-spec.md
+ M docs/integration-guide.md
+ M examples/trading-bot/README.md
+ M examples/trading-bot/bot.py
+ M sdk-python/syncler/broker/app.py
+ M sdk-python/syncler/broker_storage.py
+ M sdk-python/tests/test_bootstrap.py
+ M sdk-python/tests/test_broker_app.py
+?? .triad/93-codex-log.txt
+?? .triad/93-codex.txt
+?? .triad/93-gemini-log.txt
+?? .triad/93-phase6-plan-prompt.md
+?? .triad/94-codex-log.txt
+?? .triad/94-phase6-review-prompt.md
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 308ms:
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index b3e47c8..fbf690b 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -32,7 +32,7 @@ DX track surfaced by external plugin-author review (lottery-claude, consultation
+   - Phase 5a-1 (spec + vectors in `docs/crypto-spec.md §9`): `57bb488`
+   - Phase 5a-2 (server + Android crypto + SDK protocol foundation): `a9fe84e`
+   - Phase 5a-2.1 (Android pairing UX + FastAPI broker app + integration-guide §8.5): `7e5ec4d`
+-- [x] **7. Full round-trip example plugin.** `examples/trading-bot/` now ships both a plugin and a sender in one directory, sharing `state.json`. `python bot.py register` → `pair` → `set-pairing <user_id> <pairing_key_hex>` → `publish-plugin` → `ack-server` + `loop` produces a real card on a paired device with an Acknowledge button that POSTs back to the bot. (The example still uses the V1 manual pairing step; migrating it to `Client.wait_for_pairing` is a follow-up under V1.5 dogfood — see `examples/trading-bot/README.md`.) Shipped in Phase 5b (`893d783`).
++- [x] **7. Full round-trip example plugin.** `examples/trading-bot/` ships both a plugin and a sender in one directory, sharing `state.json`. `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card on a paired device with an Acknowledge button that POSTs back to the bot. Initial round-trip shipped in Phase 5b (`893d783`); Phase 6 migrated `pair` to the automated V1.5 bootstrap flow (in-process broker thread sharing `InMemoryBrokerStorage`, `Client.wait_for_pairing(timeout_seconds=120)`). The `set-pairing` subcommand remains as a V1 manual fallback for offline / no-broker setups.
+ - [x] **8. `npm create @syncler/plugin` scaffold.** Stdlib-only Node generator (`create-plugin/index.js`) prompts for plugin id, name, sender id, renderer, card type, capabilities, and emits a complete starter project (`src/plugin.ts`, `manifest.json`, `build.sh`, `package.json`, `README.md`, `.gitignore`). Generated manifest passes `validatePluginManifest` in lenient mode; `build.sh` walks parents to find `sdk-plugin/src/index.ts` for V0.1 monorepo dev (npm distribution of `@syncler/plugin-sdk` is V2). Shipped in Phase 5c (`4604bce`).
+ - [x] **9. Validator polish backlog.** Five-item batch on `sdk-plugin/src/manifest.ts` + `server/app/schemas.py`: 6-digit semver component cap on `minPlatformVersion`; canonical-IPv4 lowercase-only printable-ASCII regex for `template.actions[].endpoint` schemes (HTTPS always, HTTP only on `localhost` / 10.x / 172.16-31 / 192.168.x / 127.x — five review cycles to get SDK/server byte-equivalent across WHATWG vs urlparse quirks); `template.fields` keys restricted to layout's allowed set; strict `$.field(.subfield)*` grammar for `cardKeyPath`; SDK↔server `plugin_identifier` regex parity. Shipped in Phase 5d (`cf7af9b`).
+ 
+diff --git a/docs/crypto-spec.md b/docs/crypto-spec.md
+index e56e963..8c9244c 100644
+--- a/docs/crypto-spec.md
++++ b/docs/crypto-spec.md
+@@ -428,18 +428,15 @@ Canonical JSON binds the envelope to the specific pairing and broker.
+ 
+ **Security Rule:** The broker MUST NOT reconstruct `sender_broker_url` from the envelope. It MUST use the `sender_broker_url` stored in its own pairing state (indexed by `pairing_id`) created when the sender called `pairing/initiate`.
+ 
+-#### V1.5 deviation: fixed-config broker
++#### Single fixed `sender_broker_url` and the pending-pairing registry
+ 
+-The reference broker implementation shipped under the optional `syncler[broker]` extra (`sdk-python/syncler/broker/app.py`) makes a deliberate tradeoff for V1.5: it uses a **single fixed `sender_broker_url`** configured at app startup, not a per-`pairing_id` map.
++The reference broker implementation shipped under the optional `syncler[broker]` extra (`sdk-python/syncler/broker/app.py`) uses a **single fixed `sender_broker_url`** configured at app startup, not a per-`pairing_id` map. This satisfies the "AAD-binding" half of the security rule above — the trusted state IS the configured URL, byte-equal to what the sender signed at `pairing/initiate`. Per-`pairing_id` URLs are deferred to V2 (rotating broker URLs are not currently a use case).
+ 
+-This satisfies the "AAD-binding" half of the security rule above — the trusted state IS the configured URL, byte-equal to what the sender signed at `pairing/initiate` — but DOES NOT satisfy the "reject unknown `pairing_id`" half. An attacker with knowledge of the public bootstrap key can mint a cryptographically valid envelope for an arbitrary uuid4 `pairing_id` (they pick the AAD; AEAD authenticates the ciphertext, not the existence of a prior `/initiate` call for that ID).
++The "reject unknown `pairing_id`" half of the rule is enforced via the **pending-pairing registry** built into [BrokerStorage] as of Phase 6. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)` when the Syncler server hands back the freshly-issued ID; the broker handler calls `storage.is_reserved(pairing_id)` BEFORE attempting decrypt and returns HTTP 404 (opaque) for unknown IDs. `complete()` ALSO enforces the same invariant as defense-in-depth (raises `UnknownPairingIdError`, which the handler maps to the same 404).
+ 
+-The V1.5 mitigations:
+-- `pairing_id` is `uuid4` (~122 bits of entropy), so an attacker cannot enumerate real pending IDs to harvest them.
+-- The broker's `rate_limiter` hook is **mandatory in production** — without it an attacker can spam decrypt attempts.
+-- V2 will add a pending-pairing registry as a first-class `BrokerStorage` method, at which point this deviation can be removed.
++The mandatory `rate_limiter` hook on `make_app(...)` is still strongly recommended in production to defend against decrypt-spam DOS targeting a known-reserved `pairing_id`. The pending-pairing registry guards the entry point; the rate limiter guards CPU once an attacker knows a real ID.
+ 
+-Production senders that need stricter behavior today implement their own [BrokerStorage] backed by Postgres or Redis, store a row at `pairing/initiate` time, and reject `complete()` calls for unknown `pairing_id`s.
++For multi-process production deployments, `InMemoryBrokerStorage` is insufficient because `reserve()` from the Client process won't be visible to `is_reserved()` in a separate broker process. Use a shared backing store (Redis, Postgres) that implements the [BrokerStorage] Protocol atomically.
+ 
+ ### 9.4 Test Vectors
+ 
+diff --git a/docs/integration-guide.md b/docs/integration-guide.md
+index 3d60434..1f4442c 100644
+--- a/docs/integration-guide.md
++++ b/docs/integration-guide.md
+@@ -545,7 +545,7 @@ def action():
+ 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
+ 10. Confirm your `/api/action` endpoint received the POST.
+ 
+-A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `set-pairing <user_id> <pairing_key_hex>` (the example still uses V1 manual pairing) → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip.
++A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip. The example uses the automated V1.5 pairing flow with an in-process broker thread; `set-pairing` is preserved as a V1 manual fallback when the broker can't be reached.
+ 
+ ## 8.5 Automated pairing (V1.5)
+ 
+@@ -674,10 +674,10 @@ Three guards make this safe:
+ 
+ ### Production hardening
+ 
+-- Use Redis or Postgres for `BrokerStorage` (the shipped `InMemoryBrokerStorage` is NOT safe across multiple uvicorn workers — each worker has its own dict, so the same envelope can decrypt-and-complete twice).
+-- The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. Without it, an attacker with the public bootstrap key can spam the decrypt path for cheap-but-not-free CPU. Implement per-IP and per-`pairing_id` limits.
++- Use Redis or Postgres for `BrokerStorage`. The shipped `InMemoryBrokerStorage` is single-process only — fine for the trading-bot example where the Client and broker share one Python process, but **insufficient for multi-process deployments**. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)`; if the broker app runs in a different uvicorn worker, that call's effect won't be visible to the broker's `is_reserved()` check and every pairing will 404. Use a shared backing store that implements the `BrokerStorage` Protocol atomically (one `reserve` call visible to all workers).
++- The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. The pending-pairing registry blocks envelopes for un-issued `pairing_id`s, but once an attacker knows a reserved ID they can still spam decrypt attempts on it — the rate limiter is your CPU defense. Implement per-IP and per-`pairing_id` limits.
+ - Terminate TLS at your reverse proxy; the broker is HTTP-only inside the trust boundary.
+-- See `docs/crypto-spec.md §9.3 "V1.5 deviation"` for the fixed-config-broker tradeoff (does NOT reject envelopes for unknown `pairing_id`s — UUID entropy + rate limiter are the V1.5 mitigations).
++- See `docs/crypto-spec.md §9.3` for the single-fixed-`sender_broker_url` design (per-pairing URLs are a V2 add).
+ 
+ ## 9. Common server errors
+ 
+diff --git a/examples/trading-bot/README.md b/examples/trading-bot/README.md
+index 4fbb162..5bc19c3 100644
+--- a/examples/trading-bot/README.md
++++ b/examples/trading-bot/README.md
+@@ -39,19 +39,27 @@ python bot.py register
+ 
+ Prints a `sender_id` and writes it to `state.json`. Persists across runs.
+ 
+-### 3. Pair with a user
++### 3. Pair with a user (automated, V1.5)
+ 
+ ```sh
+ python bot.py pair
+ ```
+ 
+-Writes `pairing.png` (the QR). Scan it in the Syncler app and confirm the fingerprint. The app shows your `user_id` and a `pairing_key_hex` after confirm. Paste them back:
++This:
++1. Generates the sender's X25519 bootstrap keypair on first run and persists the private key to `~/.syncler/keys/trading-bot-bootstrap.bin` (0600 where the platform supports it; Windows users may need to ACL the file manually). The public key is registered with Syncler (idempotent — re-runs are no-ops once the key id matches).
++2. Starts an in-process broker on `0.0.0.0:8002` (override with `SYNCLER_BROKER_PORT`). The broker shares the bot's `InMemoryBrokerStorage` so the QR's reserved `pairing_id` is visible to the broker's pre-decrypt 404 gate.
++3. Writes `pairing.png` (the QR, now carrying `sender_broker_url`) and blocks on `Client.wait_for_pairing(timeout_seconds=120)`.
++4. Scan the QR in the Syncler app, confirm the fingerprint. After the device finishes the encrypted bootstrap POST, `pair` returns and `state.json` carries `user_id` + `pairing_key_hex`.
++
++The broker URL the device sees is `SYNCLER_BROKER_URL` (defaults to `http://${SYNCLER_LAN_HOST}:8002/`). Same connectivity matrix as the ack server — see [Connecting your Android device](#connecting-your-android-device) below.
++
++**Fallback (V1 manual).** If `pair` times out — broker unreachable from the device, no LAN connectivity, etc. — the Syncler app shows the `user_id` + `pairing_key_hex` block, just like in V1:
+ 
+ ```sh
+ python bot.py set-pairing <user_id> <pairing_key_hex>
+ ```
+ 
+-(Automated pairing has shipped end-to-end — see `docs/integration-guide.md §8.5`. This example still uses the V1 manual copy-paste; migrating it to `Client.wait_for_pairing(...)` is a follow-up V1.5 dogfood task.)
++This writes the same state.json values that `pair` would have on success, so the rest of the walkthrough continues unchanged.
+ 
+ ### 4. Build + sign the plugin
+ 
+diff --git a/examples/trading-bot/bot.py b/examples/trading-bot/bot.py
+index 0b5665e..9709437 100644
+--- a/examples/trading-bot/bot.py
++++ b/examples/trading-bot/bot.py
+@@ -27,7 +27,9 @@ import hashlib
+ import json
+ import os
+ import random
++import socket
+ import sys
++import threading
+ import time
+ from datetime import UTC, datetime
+ from http.server import BaseHTTPRequestHandler, HTTPServer
+@@ -37,9 +39,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
+ sys.path.insert(0, os.path.join(HERE, "..", "..", "sdk-python"))
+ 
+ from syncler import Client, SynclerError  # noqa: E402
++from syncler.bootstrap import (  # noqa: E402
++    load_x25519_private_key_from_raw,
++    x25519_keypair_pem,
++)
++from syncler.broker_storage import InMemoryBrokerStorage  # noqa: E402
+ 
+ STATE_FILE = os.path.join(HERE, "state.json")
+ PRIVATE_KEY_FILE = os.path.expanduser("~/.syncler/keys/trading-bot.pem")
++BOOTSTRAP_PRIV_FILE = os.path.expanduser(
++    "~/.syncler/keys/trading-bot-bootstrap.bin",
++)
+ BASE_URL = os.environ.get("SYNCLER_BASE_URL", "http://localhost:8000")
+ # Connectivity defaults are chosen for the Android emulator: 10.0.2.2 is
+ # the emulator's loopback to the host machine. Physical-device users
+@@ -50,6 +60,48 @@ DEVICE_LAN_HOST = os.environ.get("SYNCLER_LAN_HOST", "10.0.2.2")
+ ACK_PORT = int(os.environ.get("SYNCLER_ACK_PORT", "8001"))
+ ACK_URL = os.environ.get("SYNCLER_ACK_URL", f"http://{DEVICE_LAN_HOST}:{ACK_PORT}/api/ack")
+ BUNDLE_URL = os.environ.get("SYNCLER_BUNDLE_URL", f"http://{DEVICE_LAN_HOST}:{ACK_PORT}/plugin.bundle.js")
++BROKER_PORT = int(os.environ.get("SYNCLER_BROKER_PORT", "8002"))
++SENDER_BROKER_URL = os.environ.get(
++    "SYNCLER_BROKER_URL", f"http://{DEVICE_LAN_HOST}:{BROKER_PORT}/",
++)
++
++
++def _load_or_create_bootstrap_keypair(state: dict):
++    """Generate the bootstrap X25519 keypair once and persist private
++    key bytes to BOOTSTRAP_PRIV_FILE with restrictive perms where the
++    platform supports it. Public key bytes (hex) ride in state.json so
++    the bot can pass them to make_app(...) on every startup without
++    needing to re-derive them.
++
++    Codex 93 note: Windows doesn't honor 0600 from Python the same
++    way POSIX does; if you need real key-file ACLs on Windows use
++    icacls or a vault.
++    """
++    if (
++        os.path.exists(BOOTSTRAP_PRIV_FILE)
++        and "bootstrap_pub_hex" in state
++    ):
++        priv_raw = open(BOOTSTRAP_PRIV_FILE, "rb").read()
++        pub_raw = bytes.fromhex(state["bootstrap_pub_hex"])
++        return load_x25519_private_key_from_raw(priv_raw), pub_raw
++    priv, pub_raw = x25519_keypair_pem()
++    from cryptography.hazmat.primitives.serialization import (
++        Encoding, NoEncryption, PrivateFormat,
++    )
++    priv_raw = priv.private_bytes(
++        Encoding.Raw, PrivateFormat.Raw, NoEncryption(),
++    )
++    os.makedirs(os.path.dirname(BOOTSTRAP_PRIV_FILE) or ".", exist_ok=True)
++    with open(BOOTSTRAP_PRIV_FILE, "wb") as f:
++        f.write(priv_raw)
++    try:
++        os.chmod(BOOTSTRAP_PRIV_FILE, 0o600)
++    except (NotImplementedError, OSError):
++        # Windows / unusual platforms — best effort.
++        pass
++    state["bootstrap_pub_hex"] = pub_raw.hex()
++    save_state(state)
++    return load_x25519_private_key_from_raw(priv_raw), pub_raw
+ 
+ 
+ def load_state() -> dict:
+@@ -87,24 +139,143 @@ def cmd_register() -> None:
+     print("Next: python bot.py pair")
+ 
+ 
++def _ensure_bootstrap_key_registered(client: Client, state: dict, pub_raw: bytes) -> None:
++    """Idempotent: register the X25519 bootstrap pub key once with
++    syncler. The server keeps the key (and our Ed25519 signature
++    over it) so the preview endpoint can hand it to the Android
++    device. `state["bootstrap_key_id"]` records the server's
++    SHA-256(pub)[:16] handle so we can detect rotations.
++    """
++    expected_kid = hashlib.sha256(pub_raw).digest()[:16].hex()
++    if state.get("bootstrap_key_id_hex") == expected_kid:
++        return
++    server_kid_b64 = client.register_bootstrap_key(bootstrap_public_key_raw=pub_raw)
++    import base64 as _b64
++    state["bootstrap_key_id_hex"] = _b64.b64decode(server_kid_b64).hex()
++    save_state(state)
++
++
++def _start_broker_thread(
++    priv,
++    pub_raw: bytes,
++    sender_broker_url: str,
++    storage: InMemoryBrokerStorage,
++) -> threading.Thread:
++    """Run syncler.broker.make_app(...) in a uvicorn server in a
++    background thread of THIS process so create_pairing_qr's
++    reserve() call lands in the same storage that the broker reads
++    via is_reserved(). Production senders run the broker as a
++    separate uvicorn process behind a reverse proxy; the
++    InMemoryBrokerStorage doesn't survive that split (different
++    processes = different dicts).
++
++    Fail-fast on bind: check the port is free before spawning the
++    thread so `pair` doesn't silently hang if 8002 is already in
++    use (Codex 93).
++    """
++    from syncler.broker import make_app
++    import uvicorn
++
++    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    try:
++        sock.bind(("0.0.0.0", BROKER_PORT))
++    except OSError as e:
++        sock.close()
++        raise SystemExit(
++            f"broker port {BROKER_PORT} is in use ({e}); set SYNCLER_BROKER_PORT to override",
++        )
++    sock.close()
++
++    app = make_app(
++        bootstrap_private_key=priv,
++        bootstrap_public_key_raw=pub_raw,
++        sender_broker_url=sender_broker_url,
++        storage=storage,
++    )
++    config = uvicorn.Config(
++        app, host="0.0.0.0", port=BROKER_PORT, log_level="warning",
++    )
++    server = uvicorn.Server(config)
++    thread = threading.Thread(target=server.run, daemon=True, name="broker")
++    thread.start()
++    # Wait briefly for the server to come up before returning so the
++    # device's POST during pairing doesn't race the startup window.
++    for _ in range(50):
++        time.sleep(0.05)
++        if server.started:
++            break
++    return thread
++
++
+ def cmd_pair() -> None:
++    """V1.5 automated pairing — register the bootstrap key once,
++    start a broker thread in-process, build a QR that includes
++    sender_broker_url, and block on wait_for_pairing until the
++    device POSTs the encrypted envelope.
++
++    Fallback: if the device can't reach the broker for any reason,
++    `pair` will time out — re-run with the manual flow by passing
++    `--manual` (see `set-pairing`).
++    """
+     state = load_state()
+     client = make_client(state)
+     if "sender_id" not in state:
+         print("Run `register` first.", file=sys.stderr)
+         sys.exit(1)
+-    qr_path = client.create_pairing_qr(ttl_seconds=300, out_path=os.path.join(HERE, "pairing.png"))
++
++    priv, pub_raw = _load_or_create_bootstrap_keypair(state)
++    _ensure_bootstrap_key_registered(client, state, pub_raw)
++
++    storage = InMemoryBrokerStorage()
++    client = Client(
++        sender_name="Trading Bot",
++        private_key_path=PRIVATE_KEY_FILE,
++        base_url=BASE_URL,
++        broker_storage=storage,
++    )
++    client.set_sender_id(state["sender_id"])
++
++    _start_broker_thread(priv, pub_raw, SENDER_BROKER_URL, storage)
++    print(f"Broker listening on 0.0.0.0:{BROKER_PORT}")
++    print(f"  device-reachable URL: {SENDER_BROKER_URL}")
++
++    qr_path = client.create_pairing_qr(
++        ttl_seconds=300,
++        out_path=os.path.join(HERE, "pairing.png"),
++        sender_broker_url=SENDER_BROKER_URL,
++    )
+     print(f"QR written to {qr_path}")
+-    print("Scan it in the Syncler app, confirm the fingerprint, then:")
+-    print("  python bot.py set-pairing <user_id> <pairing_key_hex>")
++    print("Scan it in the Syncler app and confirm the fingerprint.")
++    print("Waiting for the device to POST the bootstrap envelope (120s)…")
++
++    try:
++        pairing = client.wait_for_pairing(timeout_seconds=120)
++    except TimeoutError:
++        print("Timed out waiting for pairing.", file=sys.stderr)
++        print(
++            "Fallback: re-run scan, copy the user_id + pairing_key_hex from the device, "
++            "then `python bot.py set-pairing <user_id> <pairing_key_hex>`.",
++            file=sys.stderr,
++        )
++        sys.exit(1)
++
++    state["user_id"] = pairing.user_id
++    state["pairing_key_hex"] = client.pairing_key.hex()
++    save_state(state)
++    print(f"Paired automatically. user_id = {pairing.user_id}")
+ 
+ 
+ def cmd_set_pairing(user_id: str, pairing_key_hex: str) -> None:
++    """V1 manual-pairing fallback. Use when the automated `pair`
++    flow can't complete (broker unreachable, dev environment
++    without a reverse proxy, etc.). The device shows these values
++    on the pairing screen when the bootstrap POST fails.
++    """
+     state = load_state()
+     state["user_id"] = user_id
+     state["pairing_key_hex"] = pairing_key_hex
+     save_state(state)
+-    print("Pairing recorded.")
++    print("Pairing recorded (manual / V1 fallback).")
+ 
+ 
+ def cmd_loop() -> None:
+diff --git a/sdk-python/syncler/broker/app.py b/sdk-python/syncler/broker/app.py
+index 8b419ff..e014420 100644
+--- a/sdk-python/syncler/broker/app.py
++++ b/sdk-python/syncler/broker/app.py
+@@ -18,41 +18,41 @@ semantics:
+   mismatch, exp outside ±5min window, bootstrap key id mismatch).
+   Response body is opaque on purpose so an attacker can't probe
+   which field caused the failure.
++- ``404 Not Found`` — ``pairing_id`` was never reserved by a
++  legitimate ``Client.create_pairing_qr(sender_broker_url=...)``
++  call (Phase 6 pending-pairing registry). Response body is
++  opaque — no echo of the requested ``pairing_id`` to keep
++  enumeration unhelpful.
+ - ``409 Conflict`` — replay with DIFFERENT ``(user_id,
+   pairing_key)`` values for the same ``pairing_id``. Indicates a
+   replay attack or a sender bug.
+ 
+-Security framing (Phase 5a-2.1 / consultation 87):
++Security framing:
+ 
+-The V1.5 broker ships with a SINGLE fixed ``sender_broker_url`` (the
+-URL the sender registered + signed at ``pairing/initiate``). The
+-trusted state per ``pairing_id`` is therefore byte-equal to the
+-configured URL. This satisfies the AAD-binding rule in
++The broker uses a SINGLE fixed ``sender_broker_url`` (the URL the
++sender registered + signed at ``pairing/initiate``). The trusted
++state per ``pairing_id`` is therefore byte-equal to the configured
++URL. This satisfies the AAD-binding rule in
+ ``docs/crypto-spec.md §9.3``.
+ 
+-What this DOES NOT satisfy: the spec also says the broker SHOULD
+-reject envelopes whose ``pairing_id`` is unknown to the sender. The
+-V1.5 broker accepts ANY ``pairing_id`` because [BrokerStorage] has no
+-pending-pairing registry. AEAD prevents tampering of an existing
+-envelope, but anyone who knows the public bootstrap key can mint a
+-cryptographically valid envelope for an arbitrary uuid4
+-``pairing_id`` (they pick the AAD; AEAD doesn't authenticate that
+-the ``pairing_id`` came from a real ``/initiate``).
+-
+-Mitigations:
+-
+-- ``pairing_id`` uses ``uuid4`` with ~122 bits of entropy, so an
+-  attacker can't enumerate real pending IDs.
+-- The optional ``rate_limiter`` hook is **mandatory in production**
+-  to defend against decrypt-spam DOS.
+-- V2 will add a pending-pairing registry as a first-class storage
+-  method, after which this comment block can shrink.
++Pending-pairing registry (Phase 6): the broker now rejects
++envelopes whose ``pairing_id`` was never reserved by a legitimate
++``Client.create_pairing_qr(sender_broker_url=...)`` call. This
++closes the earlier "V1.5 fixed-config deviation" — an attacker
++with knowledge of the public bootstrap key can still mint a
++cryptographically valid envelope for an arbitrary uuid4, but the
++404 gate fires before the decrypt path. UUID entropy (~122 bits)
++makes guessing a reserved ID impractical; the mandatory
++``rate_limiter`` hook is still strongly recommended in
++production to defend against decrypt-spam DOS on the same UUID.
+ 
+ Public hosts using a CDN / load balancer in front of this app:
+ terminate TLS at the LB, keep the broker on a private network,
+ forward client IP via X-Forwarded-For so the rate limiter can key
+-on it. ``InMemoryBrokerStorage`` is single-process only — production
+-multi-worker deployments need Redis or Postgres.
++on it. ``InMemoryBrokerStorage`` is single-process only —
++production multi-worker deployments AND multi-process
++sender+broker setups need Redis or Postgres so ``reserve()``
++calls in one process are visible to ``is_reserved()`` in another.
+ """
+ 
+ from __future__ import annotations
+@@ -73,6 +73,7 @@ from ..broker_storage import (
+     BrokerEntry,
+     BrokerStorage,
+     BrokerStorageConflictError,
++    UnknownPairingIdError,
+ )
+ 
+ _log = logging.getLogger(__name__)
+@@ -187,6 +188,15 @@ def make_app(
+                     detail=f"{field} must be a string",
+                 )
+ 
++        # Phase 6 pending-pairing registry: cheap pre-decrypt gate.
++        # Unknown pairing_id → 404 opaque (Codex 93: don't echo the
++        # ID in the body so a prober can't enumerate or learn about
++        # the registry shape). Closes the §9.3 V1.5 deviation —
++        # attacker can't mint a valid envelope for a random uuid4
++        # and reach the decrypt path.
++        if not storage.is_reserved(body["pairing_id"]):
++            raise HTTPException(status_code=404, detail="pairing slot not found")
++
+         # Base64 length validation BEFORE decrypt (consult 80/87).
+         try:
+             ephemeral_pubkey_raw = base64.b64decode(
+@@ -250,6 +260,12 @@ def make_app(
+                 body["pairing_id"],
+                 BrokerEntry(user_id=user_id, pairing_key=pairing_key),
+             )
++        except UnknownPairingIdError as exc:
++            # Race: pairing_id passed the pre-decrypt is_reserved
++            # check but was unreserved between then and now. Treat
++            # the same as the gate above (404 opaque).
++            _log.warning("bootstrap complete on unknown pairing_id: %s", exc)
++            raise HTTPException(status_code=404, detail="pairing slot not found")
+         except BrokerStorageConflictError as exc:
+             _log.warning("bootstrap CAS conflict: %s", exc)
+             raise HTTPException(status_code=409, detail="pairing_id replay with different values")
+diff --git a/sdk-python/syncler/broker_storage.py b/sdk-python/syncler/broker_storage.py
+index 4dc45b6..75685e5 100644
+--- a/sdk-python/syncler/broker_storage.py
++++ b/sdk-python/syncler/broker_storage.py
+@@ -33,6 +33,23 @@ class BrokerStorageConflictError(Exception):
+     NOT a conflict (no exception)."""
+ 
+ 
++class UnknownPairingIdError(Exception):
++    """Phase 6: raised by `complete()` when the `pairing_id` was never
++    reserved by a prior `reserve()` call. The broker handler maps this
++    to HTTP 404 (opaque) so an attacker who knows the public bootstrap
++    key can't get past the pending check by minting a valid envelope
++    for a random uuid4 — the pairing must have been initiated by a
++    legitimate `Client.create_pairing_qr(sender_broker_url=...)` call
++    first.
++
++    NOTE this is a Protocol-breaking change for third-party
++    `BrokerStorage` implementations that landed in V1.5: custom stores
++    must now track pending IDs atomically alongside completed entries,
++    OR they must accept this behavior change (no silent fall-through
++    when complete is called for an unreserved ID).
++    """
++
++
+ class BrokerStorage(Protocol):
+     """The broker storage protocol.
+ 
+@@ -42,35 +59,58 @@ class BrokerStorage(Protocol):
+     different values raise [BrokerStorageConflictError]. This semantics
+     is what defeats envelope replay (spec §9.3).
+ 
+-    Phase 5a-2.1 — V1.5 fixed-config broker note: the protocol does not
+-    track *pending* pairing IDs; `complete()` accepts any UUID. This
+-    means the broker built on top of this storage cannot reject
+-    envelopes whose `pairing_id` was never reserved by a prior
+-    `pairing/initiate`. The primary replay guard is still the CAS in
+-    `complete()`, and UUID entropy (122 bits for uuid4) plus the
+-    mandatory rate limiter make storage pollution by an attacker
+-    impractical. V2 will add a pending-pairing registry. See
+-    `docs/crypto-spec.md §9.3` "V1.5 deviation" for the full
+-    discussion.
++    Phase 6 — pending-pairing registry. The protocol now tracks
++    *pending* pairing IDs in addition to completed entries:
++
++    - `Client.create_pairing_qr(sender_broker_url=...)` calls
++      `reserve(pairing_id)` so the broker side knows which IDs are
++      legitimately in flight.
++    - The broker handler calls `is_reserved(pairing_id)` BEFORE
++      attempting decrypt; unknown IDs are rejected with HTTP 404.
++    - `complete()` raises [UnknownPairingIdError] when called for an
++      ID that was never reserved (defense-in-depth — the handler
++      check should already have fired, but a buggy caller or race
++      shouldn't silently complete an unknown slot).
++
++    This closes the "V1.5 fixed-config deviation" documented in
++    earlier crypto-spec drafts.
+     """
+ 
+     def reserve(self, pairing_id: str) -> None:
+-        """Called at `pairing/initiate` time to mark the slot. Optional
+-        for in-memory storage; required for storages where you need
+-        explicit slot creation (e.g. DB rows with not-null
+-        constraints). Idempotent."""
++        """Mark `pairing_id` as a legitimate pending slot. Called by
++        `Client.create_pairing_qr(sender_broker_url=...)` after the
++        Syncler server issues the pairing_id, so the broker side can
++        distinguish "real pending pairing" from "attacker-minted
++        envelope for a random UUID".
++
++        Idempotent (re-reserving an already-reserved or already-
++        completed ID is a no-op). Implementations MUST be atomic at
++        the storage layer.
++        """
++
++    def is_reserved(self, pairing_id: str) -> bool:
++        """Returns ``True`` if `pairing_id` was previously reserved
++        OR has already been completed. Used by the broker handler
++        for the pre-decrypt 404 gate.
++
++        Returning True for completed IDs is intentional — `complete()`
++        itself enforces the CAS, so a re-POST for an idempotent or
++        conflicting completion needs to reach `complete()` to get the
++        right 200/409 response (not get bounced as 404).
++        """
+ 
+     def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+         """Compare-and-set. Returns ``True`` when this call was the
+         first completion (the storage was previously empty for this
+         ``pairing_id``); returns ``False`` on idempotent replay of the
+-        same values. Raises [BrokerStorageConflictError] when the
+-        entry differs from a previously-stored one.
++        same values.
+ 
+-        - First call for `pairing_id` → stores entry, returns ``True``.
++        - First call for a reserved `pairing_id` → stores entry, returns ``True``.
+         - Second call with same `entry` → idempotent, returns ``False``.
+         - Second call with different `entry` →
+           [BrokerStorageConflictError].
++        - Call for a `pairing_id` that was never reserved →
++          [UnknownPairingIdError].
+ 
+         The FastAPI broker uses the return value to distinguish HTTP
+         201 (first completion) from 200 (idempotent replay).
+@@ -87,24 +127,45 @@ class BrokerStorage(Protocol):
+ class InMemoryBrokerStorage:
+     """Default in-process implementation. Suitable for dev / tests /
+     single-process toy deployments. Loses state on restart. NOT safe
+-    across multiple uvicorn workers — each worker has its own dict,
+-    so `complete()` calls land in different processes and replays may
+-    appear as 201 in one worker and 200 in another, or worst case
+-    let two devices complete the same pairing inconsistently. Use a
+-    real storage backend (Redis, Postgres) for production multi-worker
+-    setups.
++    across multiple uvicorn workers AND NOT safe across multiple
++    Python processes — each worker has its own state, so a `reserve()`
++    from the sender's Client process won't be visible to a broker
++    running in a separate worker. Single-process deployments (Client
++    + broker app in the same Python — e.g. the trading-bot example
++    via a background thread) work fine. Production multi-worker
++    setups need a real storage backend (Redis, Postgres).
+     """
+ 
+     def __init__(self) -> None:
+         self._lock = threading.Lock()
+         self._entries: dict[str, BrokerEntry] = {}
++        self._reserved: set[str] = set()
+ 
+     def reserve(self, pairing_id: str) -> None:
+-        # No-op: dict permits any key. `complete` is the CAS point.
+-        return None
++        """Mark a pairing_id as pending. Idempotent; reserving an
++        already-completed pairing is also a no-op (an immediate
++        re-pair after wait_for_pairing returned would otherwise be
++        racy)."""
++        with self._lock:
++            self._reserved.add(pairing_id)
++
++    def is_reserved(self, pairing_id: str) -> bool:
++        """True if pairing_id was reserved OR already completed."""
++        with self._lock:
++            return pairing_id in self._reserved or pairing_id in self._entries
+ 
+     def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+         with self._lock:
++            # Defense-in-depth: handler already checks is_reserved
++            # before reaching here. A buggy caller or race shouldn't
++            # silently complete an unreserved ID — flag loudly.
++            if (
++                pairing_id not in self._reserved
++                and pairing_id not in self._entries
++            ):
++                raise UnknownPairingIdError(
++                    f"pairing_id {pairing_id} was never reserved",
++                )
+             existing = self._entries.get(pairing_id)
+             if existing is None:
+                 self._entries[pairing_id] = entry
+@@ -126,4 +187,5 @@ __all__ = [
+     "BrokerStorage",
+     "BrokerStorageConflictError",
+     "InMemoryBrokerStorage",
++    "UnknownPairingIdError",
+ ]
+diff --git a/sdk-python/tests/test_bootstrap.py b/sdk-python/tests/test_bootstrap.py
+index 8d71cda..5178a28 100644
+--- a/sdk-python/tests/test_bootstrap.py
++++ b/sdk-python/tests/test_bootstrap.py
+@@ -33,6 +33,7 @@ from syncler.broker_storage import (
+     BrokerEntry,
+     BrokerStorageConflictError,
+     InMemoryBrokerStorage,
++    UnknownPairingIdError,
+ )
+ 
+ 
+@@ -201,9 +202,19 @@ def test_in_memory_broker_storage_cas():
+     s = InMemoryBrokerStorage()
+     pairing_id = "00000000-1111-2222-3333-444444444444"
+     entry_a = BrokerEntry(user_id="aaaa", pairing_key=b"\x01" * 32)
++    # Phase 6 pending-pairing registry: reserve is now required
++    # before complete (defense-in-depth alongside the broker handler's
++    # 404 gate). Unreserved complete raises UnknownPairingIdError.
++    with pytest.raises(UnknownPairingIdError):
++        s.complete(pairing_id, entry_a)
++    s.reserve(pairing_id)
++    assert s.is_reserved(pairing_id)
+     # Phase 5a-2.1: complete() returns True on first completion,
+     # False on idempotent replay. Broker uses this to send 201 vs 200.
+     assert s.complete(pairing_id, entry_a) is True
++    # is_reserved stays True after completion so a re-POST gets to
++    # the CAS layer, not bounced as 404 (Gemini 93 + Codex 93).
++    assert s.is_reserved(pairing_id)
+     # Idempotent second store with same values.
+     assert s.complete(pairing_id, entry_a) is False
+     assert s.fetch(pairing_id) == entry_a
+@@ -211,3 +222,111 @@ def test_in_memory_broker_storage_cas():
+     entry_b = BrokerEntry(user_id="bbbb", pairing_key=b"\x02" * 32)
+     with pytest.raises(BrokerStorageConflictError):
+         s.complete(pairing_id, entry_b)
++
++
++def test_client_create_pairing_qr_reserves_pairing_id(tmp_path):
++    """Phase 6 / Codex 93 missing-test: confirm
++    Client.create_pairing_qr(sender_broker_url=...) calls
++    storage.reserve(pairing_id) so the broker handler's 404 gate
++    accepts the subsequent envelope."""
++    from unittest.mock import MagicMock, patch
++
++    from syncler.client import Client
++
++    storage = InMemoryBrokerStorage()
++    # Build a Client with our storage. private_key_path needs a real
++    # Ed25519 PEM; generate one to a tmp file.
++    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
++    from cryptography.hazmat.primitives.serialization import (
++        Encoding, NoEncryption, PrivateFormat,
++    )
++    key_path = tmp_path / "test-sender.pem"
++    key_pem = Ed25519PrivateKey.generate().private_bytes(
++        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
++    )
++    key_path.write_bytes(key_pem)
++
++    client = Client(
++        sender_name="Test",
++        private_key_path=str(key_path),
++        broker_storage=storage,
++    )
++    client.set_sender_id("11111111-1111-1111-1111-111111111111")
++
++    pairing_id = "22222222-3333-4444-5555-666666666666"
++    server_response = MagicMock()
++    server_response.json.return_value = {
++        "pairing_id": pairing_id,
++        "pairing_token": "tkn",
++        "broker_url": "https://syncler.example.com/pair?token=tkn",
++    }
++    server_response.raise_for_status = lambda: None
++
++    qr_path = tmp_path / "qr.png"
++    with patch.object(client.session, "post", return_value=server_response):
++        # Patch the QR renderer too so we don't need PIL/qrcode here.
++        with patch("syncler.client._render_qr"):
++            client.create_pairing_qr(
++                sender_broker_url="https://broker.example.com/",
++                out_path=str(qr_path),
++            )
++
++    assert storage.is_reserved(pairing_id), \
++        "create_pairing_qr(sender_broker_url=...) must call storage.reserve(pairing_id)"
++
++
++def test_client_create_pairing_qr_does_not_reserve_without_broker_url(tmp_path):
++    """V1 manual-pairing path: when sender_broker_url is None, the
++    Client should NOT call reserve() — there's no broker to gate.
++    """
++    from unittest.mock import MagicMock, patch
++
++    from syncler.client import Client
++    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
++    from cryptography.hazmat.primitives.serialization import (
++        Encoding, NoEncryption, PrivateFormat,
++    )
++
++    storage = InMemoryBrokerStorage()
++    key_path = tmp_path / "test-sender.pem"
++    key_path.write_bytes(Ed25519PrivateKey.generate().private_bytes(
++        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
++    ))
++
++    client = Client(
++        sender_name="Test",
++        private_key_path=str(key_path),
++        broker_storage=storage,
++    )
++    client.set_sender_id("11111111-1111-1111-1111-111111111111")
++
++    pairing_id = "abcdef00-0000-0000-0000-000000000000"
++    server_response = MagicMock()
++    server_response.json.return_value = {
++        "pairing_id": pairing_id,
++        "pairing_token": "tkn",
++        "broker_url": "https://syncler.example.com/pair?token=tkn",
++    }
++    server_response.raise_for_status = lambda: None
++
++    with patch.object(client.session, "post", return_value=server_response):
++        with patch("syncler.client._render_qr"):
++            client.create_pairing_qr(out_path=str(tmp_path / "qr.png"))
++
++    assert not storage.is_reserved(pairing_id)
++
++
++def test_in_memory_broker_storage_reserve_idempotent():
++    """Phase 6: reserving an already-reserved or already-completed
++    pairing_id is a no-op (an immediate re-pair after wait_for_pairing
++    returned would otherwise be racy)."""
++    s = InMemoryBrokerStorage()
++    pairing_id = "11111111-2222-3333-4444-555555555555"
++    s.reserve(pairing_id)
++    s.reserve(pairing_id)  # idempotent
++    assert s.is_reserved(pairing_id)
++    s.complete(pairing_id, BrokerEntry(user_id="xx", pairing_key=b"\x00" * 32))
++    s.reserve(pairing_id)  # still a no-op after completion
++    assert s.is_reserved(pairing_id)
++    # Unknown ID is not reserved.
++    assert not s.is_reserved("99999999-9999-9999-9999-999999999999")
+diff --git a/sdk-python/tests/test_broker_app.py b/sdk-python/tests/test_broker_app.py
+index 5a4cde2..547555c 100644
+--- a/sdk-python/tests/test_broker_app.py
++++ b/sdk-python/tests/test_broker_app.py
+@@ -120,7 +120,12 @@ def keypair() -> tuple[X25519PrivateKey, bytes]:
+ 
+ @pytest.fixture
+ def storage() -> InMemoryBrokerStorage:
+-    return InMemoryBrokerStorage()
++    s = InMemoryBrokerStorage()
++    # Phase 6: pre-reserve the canonical test pairing_id so the
++    # broker handler's pending-pairing 404 gate doesn't fire on
++    # every test. Unknown-pairing tests use a different ID.
++    s.reserve(_PAIRING_ID)
++    return s
+ 
+ 
+ @pytest.fixture
+@@ -255,6 +260,40 @@ def test_invalid_low_order_ephemeral_pubkey_returns_401_opaque(client, keypair):
+     assert response.json()["detail"] == "bootstrap decrypt failed"
+ 
+ 
++# Phase 6: pending-pairing registry. Cryptographically-valid envelope
++# for a pairing_id that was never reserved must 404 before reaching
++# decrypt. Closes the §9.3 V1.5 deviation.
++def test_unreserved_pairing_id_returns_404_opaque(client, keypair):
++    priv, pub = keypair
++    unreserved_id = "12345678-1234-1234-1234-1234567890ab"
++    envelope = _build_envelope(
++        sender_bootstrap_priv=priv,
++        sender_bootstrap_pub_raw=pub,
++        pairing_id=unreserved_id,
++    )
++    response = client.post("/", json=envelope)
++    assert response.status_code == 404, response.text
++    # Opaque body — must NOT echo the requested pairing_id back (Codex 93).
++    body_text = response.text
++    assert unreserved_id not in body_text
++
++
++# Phase 6: after a successful completion, is_reserved should still
++# return True (so a re-POST gets to the CAS layer for the 200/409
++# decision rather than being bounced as 404).
++def test_replay_after_completion_does_not_404(client, keypair, storage):
++    priv, pub = keypair
++    pk = b"\xcd" * 32
++    env1 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk)
++    r1 = client.post("/", json=env1)
++    assert r1.status_code == 201, r1.text
++    # storage now has _entries[pairing_id]. is_reserved should be True.
++    assert storage.is_reserved(_PAIRING_ID)
++    env2 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk)
++    r2 = client.post("/", json=env2)
++    assert r2.status_code == 200, r2.text
++
++
+ # --------------------------- shape validation (400) ---------------------------
+ 
+ 
+warning: in the working copy of 'docs/ROADMAP.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'examples/trading-bot/README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'examples/trading-bot/bot.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'sdk-python/syncler/broker/app.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'sdk-python/tests/test_bootstrap.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'sdk-python/tests/test_broker_app.py', LF will be replaced by CRLF the next time Git touches it
+
+codex
+The diff matches the described scope. I’m going deeper on the broker contract and the trading-bot startup path now, because those are the places most likely to hide protocol or race issues.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content examples/trading-bot/bot.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/syncler/broker_storage.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/syncler/broker/app.py | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }' in D:\Projects\syncler
+ succeeded in 329ms:
+   1: """V1.5 automated pairing ג€” broker storage interface.
+   2: 
+   3: The sender-operated broker persists `(user_id, pairing_key)` keyed on
+   4: `pairing_id` after successfully decrypting one bootstrap envelope.
+   5: ``Client.wait_for_pairing(...)`` polls this storage to learn when a
+   6: pairing has completed.
+   7: 
+   8: The protocol is sender-private. Production callers can plug in Redis,
+   9: Postgres, or any other backing store; the SDK ships only the protocol
+  10: + a default in-memory implementation for dev.
+  11: """
+  12: 
+  13: from __future__ import annotations
+  14: 
+  15: import threading
+  16: from dataclasses import dataclass
+  17: from typing import Protocol
+  18: 
+  19: 
+  20: @dataclass(frozen=True)
+  21: class BrokerEntry:
+  22:     """Completed pairing tuple stored by the broker after a successful
+  23:     decrypt. The fields are exactly what `Client.set_pairing(...)`
+  24:     needs to bring the SDK out of the pending state."""
+  25:     user_id: str
+  26:     pairing_key: bytes  # 32 bytes
+  27: 
+  28: 
+  29: class BrokerStorageConflictError(Exception):
+  30:     """Raised on compare-and-set conflict: same `pairing_id` already
+  31:     completed with DIFFERENT `(user_id, pairing_key)` values. Indicates
+  32:     a replay attack or a buggy device. Same values is idempotent ג€”
+  33:     NOT a conflict (no exception)."""
+  34: 
+  35: 
+  36: class UnknownPairingIdError(Exception):
+  37:     """Phase 6: raised by `complete()` when the `pairing_id` was never
+  38:     reserved by a prior `reserve()` call. The broker handler maps this
+  39:     to HTTP 404 (opaque) so an attacker who knows the public bootstrap
+  40:     key can't get past the pending check by minting a valid envelope
+  41:     for a random uuid4 ג€” the pairing must have been initiated by a
+  42:     legitimate `Client.create_pairing_qr(sender_broker_url=...)` call
+  43:     first.
+  44: 
+  45:     NOTE this is a Protocol-breaking change for third-party
+  46:     `BrokerStorage` implementations that landed in V1.5: custom stores
+  47:     must now track pending IDs atomically alongside completed entries,
+  48:     OR they must accept this behavior change (no silent fall-through
+  49:     when complete is called for an unreserved ID).
+  50:     """
+  51: 
+  52: 
+  53: class BrokerStorage(Protocol):
+  54:     """The broker storage protocol.
+  55: 
+  56:     Implementations MUST be thread-safe AND compare-and-set safe:
+  57:     `complete(...)` is the syncronization point. The first call wins;
+  58:     subsequent calls with identical values are idempotent; calls with
+  59:     different values raise [BrokerStorageConflictError]. This semantics
+  60:     is what defeats envelope replay (spec ֲ§9.3).
+  61: 
+  62:     Phase 6 ג€” pending-pairing registry. The protocol now tracks
+  63:     *pending* pairing IDs in addition to completed entries:
+  64: 
+  65:     - `Client.create_pairing_qr(sender_broker_url=...)` calls
+  66:       `reserve(pairing_id)` so the broker side knows which IDs are
+  67:       legitimately in flight.
+  68:     - The broker handler calls `is_reserved(pairing_id)` BEFORE
+  69:       attempting decrypt; unknown IDs are rejected with HTTP 404.
+  70:     - `complete()` raises [UnknownPairingIdError] when called for an
+  71:       ID that was never reserved (defense-in-depth ג€” the handler
+  72:       check should already have fired, but a buggy caller or race
+  73:       shouldn't silently complete an unknown slot).
+  74: 
+  75:     This closes the "V1.5 fixed-config deviation" documented in
+  76:     earlier crypto-spec drafts.
+  77:     """
+  78: 
+  79:     def reserve(self, pairing_id: str) -> None:
+  80:         """Mark `pairing_id` as a legitimate pending slot. Called by
+  81:         `Client.create_pairing_qr(sender_broker_url=...)` after the
+  82:         Syncler server issues the pairing_id, so the broker side can
+  83:         distinguish "real pending pairing" from "attacker-minted
+  84:         envelope for a random UUID".
+  85: 
+  86:         Idempotent (re-reserving an already-reserved or already-
+  87:         completed ID is a no-op). Implementations MUST be atomic at
+  88:         the storage layer.
+  89:         """
+  90: 
+  91:     def is_reserved(self, pairing_id: str) -> bool:
+  92:         """Returns ``True`` if `pairing_id` was previously reserved
+  93:         OR has already been completed. Used by the broker handler
+  94:         for the pre-decrypt 404 gate.
+  95: 
+  96:         Returning True for completed IDs is intentional ג€” `complete()`
+  97:         itself enforces the CAS, so a re-POST for an idempotent or
+  98:         conflicting completion needs to reach `complete()` to get the
+  99:         right 200/409 response (not get bounced as 404).
+ 100:         """
+ 101: 
+ 102:     def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+ 103:         """Compare-and-set. Returns ``True`` when this call was the
+ 104:         first completion (the storage was previously empty for this
+ 105:         ``pairing_id``); returns ``False`` on idempotent replay of the
+ 106:         same values.
+ 107: 
+ 108:         - First call for a reserved `pairing_id` ג†’ stores entry, returns ``True``.
+ 109:         - Second call with same `entry` ג†’ idempotent, returns ``False``.
+ 110:         - Second call with different `entry` ג†’
+ 111:           [BrokerStorageConflictError].
+ 112:         - Call for a `pairing_id` that was never reserved ג†’
+ 113:           [UnknownPairingIdError].
+ 114: 
+ 115:         The FastAPI broker uses the return value to distinguish HTTP
+ 116:         201 (first completion) from 200 (idempotent replay).
+ 117: 
+ 118:         Implementations MUST be atomic at the storage layer (Postgres
+ 119:         UPSERT WHERE NOT EXISTS or equivalent ג€” NOT a Python-level
+ 120:         check-then-store)."""
+ 121: 
+ 122:     def fetch(self, pairing_id: str) -> BrokerEntry | None:
+ 123:         """Returns the completed entry or `None` if still pending.
+ 124:         Called repeatedly by `Client.wait_for_pairing(...)`."""
+ 125: 
+ 126: 
+ 127: class InMemoryBrokerStorage:
+ 128:     """Default in-process implementation. Suitable for dev / tests /
+ 129:     single-process toy deployments. Loses state on restart. NOT safe
+ 130:     across multiple uvicorn workers AND NOT safe across multiple
+ 131:     Python processes ג€” each worker has its own state, so a `reserve()`
+ 132:     from the sender's Client process won't be visible to a broker
+ 133:     running in a separate worker. Single-process deployments (Client
+ 134:     + broker app in the same Python ג€” e.g. the trading-bot example
+ 135:     via a background thread) work fine. Production multi-worker
+ 136:     setups need a real storage backend (Redis, Postgres).
+ 137:     """
+ 138: 
+ 139:     def __init__(self) -> None:
+ 140:         self._lock = threading.Lock()
+ 141:         self._entries: dict[str, BrokerEntry] = {}
+ 142:         self._reserved: set[str] = set()
+ 143: 
+ 144:     def reserve(self, pairing_id: str) -> None:
+ 145:         """Mark a pairing_id as pending. Idempotent; reserving an
+ 146:         already-completed pairing is also a no-op (an immediate
+ 147:         re-pair after wait_for_pairing returned would otherwise be
+ 148:         racy)."""
+ 149:         with self._lock:
+ 150:             self._reserved.add(pairing_id)
+ 151: 
+ 152:     def is_reserved(self, pairing_id: str) -> bool:
+ 153:         """True if pairing_id was reserved OR already completed."""
+ 154:         with self._lock:
+ 155:             return pairing_id in self._reserved or pairing_id in self._entries
+ 156: 
+ 157:     def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+ 158:         with self._lock:
+ 159:             # Defense-in-depth: handler already checks is_reserved
+ 160:             # before reaching here. A buggy caller or race shouldn't
+ 161:             # silently complete an unreserved ID ג€” flag loudly.
+ 162:             if (
+ 163:                 pairing_id not in self._reserved
+ 164:                 and pairing_id not in self._entries
+ 165:             ):
+ 166:                 raise UnknownPairingIdError(
+ 167:                     f"pairing_id {pairing_id} was never reserved",
+ 168:                 )
+ 169:             existing = self._entries.get(pairing_id)
+ 170:             if existing is None:
+ 171:                 self._entries[pairing_id] = entry
+ 172:                 return True
+ 173:             # Idempotent: same value is fine.
+ 174:             if existing.user_id == entry.user_id and existing.pairing_key == entry.pairing_key:
+ 175:                 return False
+ 176:             raise BrokerStorageConflictError(
+ 177:                 f"pairing_id {pairing_id} already completed with different values",
+ 178:             )
+ 179: 
+ 180:     def fetch(self, pairing_id: str) -> BrokerEntry | None:
+ 181:         with self._lock:
+ 182:             return self._entries.get(pairing_id)
+ 183: 
+ 184: 
+ 185: __all__ = [
+ 186:     "BrokerEntry",
+ 187:     "BrokerStorage",
+ 188:     "BrokerStorageConflictError",
+ 189:     "InMemoryBrokerStorage",
+ 190:     "UnknownPairingIdError",
+ 191: ]
+
+ succeeded in 339ms:
+   1: """FastAPI app factory for the V1.5 automated pairing broker.
+   2: 
+   3: Receives encrypted bootstrap envelopes from the Android device,
+   4: decrypts them against the sender's stored X25519 private key, and
+   5: writes ``(user_id, pairing_key)`` into the configured
+   6: [BrokerStorage]. The sender's ``Client.wait_for_pairing(...)`` polls
+   7: the same storage to learn when a pairing has completed.
+   8: 
+   9: Wire format: see ``docs/crypto-spec.md ֲ§9`` step 7. HTTP status
+  10: semantics:
+  11: 
+  12: - ``201 Created`` ג€” first completion for this ``pairing_id``.
+  13: - ``200 OK`` ג€” idempotent replay with the same ``(user_id,
+  14:   pairing_key)`` values.
+  15: - ``400 Bad Request`` ג€” envelope shape is invalid (missing field,
+  16:   wrong type, base64 field decodes to wrong length).
+  17: - ``401 Unauthorized`` ג€” decrypt failed (AEAD tag mismatch, AAD
+  18:   mismatch, exp outside ֲ±5min window, bootstrap key id mismatch).
+  19:   Response body is opaque on purpose so an attacker can't probe
+  20:   which field caused the failure.
+  21: - ``404 Not Found`` ג€” ``pairing_id`` was never reserved by a
+  22:   legitimate ``Client.create_pairing_qr(sender_broker_url=...)``
+  23:   call (Phase 6 pending-pairing registry). Response body is
+  24:   opaque ג€” no echo of the requested ``pairing_id`` to keep
+  25:   enumeration unhelpful.
+  26: - ``409 Conflict`` ג€” replay with DIFFERENT ``(user_id,
+  27:   pairing_key)`` values for the same ``pairing_id``. Indicates a
+  28:   replay attack or a sender bug.
+  29: 
+  30: Security framing:
+  31: 
+  32: The broker uses a SINGLE fixed ``sender_broker_url`` (the URL the
+  33: sender registered + signed at ``pairing/initiate``). The trusted
+  34: state per ``pairing_id`` is therefore byte-equal to the configured
+  35: URL. This satisfies the AAD-binding rule in
+  36: ``docs/crypto-spec.md ֲ§9.3``.
+  37: 
+  38: Pending-pairing registry (Phase 6): the broker now rejects
+  39: envelopes whose ``pairing_id`` was never reserved by a legitimate
+  40: ``Client.create_pairing_qr(sender_broker_url=...)`` call. This
+  41: closes the earlier "V1.5 fixed-config deviation" ג€” an attacker
+  42: with knowledge of the public bootstrap key can still mint a
+  43: cryptographically valid envelope for an arbitrary uuid4, but the
+  44: 404 gate fires before the decrypt path. UUID entropy (~122 bits)
+  45: makes guessing a reserved ID impractical; the mandatory
+  46: ``rate_limiter`` hook is still strongly recommended in
+  47: production to defend against decrypt-spam DOS on the same UUID.
+  48: 
+  49: Public hosts using a CDN / load balancer in front of this app:
+  50: terminate TLS at the LB, keep the broker on a private network,
+  51: forward client IP via X-Forwarded-For so the rate limiter can key
+  52: on it. ``InMemoryBrokerStorage`` is single-process only ג€”
+  53: production multi-worker deployments AND multi-process
+  54: sender+broker setups need Redis or Postgres so ``reserve()``
+  55: calls in one process are visible to ``is_reserved()`` in another.
+  56: """
+  57: 
+  58: from __future__ import annotations
+  59: 
+  60: import base64
+  61: import logging
+  62: from collections.abc import Awaitable, Callable
+  63: from typing import Any
+  64: 
+  65: from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+  66: from fastapi import FastAPI, HTTPException, Request, Response
+  67: 
+  68: from ..bootstrap import (
+  69:     BootstrapDecryptError,
+  70:     decrypt_bootstrap_envelope,
+  71: )
+  72: from ..broker_storage import (
+  73:     BrokerEntry,
+  74:     BrokerStorage,
+  75:     BrokerStorageConflictError,
+  76:     UnknownPairingIdError,
+  77: )
+  78: 
+  79: _log = logging.getLogger(__name__)
+  80: 
+  81: 
+  82: # Wire envelope shape ג€” see docs/crypto-spec.md ֲ§9 step 7.
+  83: _REQUIRED_FIELDS: tuple[str, ...] = (
+  84:     "protocol_version",
+  85:     "pairing_id",
+  86:     "sender_id",
+  87:     "bootstrap_key_id",
+  88:     "exp",
+  89:     "ephemeral_pubkey",
+  90:     "nonce",
+  91:     "ciphertext",
+  92: )
+  93: _EXPECTED_EPHEMERAL_PUB_BYTES = 32
+  94: _EXPECTED_NONCE_BYTES = 12
+  95: _EXPECTED_KEY_ID_BYTES = 16
+  96: # AES-GCM tag is 16 bytes; ciphertext = plaintext + 16. Empty
+  97: # plaintext would be 16 bytes; require strictly more so we never
+  98: # accept a zero-plaintext envelope (the protocol's plaintext is
+  99: # {"user_id":"...","pairing_key":"..."}, never empty).
+ 100: _MIN_CIPHERTEXT_BYTES = 17
+ 101: 
+ 102: 
+ 103: def make_app(
+ 104:     *,
+ 105:     bootstrap_private_key: X25519PrivateKey,
+ 106:     bootstrap_public_key_raw: bytes,
+ 107:     sender_broker_url: str,
+ 108:     storage: BrokerStorage,
+ 109:     rate_limiter: Callable[[Request], Awaitable[None]] | None = None,
+ 110: ) -> FastAPI:
+ 111:     """Build a FastAPI app that handles one bootstrap envelope POST.
+ 112: 
+ 113:     The app mounts a single ``POST /`` endpoint. The full broker URL
+ 114:     (``sender_broker_url``) is the public form the device POSTs to ג€”
+ 115:     e.g. ``https://sender.example.com/syncler/bootstrap`` ג€” and the
+ 116:     caller decides path prefix at uvicorn / reverse-proxy layer.
+ 117: 
+ 118:     Args:
+ 119:         bootstrap_private_key: The sender's X25519 private key. Loads
+ 120:             via ``syncler.bootstrap.load_x25519_private_key_from_raw``
+ 121:             from however the sender persists it (file, KMS, secrets
+ 122:             manager).
+ 123:         bootstrap_public_key_raw: The matching 32-byte raw X25519
+ 124:             public key, exactly as registered via
+ 125:             ``Client.register_bootstrap_key``. The broker uses this
+ 126:             to compute the expected ``bootstrap_key_id`` and to
+ 127:             mirror the salt the device used.
+ 128:         sender_broker_url: The single trusted broker URL for this
+ 129:             sender. MUST be byte-equal to the URL the sender supplied
+ 130:             in ``Client.create_pairing_qr(sender_broker_url=...)``.
+ 131:             Used as the trusted-state half of the AAD reconstruction.
+ 132:         storage: A [BrokerStorage] (in-memory for dev; Redis / Postgres
+ 133:             for production multi-worker).
+ 134:         rate_limiter: Optional async callable invoked per request
+ 135:             BEFORE body parsing. Raise ``HTTPException`` to short-
+ 136:             circuit with a chosen status (e.g. 429). Any non-
+ 137:             ``HTTPException`` raise propagates as a 500 via FastAPI's
+ 138:             default exception handler. **Strongly recommended in
+ 139:             production** to defend against decrypt-spam DOS.
+ 140: 
+ 141:     Returns:
+ 142:         A configured ``FastAPI`` instance. Caller hands it to
+ 143:         uvicorn / gunicorn / ASGI runner of choice.
+ 144:     """
+ 145:     if len(bootstrap_public_key_raw) != 32:
+ 146:         raise ValueError("bootstrap_public_key_raw must be exactly 32 bytes")
+ 147: 
+ 148:     app = FastAPI(title="syncler-broker", version="0.1.0")
+ 149: 
+ 150:     @app.post("/", status_code=201)
+ 151:     async def handle_bootstrap(  # noqa: D401, ANN201
+ 152:         request: Request,
+ 153:         response: Response,
+ 154:     ) -> dict[str, Any]:
+ 155:         if rate_limiter is not None:
+ 156:             await rate_limiter(request)
+ 157: 
+ 158:         try:
+ 159:             body = await request.json()
+ 160:         except Exception as exc:
+ 161:             raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+ 162: 
+ 163:         if not isinstance(body, dict):
+ 164:             raise HTTPException(status_code=400, detail="body must be a JSON object")
+ 165: 
+ 166:         missing = [k for k in _REQUIRED_FIELDS if k not in body]
+ 167:         if missing:
+ 168:             raise HTTPException(
+ 169:                 status_code=400,
+ 170:                 detail=f"missing required fields: {sorted(missing)}",
+ 171:             )
+ 172:         # Strict 8-field envelope: reject unknown keys (consult 88).
+ 173:         extras = set(body) - set(_REQUIRED_FIELDS)
+ 174:         if extras:
+ 175:             raise HTTPException(
+ 176:                 status_code=400,
+ 177:                 detail=f"unexpected fields: {sorted(extras)}",
+ 178:             )
+ 179: 
+ 180:         # Type checks.
+ 181:         if not isinstance(body["protocol_version"], int) or body["protocol_version"] != 1:
+ 182:             raise HTTPException(status_code=400, detail="protocol_version must be 1")
+ 183:         for field in ("pairing_id", "sender_id", "bootstrap_key_id", "exp",
+ 184:                       "ephemeral_pubkey", "nonce", "ciphertext"):
+ 185:             if not isinstance(body[field], str):
+ 186:                 raise HTTPException(
+ 187:                     status_code=400,
+ 188:                     detail=f"{field} must be a string",
+ 189:                 )
+ 190: 
+ 191:         # Phase 6 pending-pairing registry: cheap pre-decrypt gate.
+ 192:         # Unknown pairing_id ג†’ 404 opaque (Codex 93: don't echo the
+ 193:         # ID in the body so a prober can't enumerate or learn about
+ 194:         # the registry shape). Closes the ֲ§9.3 V1.5 deviation ג€”
+ 195:         # attacker can't mint a valid envelope for a random uuid4
+ 196:         # and reach the decrypt path.
+ 197:         if not storage.is_reserved(body["pairing_id"]):
+ 198:             raise HTTPException(status_code=404, detail="pairing slot not found")
+ 199: 
+ 200:         # Base64 length validation BEFORE decrypt (consult 80/87).
+ 201:         try:
+ 202:             ephemeral_pubkey_raw = base64.b64decode(
+ 203:                 body["ephemeral_pubkey"], validate=True,
+ 204:             )
+ 205:             nonce_raw = base64.b64decode(body["nonce"], validate=True)
+ 206:             ciphertext_raw = base64.b64decode(body["ciphertext"], validate=True)
+ 207:             bootstrap_key_id_raw = base64.b64decode(
+ 208:                 body["bootstrap_key_id"], validate=True,
+ 209:             )
+ 210:         except Exception as exc:
+ 211:             raise HTTPException(
+ 212:                 status_code=400,
+ 213:                 detail="base64 decode failed for one or more envelope fields",
+ 214:             ) from exc
+ 215: 
+ 216:         if len(ephemeral_pubkey_raw) != _EXPECTED_EPHEMERAL_PUB_BYTES:
+ 217:             raise HTTPException(
+ 218:                 status_code=400,
+ 219:                 detail=f"ephemeral_pubkey must decode to {_EXPECTED_EPHEMERAL_PUB_BYTES} bytes",
+ 220:             )
+ 221:         if len(nonce_raw) != _EXPECTED_NONCE_BYTES:
+ 222:             raise HTTPException(
+ 223:                 status_code=400,
+ 224:                 detail=f"nonce must decode to {_EXPECTED_NONCE_BYTES} bytes",
+ 225:             )
+ 226:         if len(bootstrap_key_id_raw) != _EXPECTED_KEY_ID_BYTES:
+ 227:             raise HTTPException(
+ 228:                 status_code=400,
+ 229:                 detail=f"bootstrap_key_id must decode to {_EXPECTED_KEY_ID_BYTES} bytes",
+ 230:             )
+ 231:         if len(ciphertext_raw) < _MIN_CIPHERTEXT_BYTES:
+ 232:             raise HTTPException(
+ 233:                 status_code=400,
+ 234:                 detail=f"ciphertext must decode to at least {_MIN_CIPHERTEXT_BYTES} bytes",
+ 235:             )
+ 236: 
+ 237:         try:
+ 238:             user_id, pairing_key = decrypt_bootstrap_envelope(
+ 239:                 sender_bootstrap_priv=bootstrap_private_key,
+ 240:                 sender_bootstrap_pub=bootstrap_public_key_raw,
+ 241:                 pairing_id=body["pairing_id"],
+ 242:                 sender_id=body["sender_id"],
+ 243:                 sender_broker_url_from_trusted_state=sender_broker_url,
+ 244:                 ephemeral_pubkey=ephemeral_pubkey_raw,
+ 245:                 nonce=nonce_raw,
+ 246:                 ciphertext=ciphertext_raw,
+ 247:                 exp_iso=body["exp"],
+ 248:                 bootstrap_key_id_b64_from_envelope=body["bootstrap_key_id"],
+ 249:             )
+ 250:         except BootstrapDecryptError as exc:
+ 251:             # OPAQUE 401. We log the cause server-side so the sender's
+ 252:             # ops team can debug, but the response body carries no
+ 253:             # detail ג€” leaking which field mismatched would help an
+ 254:             # attacker probe the envelope (consult 80/82 spec).
+ 255:             _log.warning("bootstrap decrypt rejected: %s", exc)
+ 256:             raise HTTPException(status_code=401, detail="bootstrap decrypt failed")
+ 257: 
+ 258:         try:
+ 259:             was_first = storage.complete(
+ 260:                 body["pairing_id"],
+ 261:                 BrokerEntry(user_id=user_id, pairing_key=pairing_key),
+ 262:             )
+ 263:         except UnknownPairingIdError as exc:
+ 264:             # Race: pairing_id passed the pre-decrypt is_reserved
+ 265:             # check but was unreserved between then and now. Treat
+ 266:             # the same as the gate above (404 opaque).
+ 267:             _log.warning("bootstrap complete on unknown pairing_id: %s", exc)
+ 268:             raise HTTPException(status_code=404, detail="pairing slot not found")
+ 269:         except BrokerStorageConflictError as exc:
+ 270:             _log.warning("bootstrap CAS conflict: %s", exc)
+ 271:             raise HTTPException(status_code=409, detail="pairing_id replay with different values")
+ 272: 
+ 273:         # Status: 201 first completion, 200 idempotent replay.
+ 274:         if not was_first:
+ 275:             response.status_code = 200
+ 276:         return {"status": "ok", "pairing_id": body["pairing_id"]}
+ 277: 
+ 278:     return app
+ 279: 
+ 280: 
+ 281: __all__ = ["make_app"]
+
+ succeeded in 360ms:
+   1: """Minimal Syncler trading bot example.
+   2: 
+   3: Phase 5b ג€” full round-trip example. Sends a periodic synthetic
+   4: "trading report" card AND serves the `/api/ack` callback that the
+   5: plugin POSTs to when the user taps "Acknowledge." Demonstrates the
+   6: smallest useful end-to-end sender + plugin pair ג€” pairing, sending,
+   7: plugin rendering, action callback ג€” without external deps beyond
+   8: the syncler SDK and Python stdlib's http.server.
+   9: 
+  10: Usage:
+  11:   python bot.py register         # one-time, prints sender_id; save it
+  12:   python bot.py pair             # writes a QR PNG; user scans it
+  13:   python bot.py set-pairing <user_id> <pairing_key_hex>
+  14:                                  # paste values from device UI
+  15:   python bot.py publish-plugin   # signs + publishes plugin/dist/plugin.bundle.js
+  16:   python bot.py ack-server       # serves /api/ack on :8001 (run alongside loop)
+  17:   python bot.py loop             # sends a report every 30 minutes
+  18: 
+  19: State persists in ./state.json next to this script (sender_id,
+  20: user_id, pairing_key_hex, plugin_row_id, ack_count, ack_history).
+  21: """
+  22: 
+  23: from __future__ import annotations
+  24: 
+  25: import argparse
+  26: import hashlib
+  27: import json
+  28: import os
+  29: import random
+  30: import socket
+  31: import sys
+  32: import threading
+  33: import time
+  34: from datetime import UTC, datetime
+  35: from http.server import BaseHTTPRequestHandler, HTTPServer
+  36: 
+  37: # Make the SDK importable when running from the example dir
+  38: HERE = os.path.dirname(os.path.abspath(__file__))
+  39: sys.path.insert(0, os.path.join(HERE, "..", "..", "sdk-python"))
+  40: 
+  41: from syncler import Client, SynclerError  # noqa: E402
+  42: from syncler.bootstrap import (  # noqa: E402
+  43:     load_x25519_private_key_from_raw,
+  44:     x25519_keypair_pem,
+  45: )
+  46: from syncler.broker_storage import InMemoryBrokerStorage  # noqa: E402
+  47: 
+  48: STATE_FILE = os.path.join(HERE, "state.json")
+  49: PRIVATE_KEY_FILE = os.path.expanduser("~/.syncler/keys/trading-bot.pem")
+  50: BOOTSTRAP_PRIV_FILE = os.path.expanduser(
+  51:     "~/.syncler/keys/trading-bot-bootstrap.bin",
+  52: )
+  53: BASE_URL = os.environ.get("SYNCLER_BASE_URL", "http://localhost:8000")
+  54: # Connectivity defaults are chosen for the Android emulator: 10.0.2.2 is
+  55: # the emulator's loopback to the host machine. Physical-device users
+  56: # either set SYNCLER_LAN_HOST=<dev-machine-LAN-IP> or run
+  57: # `adb reverse tcp:8001 tcp:8001` and set SYNCLER_LAN_HOST=localhost.
+  58: # See README ֲ§"Connecting your Android device" for the full matrix.
+  59: DEVICE_LAN_HOST = os.environ.get("SYNCLER_LAN_HOST", "10.0.2.2")
+  60: ACK_PORT = int(os.environ.get("SYNCLER_ACK_PORT", "8001"))
+  61: ACK_URL = os.environ.get("SYNCLER_ACK_URL", f"http://{DEVICE_LAN_HOST}:{ACK_PORT}/api/ack")
+  62: BUNDLE_URL = os.environ.get("SYNCLER_BUNDLE_URL", f"http://{DEVICE_LAN_HOST}:{ACK_PORT}/plugin.bundle.js")
+  63: BROKER_PORT = int(os.environ.get("SYNCLER_BROKER_PORT", "8002"))
+  64: SENDER_BROKER_URL = os.environ.get(
+  65:     "SYNCLER_BROKER_URL", f"http://{DEVICE_LAN_HOST}:{BROKER_PORT}/",
+  66: )
+  67: 
+  68: 
+  69: def _load_or_create_bootstrap_keypair(state: dict):
+  70:     """Generate the bootstrap X25519 keypair once and persist private
+  71:     key bytes to BOOTSTRAP_PRIV_FILE with restrictive perms where the
+  72:     platform supports it. Public key bytes (hex) ride in state.json so
+  73:     the bot can pass them to make_app(...) on every startup without
+  74:     needing to re-derive them.
+  75: 
+  76:     Codex 93 note: Windows doesn't honor 0600 from Python the same
+  77:     way POSIX does; if you need real key-file ACLs on Windows use
+  78:     icacls or a vault.
+  79:     """
+  80:     if (
+  81:         os.path.exists(BOOTSTRAP_PRIV_FILE)
+  82:         and "bootstrap_pub_hex" in state
+  83:     ):
+  84:         priv_raw = open(BOOTSTRAP_PRIV_FILE, "rb").read()
+  85:         pub_raw = bytes.fromhex(state["bootstrap_pub_hex"])
+  86:         return load_x25519_private_key_from_raw(priv_raw), pub_raw
+  87:     priv, pub_raw = x25519_keypair_pem()
+  88:     from cryptography.hazmat.primitives.serialization import (
+  89:         Encoding, NoEncryption, PrivateFormat,
+  90:     )
+  91:     priv_raw = priv.private_bytes(
+  92:         Encoding.Raw, PrivateFormat.Raw, NoEncryption(),
+  93:     )
+  94:     os.makedirs(os.path.dirname(BOOTSTRAP_PRIV_FILE) or ".", exist_ok=True)
+  95:     with open(BOOTSTRAP_PRIV_FILE, "wb") as f:
+  96:         f.write(priv_raw)
+  97:     try:
+  98:         os.chmod(BOOTSTRAP_PRIV_FILE, 0o600)
+  99:     except (NotImplementedError, OSError):
+ 100:         # Windows / unusual platforms ג€” best effort.
+ 101:         pass
+ 102:     state["bootstrap_pub_hex"] = pub_raw.hex()
+ 103:     save_state(state)
+ 104:     return load_x25519_private_key_from_raw(priv_raw), pub_raw
+ 105: 
+ 106: 
+ 107: def load_state() -> dict:
+ 108:     if not os.path.exists(STATE_FILE):
+ 109:         return {}
+ 110:     return json.loads(open(STATE_FILE).read())
+ 111: 
+ 112: 
+ 113: def save_state(state: dict) -> None:
+ 114:     with open(STATE_FILE, "w") as f:
+ 115:         json.dump(state, f, indent=2)
+ 116: 
+ 117: 
+ 118: def make_client(state: dict) -> Client:
+ 119:     client = Client(
+ 120:         sender_name="Trading Bot",
+ 121:         private_key_path=PRIVATE_KEY_FILE,
+ 122:         base_url=BASE_URL,
+ 123:     )
+ 124:     if "sender_id" in state:
+ 125:         client.set_sender_id(state["sender_id"])
+ 126:     return client
+ 127: 
+ 128: 
+ 129: def cmd_register() -> None:
+ 130:     state = load_state()
+ 131:     client = make_client(state)
+ 132:     if "sender_id" in state:
+ 133:         print(f"Already registered as {state['sender_id']}")
+ 134:         return
+ 135:     sender_id = client.register_if_needed(contact="ops@example.com")
+ 136:     state["sender_id"] = sender_id
+ 137:     save_state(state)
+ 138:     print(f"Registered. sender_id = {sender_id}")
+ 139:     print("Next: python bot.py pair")
+ 140: 
+ 141: 
+ 142: def _ensure_bootstrap_key_registered(client: Client, state: dict, pub_raw: bytes) -> None:
+ 143:     """Idempotent: register the X25519 bootstrap pub key once with
+ 144:     syncler. The server keeps the key (and our Ed25519 signature
+ 145:     over it) so the preview endpoint can hand it to the Android
+ 146:     device. `state["bootstrap_key_id"]` records the server's
+ 147:     SHA-256(pub)[:16] handle so we can detect rotations.
+ 148:     """
+ 149:     expected_kid = hashlib.sha256(pub_raw).digest()[:16].hex()
+ 150:     if state.get("bootstrap_key_id_hex") == expected_kid:
+ 151:         return
+ 152:     server_kid_b64 = client.register_bootstrap_key(bootstrap_public_key_raw=pub_raw)
+ 153:     import base64 as _b64
+ 154:     state["bootstrap_key_id_hex"] = _b64.b64decode(server_kid_b64).hex()
+ 155:     save_state(state)
+ 156: 
+ 157: 
+ 158: def _start_broker_thread(
+ 159:     priv,
+ 160:     pub_raw: bytes,
+ 161:     sender_broker_url: str,
+ 162:     storage: InMemoryBrokerStorage,
+ 163: ) -> threading.Thread:
+ 164:     """Run syncler.broker.make_app(...) in a uvicorn server in a
+ 165:     background thread of THIS process so create_pairing_qr's
+ 166:     reserve() call lands in the same storage that the broker reads
+ 167:     via is_reserved(). Production senders run the broker as a
+ 168:     separate uvicorn process behind a reverse proxy; the
+ 169:     InMemoryBrokerStorage doesn't survive that split (different
+ 170:     processes = different dicts).
+ 171: 
+ 172:     Fail-fast on bind: check the port is free before spawning the
+ 173:     thread so `pair` doesn't silently hang if 8002 is already in
+ 174:     use (Codex 93).
+ 175:     """
+ 176:     from syncler.broker import make_app
+ 177:     import uvicorn
+ 178: 
+ 179:     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+ 180:     try:
+ 181:         sock.bind(("0.0.0.0", BROKER_PORT))
+ 182:     except OSError as e:
+ 183:         sock.close()
+ 184:         raise SystemExit(
+ 185:             f"broker port {BROKER_PORT} is in use ({e}); set SYNCLER_BROKER_PORT to override",
+ 186:         )
+ 187:     sock.close()
+ 188: 
+ 189:     app = make_app(
+ 190:         bootstrap_private_key=priv,
+ 191:         bootstrap_public_key_raw=pub_raw,
+ 192:         sender_broker_url=sender_broker_url,
+ 193:         storage=storage,
+ 194:     )
+ 195:     config = uvicorn.Config(
+ 196:         app, host="0.0.0.0", port=BROKER_PORT, log_level="warning",
+ 197:     )
+ 198:     server = uvicorn.Server(config)
+ 199:     thread = threading.Thread(target=server.run, daemon=True, name="broker")
+ 200:     thread.start()
+ 201:     # Wait briefly for the server to come up before returning so the
+ 202:     # device's POST during pairing doesn't race the startup window.
+ 203:     for _ in range(50):
+ 204:         time.sleep(0.05)
+ 205:         if server.started:
+ 206:             break
+ 207:     return thread
+ 208: 
+ 209: 
+ 210: def cmd_pair() -> None:
+ 211:     """V1.5 automated pairing ג€” register the bootstrap key once,
+ 212:     start a broker thread in-process, build a QR that includes
+ 213:     sender_broker_url, and block on wait_for_pairing until the
+ 214:     device POSTs the encrypted envelope.
+ 215: 
+ 216:     Fallback: if the device can't reach the broker for any reason,
+ 217:     `pair` will time out ג€” re-run with the manual flow by passing
+ 218:     `--manual` (see `set-pairing`).
+ 219:     """
+ 220:     state = load_state()
+ 221:     client = make_client(state)
+ 222:     if "sender_id" not in state:
+ 223:         print("Run `register` first.", file=sys.stderr)
+ 224:         sys.exit(1)
+ 225: 
+ 226:     priv, pub_raw = _load_or_create_bootstrap_keypair(state)
+ 227:     _ensure_bootstrap_key_registered(client, state, pub_raw)
+ 228: 
+ 229:     storage = InMemoryBrokerStorage()
+ 230:     client = Client(
+ 231:         sender_name="Trading Bot",
+ 232:         private_key_path=PRIVATE_KEY_FILE,
+ 233:         base_url=BASE_URL,
+ 234:         broker_storage=storage,
+ 235:     )
+ 236:     client.set_sender_id(state["sender_id"])
+ 237: 
+ 238:     _start_broker_thread(priv, pub_raw, SENDER_BROKER_URL, storage)
+ 239:     print(f"Broker listening on 0.0.0.0:{BROKER_PORT}")
+ 240:     print(f"  device-reachable URL: {SENDER_BROKER_URL}")
+ 241: 
+ 242:     qr_path = client.create_pairing_qr(
+ 243:         ttl_seconds=300,
+ 244:         out_path=os.path.join(HERE, "pairing.png"),
+ 245:         sender_broker_url=SENDER_BROKER_URL,
+ 246:     )
+ 247:     print(f"QR written to {qr_path}")
+ 248:     print("Scan it in the Syncler app and confirm the fingerprint.")
+ 249:     print("Waiting for the device to POST the bootstrap envelope (120s)ג€¦")
+ 250: 
+ 251:     try:
+ 252:         pairing = client.wait_for_pairing(timeout_seconds=120)
+ 253:     except TimeoutError:
+ 254:         print("Timed out waiting for pairing.", file=sys.stderr)
+ 255:         print(
+ 256:             "Fallback: re-run scan, copy the user_id + pairing_key_hex from the device, "
+ 257:             "then `python bot.py set-pairing <user_id> <pairing_key_hex>`.",
+ 258:             file=sys.stderr,
+ 259:         )
+ 260:         sys.exit(1)
+ 261: 
+ 262:     state["user_id"] = pairing.user_id
+ 263:     state["pairing_key_hex"] = client.pairing_key.hex()
+ 264:     save_state(state)
+ 265:     print(f"Paired automatically. user_id = {pairing.user_id}")
+ 266: 
+ 267: 
+ 268: def cmd_set_pairing(user_id: str, pairing_key_hex: str) -> None:
+ 269:     """V1 manual-pairing fallback. Use when the automated `pair`
+ 270:     flow can't complete (broker unreachable, dev environment
+ 271:     without a reverse proxy, etc.). The device shows these values
+ 272:     on the pairing screen when the bootstrap POST fails.
+ 273:     """
+ 274:     state = load_state()
+ 275:     state["user_id"] = user_id
+ 276:     state["pairing_key_hex"] = pairing_key_hex
+ 277:     save_state(state)
+ 278:     print("Pairing recorded (manual / V1 fallback).")
+ 279: 
+ 280: 
+ 281: def cmd_loop() -> None:
+ 282:     state = load_state()
+ 283:     client = make_client(state)
+ 284:     if "sender_id" not in state or "user_id" not in state or "pairing_key_hex" not in state:
+ 285:         print("Run `register` + `pair` + `set-pairing` first.", file=sys.stderr)
+ 286:         sys.exit(1)
+ 287: 
+ 288:     plugin_row_id = state.get("plugin_row_id")
+ 289:     if not plugin_row_id:
+ 290:         print(
+ 291:             "Run `python bot.py publish-plugin` first to publish the plugin "
+ 292:             "and write the returned plugin_row_id into state.json. Requires "
+ 293:             "the plugin bundle to be built and signed; see plugin/build.sh.",
+ 294:             file=sys.stderr,
+ 295:         )
+ 296:         sys.exit(1)
+ 297: 
+ 298:     client.set_pairing(user_id=state["user_id"], pairing_key=bytes.fromhex(state["pairing_key_hex"]))
+ 299: 
+ 300:     while True:
+ 301:         # Generate a synthetic report. The message_id is sent inside the
+ 302:         # payload (NOT the server-assigned one ג€” the plugin echoes this
+ 303:         # back to /api/ack so we can correlate). For real backends use a
+ 304:         # stable, sender-generated identifier (order id, ticket id, etc).
+ 305:         report = synthetic_report()
+ 306:         try:
+ 307:             result = client.send_to(
+ 308:                 user_uuid=state["user_id"],
+ 309:                 plugin_identifier="com.trading.app",
+ 310:                 plugin_id=plugin_row_id,
+ 311:                 payload=report,
+ 312:                 min_plugin_version="1.0.0",
+ 313:             )
+ 314:             print(f"Sent {result.message_id} at {datetime.now(UTC).isoformat()}")
+ 315:         except SynclerError as e:
+ 316:             print(f"send failed: {e}", file=sys.stderr)
+ 317:         time.sleep(int(os.environ.get("SYNCLER_TICK_SECONDS", "1800")))
+ 318: 
+ 319: 
+ 320: def synthetic_report() -> dict:
+ 321:     # message_id is a sender-generated correlation id the plugin echoes
+ 322:     # back to /api/ack. Distinct from the server's internal message_id
+ 323:     # (which the sender doesn't pre-know).
+ 324:     #
+ 325:     # ack_url is sent per-message so the same plugin bundle works for
+ 326:     # any of the three connectivity modes (emulator/LAN/adb reverse)
+ 327:     # without rebuilding. The host's network bridge still enforces
+ 328:     # declaredEndpoints ג€” `ACK_URL` must match one of the manifest's
+ 329:     # globs.
+ 330:     return {
+ 331:         "message_id": f"trade-{int(time.time()*1000)}-{random.randint(1000, 9999)}",
+ 332:         "ack_url": ACK_URL,
+ 333:         "as_of": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+ 334:         "pnl": round(random.uniform(-500.0, 500.0), 2),
+ 335:         "open_positions": random.randint(0, 8),
+ 336:         "headline": random.choice([
+ 337:             "AAPL up 1.2% on volume",
+ 338:             "BTC chop, holding 60k support",
+ 339:             "Portfolio steady; no alerts",
+ 340:         ]),
+ 341:         "hostPreview": {
+ 342:             "title": "Trading report",
+ 343:             "subtitle": "Synthetic example",
+ 344:             "summary": "Tap to view details and acknowledge.",
+ 345:         },
+ 346:     }
+ 347: 
+ 348: 
+ 349: # ----------------------------- Phase 5b additions -----------------------------
+ 350: 
+ 351: 
+ 352: def cmd_publish_plugin() -> None:
+ 353:     """Sign + publish the bundled plugin/dist/plugin.bundle.js and persist
+ 354:     the returned plugin_row_id in state.json. Requires the plugin to be
+ 355:     built first (plugin/build.sh) and a signed manifest produced via
+ 356:     sign-bundle.ts; if manifest.signed.json doesn't exist, we point the
+ 357:     user at the signing command and exit."""
+ 358:     state = load_state()
+ 359:     client = make_client(state)
+ 360:     if "sender_id" not in state:
+ 361:         print("Run `register` first.", file=sys.stderr)
+ 362:         sys.exit(1)
+ 363: 
+ 364:     plugin_dir = os.path.join(HERE, "plugin")
+ 365:     bundle_path = os.path.join(plugin_dir, "dist", "plugin.bundle.js")
+ 366:     signed_manifest_path = os.path.join(plugin_dir, "manifest.signed.json")
+ 367:     if not os.path.exists(bundle_path):
+ 368:         print(
+ 369:             "Bundle not found at plugin/dist/plugin.bundle.js. Build first:\n"
+ 370:             "  cd plugin && ./build.sh",
+ 371:             file=sys.stderr,
+ 372:         )
+ 373:         sys.exit(1)
+ 374:     if not os.path.exists(signed_manifest_path):
+ 375:         print(
+ 376:             "Signed manifest not found. Sign first (from plugin/):\n"
+ 377:             "  npx tsx ../../../sdk-plugin/tools/sign-bundle.ts \\\n"
+ 378:             "      dist/plugin.bundle.js \\\n"
+ 379:             "      ~/.syncler/keys/trading-bot.pem \\\n"
+ 380:             "      manifest.json \\\n"
+ 381:             "      manifest.signed.json",
+ 382:             file=sys.stderr,
+ 383:         )
+ 384:         sys.exit(1)
+ 385: 
+ 386:     bundle_bytes = open(bundle_path, "rb").read()
+ 387:     manifest = json.loads(open(signed_manifest_path).read())
+ 388: 
+ 389:     # Canonical manifest hash: SHA-256 over the manifest JSON with the
+ 390:     # `signature` field removed, sorted keys, compact separators. The
+ 391:     # signing tool already emits this shape; we recompute here to keep
+ 392:     # this script independent.
+ 393:     canonical_manifest = json.dumps(
+ 394:         {k: v for k, v in manifest.items() if k != "signature"},
+ 395:         sort_keys=True, separators=(",", ":"),
+ 396:     ).encode("utf-8")
+ 397:     manifest_hash = hashlib.sha256(canonical_manifest).digest()
+ 398:     bundle_hash = hashlib.sha256(bundle_bytes).digest()
+ 399:     bundle_signature = bytes.fromhex(manifest["signature"])
+ 400: 
+ 401:     response = client.publish_plugin(
+ 402:         plugin_identifier="com.trading.app",
+ 403:         version=manifest["version"],
+ 404:         manifest_hash=manifest_hash,
+ 405:         bundle_hash=bundle_hash,
+ 406:         bundle_signature=bundle_signature,
+ 407:         # For LAN dev: serve the bundle off the bot's HTTP server at the
+ 408:         # device-reachable host. Default 10.0.2.2 is the Android emulator's
+ 409:         # loopback to the host machine. Override via SYNCLER_LAN_HOST or
+ 410:         # SYNCLER_BUNDLE_URL for physical devices. For production, host
+ 411:         # it on a stable HTTPS URL (CDN, S3).
+ 412:         signed_bundle_url=BUNDLE_URL,
+ 413:         capabilities=["network"],
+ 414:         endpoints=[
+ 415:             "http://*.*.*.*:8001/api/*",
+ 416:             "http://localhost:8001/api/*",
+ 417:             "https://*.example.com/api/*",
+ 418:         ],
+ 419:     )
+ 420:     state["plugin_row_id"] = response["plugin_row_id"]
+ 421:     save_state(state)
+ 422:     print(f"Published. plugin_row_id = {response['plugin_row_id']}")
+ 423: 
+ 424: 
+ 425: class _AckHandler(BaseHTTPRequestHandler):
+ 426:     """Serves the bundle (GET /plugin.bundle.js) AND accepts the ack
+ 427:     callback (POST /api/ack). Stdlib http.server ג€” no Flask/FastAPI
+ 428:     dependency for the example. Production callers should use a real
+ 429:     web framework with auth + logging."""
+ 430: 
+ 431:     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
+ 432:         # Print with timestamp; default impl writes to stderr unsorted.
+ 433:         sys.stderr.write(f"[{datetime.now(UTC).isoformat()}] {fmt % args}\n")
+ 434: 
+ 435:     def do_GET(self) -> None:  # noqa: N802
+ 436:         if self.path == "/plugin.bundle.js":
+ 437:             bundle_path = os.path.join(HERE, "plugin", "dist", "plugin.bundle.js")
+ 438:             if not os.path.exists(bundle_path):
+ 439:                 self.send_response(404)
+ 440:                 self.end_headers()
+ 441:                 return
+ 442:             data = open(bundle_path, "rb").read()
+ 443:             self.send_response(200)
+ 444:             self.send_header("Content-Type", "application/javascript")
+ 445:             self.send_header("Content-Length", str(len(data)))
+ 446:             self.end_headers()
+ 447:             self.wfile.write(data)
+ 448:             return
+ 449:         self.send_response(404)
+ 450:         self.end_headers()
+ 451: 
+ 452:     def do_POST(self) -> None:  # noqa: N802
+ 453:         if self.path != "/api/ack":
+ 454:             self.send_response(404)
+ 455:             self.end_headers()
+ 456:             return
+ 457:         try:
+ 458:             length = int(self.headers.get("Content-Length") or "0")
+ 459:             body = self.rfile.read(length).decode("utf-8")
+ 460:             payload = json.loads(body)
+ 461:             message_id = str(payload.get("message_id") or "")
+ 462:             acted_at = str(payload.get("acted_at") or "")
+ 463:         except Exception:
+ 464:             self.send_response(400)
+ 465:             self.end_headers()
+ 466:             return
+ 467:         if not message_id:
+ 468:             self.send_response(400)
+ 469:             self.end_headers()
+ 470:             return
+ 471: 
+ 472:         # Mutate state.json visibly so the round-trip is observable
+ 473:         # without setting up a database. ack_history is FIFO-capped at
+ 474:         # 100 to keep the file readable.
+ 475:         state = load_state()
+ 476:         history = list(state.get("ack_history") or [])
+ 477:         # Idempotent dedupe by message_id (Codex consultation 62 ֲ§7).
+ 478:         if any(h.get("message_id") == message_id for h in history):
+ 479:             self.send_response(409)
+ 480:             self.end_headers()
+ 481:             return
+ 482:         history.append({"message_id": message_id, "acted_at": acted_at})
+ 483:         if len(history) > 100:
+ 484:             history = history[-100:]
+ 485:         state["ack_count"] = int(state.get("ack_count") or 0) + 1
+ 486:         state["ack_history"] = history
+ 487:         save_state(state)
+ 488: 
+ 489:         self.send_response(200)
+ 490:         self.send_header("Content-Type", "application/json")
+ 491:         self.end_headers()
+ 492:         self.wfile.write(b'{"ok": true}')
+ 493: 
+ 494: 
+ 495: def cmd_ack_server() -> None:
+ 496:     """Run the /api/ack + bundle server on 0.0.0.0:<port> in the
+ 497:     foreground. Run alongside `loop` in a separate terminal. Binds to
+ 498:     0.0.0.0 so a physical Android device on the same LAN can reach it;
+ 499:     the device-side URL is `SYNCLER_ACK_URL` / `SYNCLER_BUNDLE_URL`."""
+ 500:     server = HTTPServer(("0.0.0.0", ACK_PORT), _AckHandler)
+ 501:     print(f"Ack server listening on 0.0.0.0:{ACK_PORT}")
+ 502:     print(f"  device-reachable ack URL: {ACK_URL}")
+ 503:     print(f"  device-reachable bundle URL: {BUNDLE_URL}")
+ 504:     print("Override via SYNCLER_LAN_HOST (default 10.0.2.2 for emulator),")
+ 505:     print("or set SYNCLER_ACK_URL / SYNCLER_BUNDLE_URL directly.")
+ 506:     try:
+ 507:         server.serve_forever()
+ 508:     except KeyboardInterrupt:
+ 509:         print("\nShutting down.")
+ 510:         server.server_close()
+ 511: 
+ 512: 
+ 513: def main() -> None:
+ 514:     parser = argparse.ArgumentParser()
+ 515:     sub = parser.add_subparsers(dest="cmd", required=True)
+ 516:     sub.add_parser("register")
+ 517:     sub.add_parser("pair")
+ 518:     sp = sub.add_parser("set-pairing")
+ 519:     sp.add_argument("user_id")
+ 520:     sp.add_argument("pairing_key_hex")
+ 521:     sub.add_parser("publish-plugin")
+ 522:     sub.add_parser("ack-server")
+ 523:     sub.add_parser("loop")
+ 524:     args = parser.parse_args()
+ 525: 
+ 526:     if args.cmd == "register":
+ 527:         cmd_register()
+ 528:     elif args.cmd == "pair":
+ 529:         cmd_pair()
+ 530:     elif args.cmd == "set-pairing":
+ 531:         cmd_set_pairing(args.user_id, args.pairing_key_hex)
+ 532:     elif args.cmd == "publish-plugin":
+ 533:         cmd_publish_plugin()
+ 534:     elif args.cmd == "ack-server":
+ 535:         cmd_ack_server()
+ 536:     elif args.cmd == "loop":
+ 537:         cmd_loop()
+ 538: 
+ 539: 
+ 540: if __name__ == "__main__":
+ 541:     main()
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/tests/test_bootstrap.py | ForEach-Object { if ($i -ge 180 -and $i -le 340) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/syncler/client.py | ForEach-Object { if ($i -ge 130 -and $i -le 240) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"def create_pairing_qr|reserve\\(|broker_storage|wait_for_pairing|register_bootstrap_key|x25519_keypair_pem\" sdk-python/syncler sdk-python/tests examples/trading-bot docs" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/tests/test_broker_app.py | ForEach-Object { if ($i -ge 1 -and $i -le 340) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+ succeeded in 276ms:
+docs\ROADMAP.md:30:- [x] **6. Automated pairing handshake.** HPKE-style bootstrap envelope (X25519 + HKDF + AES-GCM, AAD-bound to sender state) replaces the manual `user_id` + `pairing_key_hex` paste. Sender registers an X25519 bootstrap key alongside its Ed25519 signing key (signed at registration); device verifies the signature against the user-confirmed fingerprint, encrypts `(user_id, pairing_key)` to the bootstrap key, POSTs to a sender-operated broker URL. Sender's `Client.wait_for_pairing(...)` polls the broker storage. Protocol spec: `docs/crypto-spec.md §9`. Walkthrough: `docs/integration-guide.md §8.5`. Shipped:
+docs\ROADMAP.md:35:- [x] **7. Full round-trip example plugin.** `examples/trading-bot/` ships both a plugin and a sender in one directory, sharing `state.json`. `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card on a paired device with an Acknowledge button that POSTs back to the bot. Initial round-trip shipped in Phase 5b (`893d783`); Phase 6 migrated `pair` to the automated V1.5 bootstrap flow (in-process broker thread sharing `InMemoryBrokerStorage`, `Client.wait_for_pairing(timeout_seconds=120)`). The `set-pairing` subcommand remains as a V1 manual fallback for offline / no-broker setups.
+docs\crypto-spec.md:435:The "reject unknown `pairing_id`" half of the rule is enforced via the **pending-pairing registry** built into [BrokerStorage] as of Phase 6. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)` when the Syncler server hands back the freshly-issued ID; the broker handler calls `storage.is_reserved(pairing_id)` BEFORE attempting decrypt and returns HTTP 404 (opaque) for unknown IDs. `complete()` ALSO enforces the same invariant as defense-in-depth (raises `UnknownPairingIdError`, which the handler maps to the same 404).
+docs\crypto-spec.md:439:For multi-process production deployments, `InMemoryBrokerStorage` is insufficient because `reserve()` from the Client process won't be visible to `is_reserved()` in a separate broker process. Use a shared backing store (Redis, Postgres) that implements the [BrokerStorage] Protocol atomically.
+docs\integration-guide.md:540:   - **V1.5 automated (default going forward):** if your sender has registered a bootstrap key and supplied `sender_broker_url` at `create_pairing_qr(...)` time, the app POSTs an encrypted bootstrap envelope (containing `user_id` + `pairing_key`, sealed with the sender's X25519 bootstrap public key) to your broker after fingerprint confirmation; your sender's `Client.wait_for_pairing(...)` returns the decrypted pair. No copy step. See §8.5 for the broker setup.
+docs\integration-guide.md:569:   from syncler.bootstrap import x25519_keypair_pem
+docs\integration-guide.md:570:   bootstrap_priv, bootstrap_pub_raw = x25519_keypair_pem()
+docs\integration-guide.md:578:   client.register_bootstrap_key(bootstrap_public_key_raw=bootstrap_pub_raw)
+docs\integration-guide.md:592:   from syncler.broker_storage import InMemoryBrokerStorage
+docs\integration-guide.md:614:4. **Tell `Client` where the broker storage lives** so `wait_for_pairing` can poll it:
+docs\integration-guide.md:620:       broker_storage=storage,            # NEW — same storage the broker app writes to
+docs\integration-guide.md:636:   pairing = client.wait_for_pairing(timeout_seconds=120)
+docs\integration-guide.md:650:7. `Client.wait_for_pairing` in your sender's send loop picks up the new pairing tuple.
+docs\integration-guide.md:661:| Broker returns 409 (replay with different values) | Fallback banner — the pairing key from your sender's `wait_for_pairing` will not match this device's, so the user must paste the device's values. |
+docs\integration-guide.md:663:| Sender's `wait_for_pairing` times out | Sender's responsibility — typically loop again with a fresh QR. The device-side pairing is still real; user can paste manually. |
+docs\integration-guide.md:677:- Use Redis or Postgres for `BrokerStorage`. The shipped `InMemoryBrokerStorage` is single-process only — fine for the trading-bot example where the Client and broker share one Python process, but **insufficient for multi-process deployments**. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)`; if the broker app runs in a different uvicorn worker, that call's effect won't be visible to the broker's `is_reserved()` check and every pairing will 404. Use a shared backing store that implements the `BrokerStorage` Protocol atomically (one `reserve` call visible to all workers).
+sdk-python/tests\test_bootstrap.py:30:    x25519_keypair_pem,
+sdk-python/tests\test_bootstrap.py:32:from syncler.broker_storage import (
+sdk-python/tests\test_bootstrap.py:108:    sender_priv, sender_pub = x25519_keypair_pem()
+sdk-python/tests\test_bootstrap.py:149:    sender_priv, sender_pub = x25519_keypair_pem()
+sdk-python/tests\test_bootstrap.py:175:    sender_priv, sender_pub = x25519_keypair_pem()
+sdk-python/tests\test_bootstrap.py:201:def test_in_memory_broker_storage_cas():
+sdk-python/tests\test_bootstrap.py:210:    s.reserve(pairing_id)
+sdk-python/tests\test_bootstrap.py:230:    storage.reserve(pairing_id) so the broker handler's 404 gate
+sdk-python/tests\test_bootstrap.py:252:        broker_storage=storage,
+sdk-python/tests\test_bootstrap.py:275:        "create_pairing_qr(sender_broker_url=...) must call storage.reserve(pairing_id)"
+sdk-python/tests\test_bootstrap.py:280:    Client should NOT call reserve() — there's no broker to gate.
+sdk-python/tests\test_bootstrap.py:299:        broker_storage=storage,
+sdk-python/tests\test_bootstrap.py:319:def test_in_memory_broker_storage_reserve_idempotent():
+sdk-python/tests\test_bootstrap.py:321:    pairing_id is a no-op (an immediate re-pair after wait_for_pairing
+sdk-python/tests\test_bootstrap.py:325:    s.reserve(pairing_id)
+sdk-python/tests\test_bootstrap.py:326:    s.reserve(pairing_id)  # idempotent
+sdk-python/tests\test_bootstrap.py:329:    s.reserve(pairing_id)  # still a no-op after completion
+sdk-python/syncler\bootstrap.py:207:def x25519_keypair_pem() -> tuple[X25519PrivateKey, bytes]:
+sdk-python/syncler\bootstrap.py:212:    `Client.register_bootstrap_key`. Rotation is the same call.
+sdk-python/syncler\bootstrap.py:235:    "x25519_keypair_pem",
+sdk-python/tests\test_broker_app.py:28:    x25519_keypair_pem,
+sdk-python/tests\test_broker_app.py:31:from syncler.broker_storage import (
+sdk-python/tests\test_broker_app.py:118:    return x25519_keypair_pem()
+sdk-python/tests\test_broker_app.py:127:    s.reserve(_PAIRING_ID)
+sdk-python/syncler\broker_storage.py:5:``Client.wait_for_pairing(...)`` polls this storage to learn when a
+sdk-python/syncler\broker_storage.py:38:    reserved by a prior `reserve()` call. The broker handler maps this
+sdk-python/syncler\broker_storage.py:66:      `reserve(pairing_id)` so the broker side knows which IDs are
+sdk-python/syncler\broker_storage.py:79:    def reserve(self, pairing_id: str) -> None:
+sdk-python/syncler\broker_storage.py:124:        Called repeatedly by `Client.wait_for_pairing(...)`."""
+sdk-python/syncler\broker_storage.py:131:    Python processes — each worker has its own state, so a `reserve()`
+sdk-python/syncler\broker_storage.py:144:    def reserve(self, pairing_id: str) -> None:
+sdk-python/syncler\broker_storage.py:147:        re-pair after wait_for_pairing returned would otherwise be
+sdk-python/syncler\broker\__init__.py:11:    from syncler.broker_storage import InMemoryBrokerStorage
+sdk-python/syncler\client.py:27:from syncler.broker_storage import BrokerStorage
+sdk-python/syncler\client.py:75:        pairing = client.wait_for_pairing(timeout_seconds=300)
+sdk-python/syncler\client.py:95:        broker_storage: "BrokerStorage | None" = None,
+sdk-python/syncler\client.py:109:        # ``wait_for_pairing(...)`` on the V1.5 automated flow; can be
+sdk-python/syncler\client.py:113:        # writes to AND ``wait_for_pairing(...)`` polls from. None for
+sdk-python/syncler\client.py:115:        self._broker_storage: "BrokerStorage | None" = broker_storage
+sdk-python/syncler\client.py:151:    def create_pairing_qr(
+sdk-python/syncler\client.py:167:        ``Client.wait_for_pairing(...)`` against the same broker storage
+sdk-python/syncler\client.py:170:        ``Client.register_bootstrap_key(...)`` before calling this with
+sdk-python/syncler\client.py:188:        if sender_broker_url is not None and self._broker_storage is not None:
+sdk-python/syncler\client.py:189:            self._broker_storage.reserve(self._pending_pairing_id)
+sdk-python/syncler\client.py:196:    def register_bootstrap_key(
+sdk-python/syncler\client.py:226:    def wait_for_pairing(
+sdk-python/syncler\client.py:243:        if self._broker_storage is None:
+sdk-python/syncler\client.py:245:                "wait_for_pairing requires a broker storage. Pass one to "
+sdk-python/syncler\client.py:246:                "Client(broker_storage=InMemoryBrokerStorage()) at construction time.",
+sdk-python/syncler\client.py:254:            entry = self._broker_storage.fetch(self._pending_pairing_id)
+sdk-python/syncler\client.py:266:                    f"wait_for_pairing exceeded {timeout_seconds}s timeout",
+sdk-python/syncler\broker\app.py:6:[BrokerStorage]. The sender's ``Client.wait_for_pairing(...)`` polls
+sdk-python/syncler\broker\app.py:54:sender+broker setups need Redis or Postgres so ``reserve()``
+sdk-python/syncler\broker\app.py:72:from ..broker_storage import (
+sdk-python/syncler\broker\app.py:125:            ``Client.register_bootstrap_key``. The broker uses this
+examples/trading-bot\README.md:51:3. Writes `pairing.png` (the QR, now carrying `sender_broker_url`) and blocks on `Client.wait_for_pairing(timeout_seconds=120)`.
+examples/trading-bot\bot.py:44:    x25519_keypair_pem,
+examples/trading-bot\bot.py:46:from syncler.broker_storage import InMemoryBrokerStorage  # noqa: E402
+examples/trading-bot\bot.py:87:    priv, pub_raw = x25519_keypair_pem()
+examples/trading-bot\bot.py:152:    server_kid_b64 = client.register_bootstrap_key(bootstrap_public_key_raw=pub_raw)
+examples/trading-bot\bot.py:166:    reserve() call lands in the same storage that the broker reads
+examples/trading-bot\bot.py:213:    sender_broker_url, and block on wait_for_pairing until the
+examples/trading-bot\bot.py:234:        broker_storage=storage,
+examples/trading-bot\bot.py:252:        pairing = client.wait_for_pairing(timeout_seconds=120)
+
+ succeeded in 322ms:
+ 130:         beside the private key ג€” but the SDK keeps that detail outside its
+ 131:         responsibility. For now, the caller catches a 409 themselves.
+ 132:         """
+ 133:         body = {
+ 134:             "public_key": b64(self.public_key),
+ 135:             "name": self.sender_name,
+ 136:             "contact": contact,
+ 137:         }
+ 138:         resp = self.session.post(f"{self.base_url}/v1/senders/register", json=body, timeout=10)
+ 139:         if resp.status_code == 409:
+ 140:             raise SynclerError("sender already registered (use the previously-issued sender_id)")
+ 141:         resp.raise_for_status()
+ 142:         self.sender_id = resp.json()["sender_id"]
+ 143:         return self.sender_id
+ 144: 
+ 145:     def set_sender_id(self, sender_id: str) -> None:
+ 146:         """Set sender_id from a persisted location (after first register)."""
+ 147:         self.sender_id = sender_id
+ 148: 
+ 149:     # ---------------------------- Pairing ----------------------------------
+ 150: 
+ 151:     def create_pairing_qr(
+ 152:         self,
+ 153:         *,
+ 154:         ttl_seconds: int = 300,
+ 155:         metadata: dict[str, Any] | None = None,
+ 156:         out_path: str | None = None,
+ 157:         sender_broker_url: str | None = None,
+ 158:     ) -> str:
+ 159:         """Initiate a pairing and write a QR-code PNG of the broker URL.
+ 160: 
+ 161:         Returns the path to the generated PNG. Caller is responsible for
+ 162:         showing the QR to the user.
+ 163: 
+ 164:         V1.5 (Phase 5a-2): pass ``sender_broker_url`` to enable the
+ 165:         automated pairing flow. The Android app will POST the encrypted
+ 166:         bootstrap envelope to that URL after the user confirms; pair
+ 167:         ``Client.wait_for_pairing(...)`` against the same broker storage
+ 168:         you mounted the broker handler on. Pre-requisite: register the
+ 169:         sender's X25519 bootstrap key via
+ 170:         ``Client.register_bootstrap_key(...)`` before calling this with
+ 171:         ``sender_broker_url`` set ג€” the server rejects otherwise.
+ 172:         """
+ 173:         self._require_sender_id()
+ 174:         body: dict[str, Any] = {
+ 175:             "sender_id": self._canonical_sender_id(),
+ 176:             "ttl_seconds": ttl_seconds,
+ 177:             "metadata": metadata or {},
+ 178:         }
+ 179:         if sender_broker_url is not None:
+ 180:             body["sender_broker_url"] = sender_broker_url
+ 181:         body["signature"] = b64(self.private_key.sign(canonical_json(body)))
+ 182:         resp = self.session.post(f"{self.base_url}/v1/pairing/initiate", json=body, timeout=10)
+ 183:         resp.raise_for_status()
+ 184:         data = resp.json()
+ 185:         self._pending_pairing_token = data["pairing_token"]
+ 186:         self._pending_pairing_id = data["pairing_id"]
+ 187:         # Reserve broker storage slot when running the automated flow.
+ 188:         if sender_broker_url is not None and self._broker_storage is not None:
+ 189:             self._broker_storage.reserve(self._pending_pairing_id)
+ 190: 
+ 191:         broker_url = data["broker_url"]
+ 192:         out_path = out_path or f"syncler-pairing-{int(time.time())}.png"
+ 193:         _render_qr(broker_url, out_path)
+ 194:         return out_path
+ 195: 
+ 196:     def register_bootstrap_key(
+ 197:         self,
+ 198:         *,
+ 199:         bootstrap_public_key_raw: bytes,
+ 200:     ) -> str:
+ 201:         """V1.5 Phase 5a-2: register (or rotate) the sender's X25519
+ 202:         bootstrap public key. Required before calling
+ 203:         ``create_pairing_qr(sender_broker_url=...)``.
+ 204: 
+ 205:         Signs the literal ASCII bytes ``"syncler-v1-bootstrap-key:"``
+ 206:         (24 bytes) concatenated with the raw 32-byte X25519 public key,
+ 207:         per `docs/crypto-spec.md ֲ§9.1`. Returns the base64
+ 208:         ``bootstrap_key_id`` (server-computed SHA-256(pub)[:16]).
+ 209:         """
+ 210:         self._require_sender_id()
+ 211:         if len(bootstrap_public_key_raw) != 32:
+ 212:             raise ValueError("bootstrap_public_key_raw must be 32 bytes")
+ 213:         sig_input = b"syncler-v1-bootstrap-key:" + bootstrap_public_key_raw
+ 214:         signature = self.private_key.sign(sig_input)
+ 215:         body = {
+ 216:             "sender_id": self._canonical_sender_id(),
+ 217:             "bootstrap_key": b64(bootstrap_public_key_raw),
+ 218:             "bootstrap_key_signature": b64(signature),
+ 219:         }
+ 220:         resp = self.session.post(
+ 221:             f"{self.base_url}/v1/senders/me/bootstrap-key", json=body, timeout=10,
+ 222:         )
+ 223:         resp.raise_for_status()
+ 224:         return resp.json()["bootstrap_key_id"]
+ 225: 
+ 226:     def wait_for_pairing(
+ 227:         self,
+ 228:         *,
+ 229:         timeout_seconds: int = 120,
+ 230:         poll_interval_seconds: float = 1.0,
+ 231:     ) -> Pairing:
+ 232:         """V1.5 Phase 5a-2: poll the broker storage until the device's
+ 233:         bootstrap POST lands, then automatically set the pairing on
+ 234:         this client.
+ 235: 
+ 236:         Defaults: 120s timeout, 1s poll with ֲ±20% jitter (jitter avoids
+ 237:         synchronized polling when multiple pairings are in flight).
+ 238:         Raises ``TimeoutError`` on deadline. Caller must have wired a
+ 239:         broker storage via ``Client(...)``'s constructor ג€” otherwise
+ 240:         there's nothing to poll.
+
+ succeeded in 325ms:
+ 180:         pairing_id="00000000-1111-2222-3333-444444444444",
+ 181:         sender_id="55555555-6666-7777-8888-999999999999",
+ 182:         sender_broker_url="https://broker.example.com/api/v1",
+ 183:         plaintext=b'{"user_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","pairing_key":"AA=="}',
+ 184:         exp_iso=stale_exp,
+ 185:     )
+ 186:     with pytest.raises(BootstrapDecryptError):
+ 187:         decrypt_bootstrap_envelope(
+ 188:             sender_bootstrap_priv=sender_priv,
+ 189:             sender_bootstrap_pub=sender_pub,
+ 190:             pairing_id="00000000-1111-2222-3333-444444444444",
+ 191:             sender_id="55555555-6666-7777-8888-999999999999",
+ 192:             sender_broker_url_from_trusted_state="https://broker.example.com/api/v1",
+ 193:             ephemeral_pubkey=envelope["ephemeral_pubkey"],
+ 194:             nonce=envelope["nonce"],
+ 195:             ciphertext=envelope["ciphertext"],
+ 196:             exp_iso=envelope["exp_iso"],
+ 197:             bootstrap_key_id_b64_from_envelope=envelope["bootstrap_key_id_b64"],
+ 198:         )
+ 199: 
+ 200: 
+ 201: def test_in_memory_broker_storage_cas():
+ 202:     s = InMemoryBrokerStorage()
+ 203:     pairing_id = "00000000-1111-2222-3333-444444444444"
+ 204:     entry_a = BrokerEntry(user_id="aaaa", pairing_key=b"\x01" * 32)
+ 205:     # Phase 6 pending-pairing registry: reserve is now required
+ 206:     # before complete (defense-in-depth alongside the broker handler's
+ 207:     # 404 gate). Unreserved complete raises UnknownPairingIdError.
+ 208:     with pytest.raises(UnknownPairingIdError):
+ 209:         s.complete(pairing_id, entry_a)
+ 210:     s.reserve(pairing_id)
+ 211:     assert s.is_reserved(pairing_id)
+ 212:     # Phase 5a-2.1: complete() returns True on first completion,
+ 213:     # False on idempotent replay. Broker uses this to send 201 vs 200.
+ 214:     assert s.complete(pairing_id, entry_a) is True
+ 215:     # is_reserved stays True after completion so a re-POST gets to
+ 216:     # the CAS layer, not bounced as 404 (Gemini 93 + Codex 93).
+ 217:     assert s.is_reserved(pairing_id)
+ 218:     # Idempotent second store with same values.
+ 219:     assert s.complete(pairing_id, entry_a) is False
+ 220:     assert s.fetch(pairing_id) == entry_a
+ 221:     # Conflict on different values.
+ 222:     entry_b = BrokerEntry(user_id="bbbb", pairing_key=b"\x02" * 32)
+ 223:     with pytest.raises(BrokerStorageConflictError):
+ 224:         s.complete(pairing_id, entry_b)
+ 225: 
+ 226: 
+ 227: def test_client_create_pairing_qr_reserves_pairing_id(tmp_path):
+ 228:     """Phase 6 / Codex 93 missing-test: confirm
+ 229:     Client.create_pairing_qr(sender_broker_url=...) calls
+ 230:     storage.reserve(pairing_id) so the broker handler's 404 gate
+ 231:     accepts the subsequent envelope."""
+ 232:     from unittest.mock import MagicMock, patch
+ 233: 
+ 234:     from syncler.client import Client
+ 235: 
+ 236:     storage = InMemoryBrokerStorage()
+ 237:     # Build a Client with our storage. private_key_path needs a real
+ 238:     # Ed25519 PEM; generate one to a tmp file.
+ 239:     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+ 240:     from cryptography.hazmat.primitives.serialization import (
+ 241:         Encoding, NoEncryption, PrivateFormat,
+ 242:     )
+ 243:     key_path = tmp_path / "test-sender.pem"
+ 244:     key_pem = Ed25519PrivateKey.generate().private_bytes(
+ 245:         Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
+ 246:     )
+ 247:     key_path.write_bytes(key_pem)
+ 248: 
+ 249:     client = Client(
+ 250:         sender_name="Test",
+ 251:         private_key_path=str(key_path),
+ 252:         broker_storage=storage,
+ 253:     )
+ 254:     client.set_sender_id("11111111-1111-1111-1111-111111111111")
+ 255: 
+ 256:     pairing_id = "22222222-3333-4444-5555-666666666666"
+ 257:     server_response = MagicMock()
+ 258:     server_response.json.return_value = {
+ 259:         "pairing_id": pairing_id,
+ 260:         "pairing_token": "tkn",
+ 261:         "broker_url": "https://syncler.example.com/pair?token=tkn",
+ 262:     }
+ 263:     server_response.raise_for_status = lambda: None
+ 264: 
+ 265:     qr_path = tmp_path / "qr.png"
+ 266:     with patch.object(client.session, "post", return_value=server_response):
+ 267:         # Patch the QR renderer too so we don't need PIL/qrcode here.
+ 268:         with patch("syncler.client._render_qr"):
+ 269:             client.create_pairing_qr(
+ 270:                 sender_broker_url="https://broker.example.com/",
+ 271:                 out_path=str(qr_path),
+ 272:             )
+ 273: 
+ 274:     assert storage.is_reserved(pairing_id), \
+ 275:         "create_pairing_qr(sender_broker_url=...) must call storage.reserve(pairing_id)"
+ 276: 
+ 277: 
+ 278: def test_client_create_pairing_qr_does_not_reserve_without_broker_url(tmp_path):
+ 279:     """V1 manual-pairing path: when sender_broker_url is None, the
+ 280:     Client should NOT call reserve() ג€” there's no broker to gate.
+ 281:     """
+ 282:     from unittest.mock import MagicMock, patch
+ 283: 
+ 284:     from syncler.client import Client
+ 285:     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+ 286:     from cryptography.hazmat.primitives.serialization import (
+ 287:         Encoding, NoEncryption, PrivateFormat,
+ 288:     )
+ 289: 
+ 290:     storage = InMemoryBrokerStorage()
+ 291:     key_path = tmp_path / "test-sender.pem"
+ 292:     key_path.write_bytes(Ed25519PrivateKey.generate().private_bytes(
+ 293:         Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
+ 294:     ))
+ 295: 
+ 296:     client = Client(
+ 297:         sender_name="Test",
+ 298:         private_key_path=str(key_path),
+ 299:         broker_storage=storage,
+ 300:     )
+ 301:     client.set_sender_id("11111111-1111-1111-1111-111111111111")
+ 302: 
+ 303:     pairing_id = "abcdef00-0000-0000-0000-000000000000"
+ 304:     server_response = MagicMock()
+ 305:     server_response.json.return_value = {
+ 306:         "pairing_id": pairing_id,
+ 307:         "pairing_token": "tkn",
+ 308:         "broker_url": "https://syncler.example.com/pair?token=tkn",
+ 309:     }
+ 310:     server_response.raise_for_status = lambda: None
+ 311: 
+ 312:     with patch.object(client.session, "post", return_value=server_response):
+ 313:         with patch("syncler.client._render_qr"):
+ 314:             client.create_pairing_qr(out_path=str(tmp_path / "qr.png"))
+ 315: 
+ 316:     assert not storage.is_reserved(pairing_id)
+ 317: 
+ 318: 
+ 319: def test_in_memory_broker_storage_reserve_idempotent():
+ 320:     """Phase 6: reserving an already-reserved or already-completed
+ 321:     pairing_id is a no-op (an immediate re-pair after wait_for_pairing
+ 322:     returned would otherwise be racy)."""
+ 323:     s = InMemoryBrokerStorage()
+ 324:     pairing_id = "11111111-2222-3333-4444-555555555555"
+ 325:     s.reserve(pairing_id)
+ 326:     s.reserve(pairing_id)  # idempotent
+ 327:     assert s.is_reserved(pairing_id)
+ 328:     s.complete(pairing_id, BrokerEntry(user_id="xx", pairing_key=b"\x00" * 32))
+ 329:     s.reserve(pairing_id)  # still a no-op after completion
+ 330:     assert s.is_reserved(pairing_id)
+ 331:     # Unknown ID is not reserved.
+ 332:     assert not s.is_reserved("99999999-9999-9999-9999-999999999999")
+
+ succeeded in 340ms:
+   1: """Tests for the V1.5 automated pairing broker FastAPI app.
+   2: 
+   3: Schema-level only ג€” no actual networking, no real device. Builds
+   4: envelopes with the canonical test helpers, posts via fastapi.testclient,
+   5: asserts the response status + storage state.
+   6: """
+   7: 
+   8: from __future__ import annotations
+   9: 
+  10: import base64
+  11: import json
+  12: from datetime import UTC, datetime, timedelta
+  13: from typing import Any
+  14: 
+  15: import pytest
+  16: from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+  17: from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+  18: from cryptography.hazmat.primitives import hashes
+  19: from cryptography.hazmat.primitives.asymmetric.x25519 import (
+  20:     X25519PrivateKey,
+  21:     X25519PublicKey,
+  22: )
+  23: from fastapi import HTTPException, Request
+  24: 
+  25: from syncler.bootstrap import (
+  26:     assemble_bootstrap_aad,
+  27:     bootstrap_key_id,
+  28:     x25519_keypair_pem,
+  29: )
+  30: from syncler.broker import make_app
+  31: from syncler.broker_storage import (
+  32:     BrokerEntry,
+  33:     InMemoryBrokerStorage,
+  34: )
+  35: 
+  36: # Static test fixtures.
+  37: _SENDER_BROKER_URL = "https://sender.example.com/syncler/bootstrap"
+  38: _PAIRING_ID = "00000000-1111-2222-3333-444444444444"
+  39: _SENDER_ID = "55555555-6666-7777-8888-999999999999"
+  40: _USER_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  41: 
+  42: 
+  43: def _b64(b: bytes) -> str:
+  44:     return base64.b64encode(b).decode("ascii")
+  45: 
+  46: 
+  47: def _build_envelope(
+  48:     *,
+  49:     sender_bootstrap_priv: X25519PrivateKey,
+  50:     sender_bootstrap_pub_raw: bytes,
+  51:     pairing_id: str = _PAIRING_ID,
+  52:     sender_id: str = _SENDER_ID,
+  53:     sender_broker_url: str = _SENDER_BROKER_URL,
+  54:     user_id: str = _USER_ID,
+  55:     pairing_key: bytes | None = None,
+  56:     exp_iso: str | None = None,
+  57: ) -> dict[str, Any]:
+  58:     """Build a real bootstrap envelope using the Phase 5a-1 spec.
+  59:     Mirrors the Android `BootstrapEnvelope.build(...)` step-by-step
+  60:     so the test client posts the same wire shape a real device
+  61:     would.
+  62:     """
+  63:     if pairing_key is None:
+  64:         pairing_key = b"\x42" * 32
+  65:     if exp_iso is None:
+  66:         exp_iso = (datetime.now(UTC) + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+  67: 
+  68:     # 1. Ephemeral X25519.
+  69:     eph_priv = X25519PrivateKey.generate()
+  70:     eph_pub_raw = eph_priv.public_key().public_bytes_raw()
+  71: 
+  72:     # 2. ECDH against sender's bootstrap pub.
+  73:     sender_bootstrap_pub_obj = X25519PublicKey.from_public_bytes(sender_bootstrap_pub_raw)
+  74:     shared = eph_priv.exchange(sender_bootstrap_pub_obj)
+  75: 
+  76:     # 3. HKDF-SHA256 ג†’ aead_key.
+  77:     salt = eph_pub_raw + sender_bootstrap_pub_raw
+  78:     aead_key = HKDF(
+  79:         algorithm=hashes.SHA256(),
+  80:         length=32,
+  81:         salt=salt,
+  82:         info=b"syncler-v1-bootstrap-aead",
+  83:     ).derive(shared)
+  84: 
+  85:     # 4. Canonical AAD.
+  86:     kid_b64 = _b64(bootstrap_key_id(sender_bootstrap_pub_raw))
+  87:     aad = assemble_bootstrap_aad(
+  88:         bootstrap_key_id_b64=kid_b64,
+  89:         exp_iso=exp_iso,
+  90:         pairing_id=pairing_id,
+  91:         sender_broker_url=sender_broker_url,
+  92:         sender_id=sender_id,
+  93:     )
+  94: 
+  95:     # 5. Encrypt {user_id, pairing_key}.
+  96:     plaintext = json.dumps(
+  97:         {"user_id": user_id, "pairing_key": _b64(pairing_key)},
+  98:         sort_keys=True,
+  99:         separators=(",", ":"),
+ 100:     ).encode("utf-8")
+ 101:     nonce = b"\x01" * 12  # deterministic for replay tests
+ 102:     ciphertext = AESGCM(aead_key).encrypt(nonce, plaintext, aad)
+ 103: 
+ 104:     return {
+ 105:         "protocol_version": 1,
+ 106:         "pairing_id": pairing_id,
+ 107:         "sender_id": sender_id,
+ 108:         "bootstrap_key_id": kid_b64,
+ 109:         "exp": exp_iso,
+ 110:         "ephemeral_pubkey": _b64(eph_pub_raw),
+ 111:         "nonce": _b64(nonce),
+ 112:         "ciphertext": _b64(ciphertext),
+ 113:     }
+ 114: 
+ 115: 
+ 116: @pytest.fixture
+ 117: def keypair() -> tuple[X25519PrivateKey, bytes]:
+ 118:     return x25519_keypair_pem()
+ 119: 
+ 120: 
+ 121: @pytest.fixture
+ 122: def storage() -> InMemoryBrokerStorage:
+ 123:     s = InMemoryBrokerStorage()
+ 124:     # Phase 6: pre-reserve the canonical test pairing_id so the
+ 125:     # broker handler's pending-pairing 404 gate doesn't fire on
+ 126:     # every test. Unknown-pairing tests use a different ID.
+ 127:     s.reserve(_PAIRING_ID)
+ 128:     return s
+ 129: 
+ 130: 
+ 131: @pytest.fixture
+ 132: def app(keypair: tuple[X25519PrivateKey, bytes], storage: InMemoryBrokerStorage):
+ 133:     priv, pub = keypair
+ 134:     return make_app(
+ 135:         bootstrap_private_key=priv,
+ 136:         bootstrap_public_key_raw=pub,
+ 137:         sender_broker_url=_SENDER_BROKER_URL,
+ 138:         storage=storage,
+ 139:     )
+ 140: 
+ 141: 
+ 142: @pytest.fixture
+ 143: def client(app):  # type: ignore[no-untyped-def]
+ 144:     from fastapi.testclient import TestClient
+ 145:     return TestClient(app, raise_server_exceptions=False)
+ 146: 
+ 147: 
+ 148: # --------------------------- happy paths ---------------------------
+ 149: 
+ 150: 
+ 151: def test_first_completion_returns_201(client, keypair, storage):
+ 152:     priv, pub = keypair
+ 153:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 154:     response = client.post("/", json=envelope)
+ 155:     assert response.status_code == 201, response.text
+ 156:     body = response.json()
+ 157:     assert body["status"] == "ok"
+ 158:     assert body["pairing_id"] == _PAIRING_ID
+ 159:     entry = storage.fetch(_PAIRING_ID)
+ 160:     assert entry is not None
+ 161:     assert entry.user_id == _USER_ID
+ 162:     assert entry.pairing_key == b"\x42" * 32
+ 163: 
+ 164: 
+ 165: def test_idempotent_replay_same_values_returns_200(client, keypair, storage):
+ 166:     priv, pub = keypair
+ 167:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 168:     # Same envelope twice ג€” needs a fresh ephemeral key per build but
+ 169:     # same plaintext. Build with a stable user_id/pairing_key so the
+ 170:     # CAS sees the second call as idempotent.
+ 171:     pk = b"\xab" * 32
+ 172:     env1 = _build_envelope(
+ 173:         sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk,
+ 174:     )
+ 175:     env2 = _build_envelope(
+ 176:         sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk,
+ 177:     )
+ 178:     r1 = client.post("/", json=env1)
+ 179:     assert r1.status_code == 201, r1.text
+ 180:     r2 = client.post("/", json=env2)
+ 181:     assert r2.status_code == 200, r2.text
+ 182: 
+ 183: 
+ 184: def test_replay_with_different_values_returns_409(client, keypair, storage):
+ 185:     priv, pub = keypair
+ 186:     env1 = _build_envelope(
+ 187:         sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub,
+ 188:         pairing_key=b"\x11" * 32,
+ 189:     )
+ 190:     env2 = _build_envelope(
+ 191:         sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub,
+ 192:         pairing_key=b"\x22" * 32,
+ 193:     )
+ 194:     r1 = client.post("/", json=env1)
+ 195:     assert r1.status_code == 201, r1.text
+ 196:     r2 = client.post("/", json=env2)
+ 197:     assert r2.status_code == 409, r2.text
+ 198: 
+ 199: 
+ 200: # --------------------------- decrypt failures (opaque 401) ---------------------------
+ 201: 
+ 202: 
+ 203: def test_expired_envelope_returns_401_opaque(client, keypair):
+ 204:     priv, pub = keypair
+ 205:     # exp_iso 10 minutes in the past ג†’ outside ֲ±5min window.
+ 206:     stale = (datetime.now(UTC) - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+ 207:     envelope = _build_envelope(
+ 208:         sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, exp_iso=stale,
+ 209:     )
+ 210:     response = client.post("/", json=envelope)
+ 211:     assert response.status_code == 401, response.text
+ 212:     assert response.json()["detail"] == "bootstrap decrypt failed"
+ 213: 
+ 214: 
+ 215: def test_substituted_sender_broker_url_returns_401_opaque(client, keypair):
+ 216:     priv, pub = keypair
+ 217:     # Build envelope with a DIFFERENT broker URL ג€” the broker's
+ 218:     # trusted state is _SENDER_BROKER_URL, so AAD reconstruction
+ 219:     # diverges and AEAD tag fails.
+ 220:     envelope = _build_envelope(
+ 221:         sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub,
+ 222:         sender_broker_url="https://attacker.example.com/syncler/bootstrap",
+ 223:     )
+ 224:     response = client.post("/", json=envelope)
+ 225:     assert response.status_code == 401, response.text
+ 226: 
+ 227: 
+ 228: def test_aead_tag_flip_returns_401_opaque(client, keypair):
+ 229:     priv, pub = keypair
+ 230:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 231:     # Flip one bit in the ciphertext.
+ 232:     ct_raw = base64.b64decode(envelope["ciphertext"])
+ 233:     flipped = bytearray(ct_raw)
+ 234:     flipped[0] ^= 0x01
+ 235:     envelope["ciphertext"] = base64.b64encode(bytes(flipped)).decode("ascii")
+ 236:     response = client.post("/", json=envelope)
+ 237:     assert response.status_code == 401, response.text
+ 238: 
+ 239: 
+ 240: def test_wrong_bootstrap_key_id_returns_401_opaque(client, keypair):
+ 241:     priv, pub = keypair
+ 242:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 243:     # Replace the bootstrap_key_id with a bogus 16-byte value ג€”
+ 244:     # rotation guard fires.
+ 245:     envelope["bootstrap_key_id"] = _b64(b"\x00" * 16)
+ 246:     response = client.post("/", json=envelope)
+ 247:     assert response.status_code == 401, response.text
+ 248: 
+ 249: 
+ 250: def test_invalid_low_order_ephemeral_pubkey_returns_401_opaque(client, keypair):
+ 251:     """Codex 89 RED: X25519 low-order/invalid points must surface as
+ 252:     opaque 401, not a 500 from the X25519 library bubbling up."""
+ 253:     priv, pub = keypair
+ 254:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 255:     # All-zero is a well-known low-order point that cryptography
+ 256:     # rejects at exchange() time.
+ 257:     envelope["ephemeral_pubkey"] = _b64(b"\x00" * 32)
+ 258:     response = client.post("/", json=envelope)
+ 259:     assert response.status_code == 401, response.text
+ 260:     assert response.json()["detail"] == "bootstrap decrypt failed"
+ 261: 
+ 262: 
+ 263: # Phase 6: pending-pairing registry. Cryptographically-valid envelope
+ 264: # for a pairing_id that was never reserved must 404 before reaching
+ 265: # decrypt. Closes the ֲ§9.3 V1.5 deviation.
+ 266: def test_unreserved_pairing_id_returns_404_opaque(client, keypair):
+ 267:     priv, pub = keypair
+ 268:     unreserved_id = "12345678-1234-1234-1234-1234567890ab"
+ 269:     envelope = _build_envelope(
+ 270:         sender_bootstrap_priv=priv,
+ 271:         sender_bootstrap_pub_raw=pub,
+ 272:         pairing_id=unreserved_id,
+ 273:     )
+ 274:     response = client.post("/", json=envelope)
+ 275:     assert response.status_code == 404, response.text
+ 276:     # Opaque body ג€” must NOT echo the requested pairing_id back (Codex 93).
+ 277:     body_text = response.text
+ 278:     assert unreserved_id not in body_text
+ 279: 
+ 280: 
+ 281: # Phase 6: after a successful completion, is_reserved should still
+ 282: # return True (so a re-POST gets to the CAS layer for the 200/409
+ 283: # decision rather than being bounced as 404).
+ 284: def test_replay_after_completion_does_not_404(client, keypair, storage):
+ 285:     priv, pub = keypair
+ 286:     pk = b"\xcd" * 32
+ 287:     env1 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk)
+ 288:     r1 = client.post("/", json=env1)
+ 289:     assert r1.status_code == 201, r1.text
+ 290:     # storage now has _entries[pairing_id]. is_reserved should be True.
+ 291:     assert storage.is_reserved(_PAIRING_ID)
+ 292:     env2 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk)
+ 293:     r2 = client.post("/", json=env2)
+ 294:     assert r2.status_code == 200, r2.text
+ 295: 
+ 296: 
+ 297: # --------------------------- shape validation (400) ---------------------------
+ 298: 
+ 299: 
+ 300: def test_missing_field_returns_400(client, keypair):
+ 301:     priv, pub = keypair
+ 302:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 303:     del envelope["nonce"]
+ 304:     response = client.post("/", json=envelope)
+ 305:     assert response.status_code == 400
+ 306: 
+ 307: 
+ 308: def test_unexpected_extra_field_returns_400(client, keypair):
+ 309:     priv, pub = keypair
+ 310:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 311:     envelope["unknown_field"] = "leak"
+ 312:     response = client.post("/", json=envelope)
+ 313:     assert response.status_code == 400
+ 314: 
+ 315: 
+ 316: def test_wrong_protocol_version_returns_400(client, keypair):
+ 317:     priv, pub = keypair
+ 318:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 319:     envelope["protocol_version"] = 2
+ 320:     response = client.post("/", json=envelope)
+ 321:     assert response.status_code == 400
+ 322: 
+ 323: 
+ 324: def test_invalid_base64_lengths_return_400(client, keypair):
+ 325:     priv, pub = keypair
+ 326:     # ephemeral_pubkey must decode to 32 bytes; pass 31.
+ 327:     envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 328:     envelope["ephemeral_pubkey"] = _b64(b"\x00" * 31)
+ 329:     response = client.post("/", json=envelope)
+ 330:     assert response.status_code == 400
+ 331: 
+ 332:     # nonce must decode to 12 bytes; pass 8.
+ 333:     envelope2 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 334:     envelope2["nonce"] = _b64(b"\x00" * 8)
+ 335:     response = client.post("/", json=envelope2)
+ 336:     assert response.status_code == 400
+ 337: 
+ 338:     # bootstrap_key_id must decode to 16 bytes; pass 15.
+ 339:     envelope3 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+ 340:     envelope3["bootstrap_key_id"] = _b64(b"\x00" * 15)
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content docs/integration-guide.md | ForEach-Object { if ($i -ge 560 -and $i -le 685) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/syncler/bootstrap.py | ForEach-Object { if ($i -ge 200 -and $i -le 225) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content sdk-python/syncler/client.py | ForEach-Object { if ($i -ge 226 -and $i -le 275) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content examples/trading-bot/README.md | ForEach-Object { if ($i -ge 35 -and $i -le 75) { '"'{0,4}: {1}' -f "'$i, $_ }; $i++ }' in D:\Projects\syncler
+ succeeded in 312ms:
+  35: 
+  36: ```sh
+  37: python bot.py register
+  38: ```
+  39: 
+  40: Prints a `sender_id` and writes it to `state.json`. Persists across runs.
+  41: 
+  42: ### 3. Pair with a user (automated, V1.5)
+  43: 
+  44: ```sh
+  45: python bot.py pair
+  46: ```
+  47: 
+  48: This:
+  49: 1. Generates the sender's X25519 bootstrap keypair on first run and persists the private key to `~/.syncler/keys/trading-bot-bootstrap.bin` (0600 where the platform supports it; Windows users may need to ACL the file manually). The public key is registered with Syncler (idempotent ג€” re-runs are no-ops once the key id matches).
+  50: 2. Starts an in-process broker on `0.0.0.0:8002` (override with `SYNCLER_BROKER_PORT`). The broker shares the bot's `InMemoryBrokerStorage` so the QR's reserved `pairing_id` is visible to the broker's pre-decrypt 404 gate.
+  51: 3. Writes `pairing.png` (the QR, now carrying `sender_broker_url`) and blocks on `Client.wait_for_pairing(timeout_seconds=120)`.
+  52: 4. Scan the QR in the Syncler app, confirm the fingerprint. After the device finishes the encrypted bootstrap POST, `pair` returns and `state.json` carries `user_id` + `pairing_key_hex`.
+  53: 
+  54: The broker URL the device sees is `SYNCLER_BROKER_URL` (defaults to `http://${SYNCLER_LAN_HOST}:8002/`). Same connectivity matrix as the ack server ג€” see [Connecting your Android device](#connecting-your-android-device) below.
+  55: 
+  56: **Fallback (V1 manual).** If `pair` times out ג€” broker unreachable from the device, no LAN connectivity, etc. ג€” the Syncler app shows the `user_id` + `pairing_key_hex` block, just like in V1:
+  57: 
+  58: ```sh
+  59: python bot.py set-pairing <user_id> <pairing_key_hex>
+  60: ```
+  61: 
+  62: This writes the same state.json values that `pair` would have on success, so the rest of the walkthrough continues unchanged.
+  63: 
+  64: ### 4. Build + sign the plugin
+  65: 
+  66: ```sh
+  67: cd plugin
+  68: chmod +x build.sh && ./build.sh
+  69: 
+  70: # Replace the senderId placeholder in manifest.json with your sender_id
+  71: # (printed by `bot.py register`) before signing ג€” the signed manifest is
+  72: # what the server validates.
+  73: 
+  74: npx tsx ../../../sdk-plugin/tools/sign-bundle.ts \
+  75:   dist/plugin.bundle.js \
+
+ succeeded in 333ms:
+ 200: 
+ 201: 
+ 202: def _b64_std(value: bytes) -> str:
+ 203:     import base64 as _b64mod
+ 204:     return _b64mod.b64encode(value).decode("ascii")
+ 205: 
+ 206: 
+ 207: def x25519_keypair_pem() -> tuple[X25519PrivateKey, bytes]:
+ 208:     """Generate a fresh X25519 bootstrap keypair. Returns
+ 209:     ``(private_key, public_key_raw_32_bytes)``. Senders call this
+ 210:     once at adoption, persist the private key (e.g. in their
+ 211:     secrets manager), and register the public key + signature via
+ 212:     `Client.register_bootstrap_key`. Rotation is the same call.
+ 213:     """
+ 214:     priv = X25519PrivateKey.generate()
+ 215:     pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+ 216:     return priv, pub
+ 217: 
+ 218: 
+ 219: def load_x25519_private_key_from_raw(raw: bytes) -> X25519PrivateKey:
+ 220:     """Parse a 32-byte raw X25519 private key. Senders persist the
+ 221:     raw bytes (or PEM-wrap them ג€” see `cryptography` docs) and
+ 222:     rehydrate via this helper before broker operations."""
+ 223:     if len(raw) != 32:
+ 224:         raise ValueError("X25519 raw private key must be 32 bytes")
+ 225:     return X25519PrivateKey.from_private_bytes(raw)
+
+ succeeded in 334ms:
+ 560: - The substitution-attack guards (Ed25519 over the bootstrap key + AAD-binding on `sender_broker_url`) keep V1's trust model intact.
+ 561: 
+ 562: ### Sender setup
+ 563: 
+ 564: You need to do four things, once:
+ 565: 
+ 566: 1. **Generate an X25519 bootstrap keypair** alongside your existing Ed25519 signing key. Persist the private key somewhere safe (file with 0600, KMS, secrets manager).
+ 567: 
+ 568:    ```python
+ 569:    from syncler.bootstrap import x25519_keypair_pem
+ 570:    bootstrap_priv, bootstrap_pub_raw = x25519_keypair_pem()
+ 571:    # bootstrap_pub_raw is 32 raw bytes ג€” store both fields somewhere
+ 572:    # your broker process can read them.
+ 573:    ```
+ 574: 
+ 575: 2. **Register the bootstrap key with syncler** (once per sender, or per rotation):
+ 576: 
+ 577:    ```python
+ 578:    client.register_bootstrap_key(bootstrap_public_key_raw=bootstrap_pub_raw)
+ 579:    ```
+ 580: 
+ 581:    Internally the SDK Ed25519-signs `b"syncler-v1-bootstrap-key:" + bootstrap_pub_raw` and POSTs to `/v1/senders/me/bootstrap-key`.
+ 582: 
+ 583: 3. **Run a broker** that your devices POST to. The SDK ships one under the `[broker]` extra:
+ 584: 
+ 585:    ```sh
+ 586:    pip install 'syncler[broker]'
+ 587:    ```
+ 588: 
+ 589:    ```python
+ 590:    # broker_app.py
+ 591:    from syncler.broker import make_app
+ 592:    from syncler.broker_storage import InMemoryBrokerStorage
+ 593:    from syncler.bootstrap import load_x25519_private_key_from_raw
+ 594: 
+ 595:    storage = InMemoryBrokerStorage()
+ 596:    priv = load_x25519_private_key_from_raw(open("bootstrap.key", "rb").read())
+ 597:    pub_raw = open("bootstrap.pub", "rb").read()
+ 598: 
+ 599:    app = make_app(
+ 600:        bootstrap_private_key=priv,
+ 601:        bootstrap_public_key_raw=pub_raw,
+ 602:        sender_broker_url="https://sender.example.com/syncler/bootstrap",
+ 603:        storage=storage,
+ 604:    )
+ 605:    ```
+ 606: 
+ 607:    ```sh
+ 608:    uvicorn broker_app:app --host 0.0.0.0 --port 8443 \
+ 609:        --ssl-keyfile=key.pem --ssl-certfile=cert.pem
+ 610:    ```
+ 611: 
+ 612:    Your reverse proxy maps `https://sender.example.com/syncler/bootstrap` ג†’ this app.
+ 613: 
+ 614: 4. **Tell `Client` where the broker storage lives** so `wait_for_pairing` can poll it:
+ 615: 
+ 616:    ```python
+ 617:    client = Client(
+ 618:        sender_name="Example",
+ 619:        private_key_path="sender.pem",
+ 620:        broker_storage=storage,            # NEW ג€” same storage the broker app writes to
+ 621:    )
+ 622:    # The sender's X25519 bootstrap keypair lives outside Client (the
+ 623:    # broker app holds it). The Client only needs the storage handle
+ 624:    # to learn when a pairing has completed.
+ 625: 
+ 626:    path = client.create_pairing_qr(
+ 627:        ttl_seconds=300,
+ 628:        out_path="pair.png",
+ 629:        sender_broker_url="https://sender.example.com/syncler/bootstrap",  # NEW
+ 630:    )
+ 631: 
+ 632:    # Blocks until the broker writes (user_id, pairing_key) to storage.
+ 633:    # On success the Pairing dataclass carries `pairing_id` + `user_id`;
+ 634:    # the 32-byte pairing key is stored on `client.pairing_key` so
+ 635:    # subsequent `send_to(...)` calls just work.
+ 636:    pairing = client.wait_for_pairing(timeout_seconds=120)
+ 637:    # `client.pairing_key` is now set; no further `set_pairing` call needed.
+ 638:    ```
+ 639: 
+ 640: ### Android user flow
+ 641: 
+ 642: When the device fetches the preview and sees all four bootstrap fields, the pairing screen uses the automated path:
+ 643: 
+ 644: 1. User scans the QR.
+ 645: 2. App fetches preview; verifies `bootstrap_key_signature` against the sender's Ed25519 pub key.
+ 646: 3. User confirms the fingerprint (unchanged).
+ 647: 4. App calls `/complete` ג€” Syncler-side pairing is finalized.
+ 648: 5. App builds the bootstrap envelope and POSTs to `sender_broker_url`.
+ 649: 6. Broker decrypts, writes to its storage, returns 201.
+ 650: 7. `Client.wait_for_pairing` in your sender's send loop picks up the new pairing tuple.
+ 651: 
+ 652: If step 5 fails (broker down, network glitch), the app **shows a fallback banner** with the same `user_id` + `pairing_key_hex` block as the V1 manual flow. The device-side pairing is already real (step 4 finalized it); only the sender catch-up needs the manual paste.
+ 653: 
+ 654: ### Failure modes
+ 655: 
+ 656: | What | App behavior |
+ 657: |---|---|
+ 658: | `bootstrap_key_signature` doesn't verify | **Hard refusal.** Pairing NOT finalized. Treated as substitution-attack indicator ג€” user does not get a fallback. |
+ 659: | Preview has only some bootstrap fields | **Hard refusal**, same reason. Sender MUST register all four atomically. |
+ 660: | Broker returns 401 (decrypt failed) | Fallback banner (manual paste). |
+ 661: | Broker returns 409 (replay with different values) | Fallback banner ג€” the pairing key from your sender's `wait_for_pairing` will not match this device's, so the user must paste the device's values. |
+ 662: | Broker returns 5xx or times out | Retried up to 3 attempts (250ms / 750ms backoff). If still failing, fallback banner. |
+ 663: | Sender's `wait_for_pairing` times out | Sender's responsibility ג€” typically loop again with a fresh QR. The device-side pairing is still real; user can paste manually. |
+ 664: 
+ 665: ### Security boundaries
+ 666: 
+ 667: Three guards make this safe:
+ 668: 
+ 669: 1. **Bootstrap key signature.** The sender's X25519 bootstrap public key is signed by its long-term Ed25519 signing key (which the user confirms via fingerprint). The Syncler server cannot substitute its own X25519 key ג€” the signature would fail to verify against the Ed25519 pub key the user just confirmed.
+ 670: 
+ 671: 2. **AAD-binding on `sender_broker_url`.** Even if the Syncler server could change which URL the device POSTs to, the broker reconstructs AAD using its OWN configured `sender_broker_url`. An envelope crafted for a different URL fails AEAD tag verification.
+ 672: 
+ 673: 3. **CAS replay guard at the broker.** A captured envelope replayed to the same broker with the same plaintext is idempotent (200). Replayed with different values gets a 409.
+ 674: 
+ 675: ### Production hardening
+ 676: 
+ 677: - Use Redis or Postgres for `BrokerStorage`. The shipped `InMemoryBrokerStorage` is single-process only ג€” fine for the trading-bot example where the Client and broker share one Python process, but **insufficient for multi-process deployments**. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)`; if the broker app runs in a different uvicorn worker, that call's effect won't be visible to the broker's `is_reserved()` check and every pairing will 404. Use a shared backing store that implements the `BrokerStorage` Protocol atomically (one `reserve` call visible to all workers).
+ 678: - The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. The pending-pairing registry blocks envelopes for un-issued `pairing_id`s, but once an attacker knows a reserved ID they can still spam decrypt attempts on it ג€” the rate limiter is your CPU defense. Implement per-IP and per-`pairing_id` limits.
+ 679: - Terminate TLS at your reverse proxy; the broker is HTTP-only inside the trust boundary.
+ 680: - See `docs/crypto-spec.md ֲ§9.3` for the single-fixed-`sender_broker_url` design (per-pairing URLs are a V2 add).
+ 681: 
+ 682: ## 9. Common server errors
+ 683: 
+ 684: The server returned a 4xx or 5xx; here's what to change.
+ 685: 
+
+ succeeded in 336ms:
+ 226:     def wait_for_pairing(
+ 227:         self,
+ 228:         *,
+ 229:         timeout_seconds: int = 120,
+ 230:         poll_interval_seconds: float = 1.0,
+ 231:     ) -> Pairing:
+ 232:         """V1.5 Phase 5a-2: poll the broker storage until the device's
+ 233:         bootstrap POST lands, then automatically set the pairing on
+ 234:         this client.
+ 235: 
+ 236:         Defaults: 120s timeout, 1s poll with ֲ±20% jitter (jitter avoids
+ 237:         synchronized polling when multiple pairings are in flight).
+ 238:         Raises ``TimeoutError`` on deadline. Caller must have wired a
+ 239:         broker storage via ``Client(...)``'s constructor ג€” otherwise
+ 240:         there's nothing to poll.
+ 241:         """
+ 242:         import random
+ 243:         if self._broker_storage is None:
+ 244:             raise SynclerError(
+ 245:                 "wait_for_pairing requires a broker storage. Pass one to "
+ 246:                 "Client(broker_storage=InMemoryBrokerStorage()) at construction time.",
+ 247:             )
+ 248:         if self._pending_pairing_id is None:
+ 249:             raise SynclerError(
+ 250:                 "no pending pairing ג€” call create_pairing_qr(sender_broker_url=...) first",
+ 251:             )
+ 252:         deadline = time.monotonic() + timeout_seconds
+ 253:         while True:
+ 254:             entry = self._broker_storage.fetch(self._pending_pairing_id)
+ 255:             if entry is not None:
+ 256:                 pairing = Pairing(
+ 257:                     pairing_id=self._pending_pairing_id,
+ 258:                     user_id=entry.user_id,
+ 259:                 )
+ 260:                 self._latest_pairing = pairing
+ 261:                 self.pairing_key = entry.pairing_key
+ 262:                 return pairing
+ 263:             remaining = deadline - time.monotonic()
+ 264:             if remaining <= 0:
+ 265:                 raise TimeoutError(
+ 266:                     f"wait_for_pairing exceeded {timeout_seconds}s timeout",
+ 267:                 )
+ 268:             jitter = poll_interval_seconds * 0.2 * (random.random() * 2 - 1)
+ 269:             sleep_for = min(remaining, max(0.05, poll_interval_seconds + jitter))
+ 270:             time.sleep(sleep_for)
+ 271: 
+ 272:     def set_pairing(self, user_id: str, pairing_key: bytes) -> None:
+ 273:         """Dev-mode shortcut: set the paired user_id and per-pairing AES key.
+ 274: 
+ 275:         Production flow has the device exchange this key with the sender
+
+codex
+The storage/app pieces look coherent so far. One issue is emerging in the example: startup waiting observes `server.started`, but it does not fail if uvicorn never reaches that state, so a rare bind/startup failure can still turn into a 120s pairing wait.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"class .*BrokerStorage|def is_reserved|def reserve\\(|def complete\\(\" ." in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"--manual|manual flow|set-pairing|pair\\s+\\]\" examples/trading-bot/bot.py examples/trading-bot/README.md docs/ROADMAP.md docs/integration-guide.md" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff --stat -- sdk-python/syncler/broker_storage.py sdk-python/syncler/broker/app.py sdk-python/syncler/client.py sdk-python/tests/test_broker_app.py sdk-python/tests/test_bootstrap.py examples/trading-bot/bot.py examples/trading-bot/README.md docs/crypto-spec.md docs/integration-guide.md docs/ROADMAP.md' in D:\Projects\syncler
+ exited 1 in 288ms:
+rg: unrecognized flag --manual|manual flow|set-pairing|pair\s+\]
+
+2026-05-25T00:35:44.153606Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+rg: unrecognized flag --manual|manual flow|set-pairing|pair\s+\]
+
+ exited 1 in 304ms:
+.\sdk-python\syncler\broker_storage.py:29:class BrokerStorageConflictError(Exception):
+.\sdk-python\syncler\broker_storage.py:53:class BrokerStorage(Protocol):
+.\sdk-python\syncler\broker_storage.py:79:    def reserve(self, pairing_id: str) -> None:
+.\sdk-python\syncler\broker_storage.py:91:    def is_reserved(self, pairing_id: str) -> bool:
+.\sdk-python\syncler\broker_storage.py:102:    def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+.\sdk-python\syncler\broker_storage.py:127:class InMemoryBrokerStorage:
+.\sdk-python\syncler\broker_storage.py:144:    def reserve(self, pairing_id: str) -> None:
+.\sdk-python\syncler\broker_storage.py:152:    def is_reserved(self, pairing_id: str) -> bool:
+.\sdk-python\syncler\broker_storage.py:157:    def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+.\server\app\routers\pairing.py:272:async def complete(
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+2026-05-25T00:35:44.166424Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.3 seconds
+Output:
+.\sdk-python\syncler\broker_storage.py:29:class BrokerStorageConflictError(Exception):
+.\sdk-python\syncler\broker_storage.py:53:class BrokerStorage(Protocol):
+.\sdk-python\syncler\broker_storage.py:79:    def reserve(self, pairing_id: str) -> None:
+.\sdk-python\syncler\broker_storage.py:91:    def is_reserved(self, pairing_id: str) -> bool:
+.\sdk-python\syncler\broker_storage.py:102:    def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+.\sdk-python\syncler\broker_storage.py:127:class InMemoryBrokerStorage:
+.\sdk-python\syncler\broker_storage.py:144:    def reserve(self, pairing_id: str) -> None:
+.\sdk-python\syncler\broker_storage.py:152:    def is_reserved(self, pairing_id: str) -> bool:
+.\sdk-python\syncler\broker_storage.py:157:    def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
+.\server\app\routers\pairing.py:272:async def complete(
+rg: .\server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: .\server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ succeeded in 307ms:
+ docs/ROADMAP.md                      |   2 +-
+ docs/crypto-spec.md                  |  13 +--
+ docs/integration-guide.md            |   8 +-
+ examples/trading-bot/README.md       |  14 ++-
+ examples/trading-bot/bot.py          | 179 ++++++++++++++++++++++++++++++++++-
+ sdk-python/syncler/broker/app.py     |  64 ++++++++-----
+ sdk-python/syncler/broker_storage.py | 112 +++++++++++++++++-----
+ sdk-python/tests/test_bootstrap.py   | 119 +++++++++++++++++++++++
+ sdk-python/tests/test_broker_app.py  |  41 +++++++-
+ 9 files changed, 482 insertions(+), 70 deletions(-)
+warning: in the working copy of 'docs/ROADMAP.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'examples/trading-bot/README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'examples/trading-bot/bot.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'sdk-python/syncler/broker/app.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'sdk-python/tests/test_bootstrap.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'sdk-python/tests/test_broker_app.py', LF will be replaced by CRLF the next time Git touches it
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n -- "--manual|manual flow|set-pairing|Fallback" examples/trading-bot/bot.py examples/trading-bot/README.md docs/ROADMAP.md docs/integration-guide.md' in D:\Projects\syncler
+ succeeded in 223ms:
+docs/ROADMAP.md:35:- [x] **7. Full round-trip example plugin.** `examples/trading-bot/` ships both a plugin and a sender in one directory, sharing `state.json`. `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card on a paired device with an Acknowledge button that POSTs back to the bot. Initial round-trip shipped in Phase 5b (`893d783`); Phase 6 migrated `pair` to the automated V1.5 bootstrap flow (in-process broker thread sharing `InMemoryBrokerStorage`, `Client.wait_for_pairing(timeout_seconds=120)`). The `set-pairing` subcommand remains as a V1 manual fallback for offline / no-broker setups.
+docs/integration-guide.md:548:A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip. The example uses the automated V1.5 pairing flow with an in-process broker thread; `set-pairing` is preserved as a V1 manual fallback when the broker can't be reached.
+docs/integration-guide.md:652:If step 5 fails (broker down, network glitch), the app **shows a fallback banner** with the same `user_id` + `pairing_key_hex` block as the V1 manual flow. The device-side pairing is already real (step 4 finalized it); only the sender catch-up needs the manual paste.
+docs/integration-guide.md:660:| Broker returns 401 (decrypt failed) | Fallback banner (manual paste). |
+docs/integration-guide.md:661:| Broker returns 409 (replay with different values) | Fallback banner — the pairing key from your sender's `wait_for_pairing` will not match this device's, so the user must paste the device's values. |
+examples/trading-bot/README.md:56:**Fallback (V1 manual).** If `pair` times out — broker unreachable from the device, no LAN connectivity, etc. — the Syncler app shows the `user_id` + `pairing_key_hex` block, just like in V1:
+examples/trading-bot/README.md:59:python bot.py set-pairing <user_id> <pairing_key_hex>
+examples/trading-bot/bot.py:13:  python bot.py set-pairing <user_id> <pairing_key_hex>
+examples/trading-bot/bot.py:216:    Fallback: if the device can't reach the broker for any reason,
+examples/trading-bot/bot.py:217:    `pair` will time out — re-run with the manual flow by passing
+examples/trading-bot/bot.py:218:    `--manual` (see `set-pairing`).
+examples/trading-bot/bot.py:256:            "Fallback: re-run scan, copy the user_id + pairing_key_hex from the device, "
+examples/trading-bot/bot.py:257:            "then `python bot.py set-pairing <user_id> <pairing_key_hex>`.",
+examples/trading-bot/bot.py:285:        print("Run `register` + `pair` + `set-pairing` first.", file=sys.stderr)
+examples/trading-bot/bot.py:518:    sp = sub.add_parser("set-pairing")
+examples/trading-bot/bot.py:530:    elif args.cmd == "set-pairing":
+
+codex
+Findings:
+
+1. **YELLOW: broker startup can still fall through into a 120s wait if uvicorn never starts.**  
+   In [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:203), `_start_broker_thread()` waits for `server.started`, but after 2.5s it returns even if `server.started` is still false and the thread has exited or failed to bind in the TOCTOU window after the pre-bind check. That weakens the intended fail-fast behavior; `cmd_pair()` then creates the QR and blocks in `wait_for_pairing()` at [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:252). I’d make this raise if `server.started` is false after the wait, ideally also checking `thread.is_alive()`.
+
+2. **YELLOW: stale user-facing/internal guidance says `--manual`, but no such option exists.**  
+   [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:216) says to use the manual flow by passing `--manual`; the actual fallback is `python bot.py set-pairing ...`, and the printed timeout message correctly says that. Low risk, but should be corrected before commit.
+
+3. **YELLOW docs polish: §8.5 still frames the security model as “Three guards” and omits the new registry gate.**  
+   [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:667) lists bootstrap signature, AAD binding, and CAS replay guard. With Phase 6, the pending-pairing registry is now a real security boundary too. I’d either make it “Four guards” or explicitly fold registry into the broker-side guard. A 404 row in the failure-mode table would also help, especially for the multi-process miswire case now documented in production hardening.
+
+Per-area vote:
+
+1. `broker_storage.py`: **GREEN**. Protocol docs are sufficient for third-party implementers. `is_reserved() == True` for completed IDs is the right call so replay reaches CAS and returns 200/409 instead of misleading 404.
+
+2. `broker/app.py`: **GREEN**. Gate placement is right: after JSON/object/required/type validation, before base64/decrypt CPU. Opaque 404 body is correct. `UnknownPairingIdError` mapping to the same 404 is the right race-recovery behavior.
+
+3. `client.py` + `test_bootstrap.py`: **GREEN**. The new tests prove the important wiring: automated QR reserves only when `sender_broker_url` is present, manual flow does not reserve, and storage enforces reserve-before-complete.
+
+4. `examples/trading-bot/bot.py`: **YELLOW** for the startup fallthrough and stale `--manual` docstring. Storage sharing and in-process broker model are otherwise correct. Timeout message points users to the right fallback.
+
+5. Docs: **YELLOW** only for the §8.5 “Three guards” / missing 404 polish. The fixed URL + registry explanation and multi-process warning are accurate.
+
+6. Consult 93 plan gaps: no major missing implementation item found.
+
+7. New security/footgun notes: no RED security issue. The remaining startup behavior is a DX footgun, not a protocol flaw.
+
+8. Commit-readiness vote: **YELLOW**. I would fix the startup failure check and the small docs/docstring issues before committing. I did not run tests in this review mode; I only inspected the diff and files read-only.
+tokens used
+77,883
+Findings:
+
+1. **YELLOW: broker startup can still fall through into a 120s wait if uvicorn never starts.**  
+   In [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:203), `_start_broker_thread()` waits for `server.started`, but after 2.5s it returns even if `server.started` is still false and the thread has exited or failed to bind in the TOCTOU window after the pre-bind check. That weakens the intended fail-fast behavior; `cmd_pair()` then creates the QR and blocks in `wait_for_pairing()` at [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:252). I’d make this raise if `server.started` is false after the wait, ideally also checking `thread.is_alive()`.
+
+2. **YELLOW: stale user-facing/internal guidance says `--manual`, but no such option exists.**  
+   [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:216) says to use the manual flow by passing `--manual`; the actual fallback is `python bot.py set-pairing ...`, and the printed timeout message correctly says that. Low risk, but should be corrected before commit.
+
+3. **YELLOW docs polish: §8.5 still frames the security model as “Three guards” and omits the new registry gate.**  
+   [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:667) lists bootstrap signature, AAD binding, and CAS replay guard. With Phase 6, the pending-pairing registry is now a real security boundary too. I’d either make it “Four guards” or explicitly fold registry into the broker-side guard. A 404 row in the failure-mode table would also help, especially for the multi-process miswire case now documented in production hardening.
+
+Per-area vote:
+
+1. `broker_storage.py`: **GREEN**. Protocol docs are sufficient for third-party implementers. `is_reserved() == True` for completed IDs is the right call so replay reaches CAS and returns 200/409 instead of misleading 404.
+
+2. `broker/app.py`: **GREEN**. Gate placement is right: after JSON/object/required/type validation, before base64/decrypt CPU. Opaque 404 body is correct. `UnknownPairingIdError` mapping to the same 404 is the right race-recovery behavior.
+
+3. `client.py` + `test_bootstrap.py`: **GREEN**. The new tests prove the important wiring: automated QR reserves only when `sender_broker_url` is present, manual flow does not reserve, and storage enforces reserve-before-complete.
+
+4. `examples/trading-bot/bot.py`: **YELLOW** for the startup fallthrough and stale `--manual` docstring. Storage sharing and in-process broker model are otherwise correct. Timeout message points users to the right fallback.
+
+5. Docs: **YELLOW** only for the §8.5 “Three guards” / missing 404 polish. The fixed URL + registry explanation and multi-process warning are accurate.
+
+6. Consult 93 plan gaps: no major missing implementation item found.
+
+7. New security/footgun notes: no RED security issue. The remaining startup behavior is a DX footgun, not a protocol flaw.
+
+8. Commit-readiness vote: **YELLOW**. I would fix the startup failure check and the small docs/docstring issues before committing. I did not run tests in this review mode; I only inspected the diff and files read-only.

@@ -1,0 +1,28 @@
+Findings:
+
+1. **YELLOW: broker startup can still fall through into a 120s wait if uvicorn never starts.**  
+   In [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:203), `_start_broker_thread()` waits for `server.started`, but after 2.5s it returns even if `server.started` is still false and the thread has exited or failed to bind in the TOCTOU window after the pre-bind check. That weakens the intended fail-fast behavior; `cmd_pair()` then creates the QR and blocks in `wait_for_pairing()` at [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:252). I’d make this raise if `server.started` is false after the wait, ideally also checking `thread.is_alive()`.
+
+2. **YELLOW: stale user-facing/internal guidance says `--manual`, but no such option exists.**  
+   [bot.py](D:/Projects/syncler/examples/trading-bot/bot.py:216) says to use the manual flow by passing `--manual`; the actual fallback is `python bot.py set-pairing ...`, and the printed timeout message correctly says that. Low risk, but should be corrected before commit.
+
+3. **YELLOW docs polish: §8.5 still frames the security model as “Three guards” and omits the new registry gate.**  
+   [integration-guide.md](D:/Projects/syncler/docs/integration-guide.md:667) lists bootstrap signature, AAD binding, and CAS replay guard. With Phase 6, the pending-pairing registry is now a real security boundary too. I’d either make it “Four guards” or explicitly fold registry into the broker-side guard. A 404 row in the failure-mode table would also help, especially for the multi-process miswire case now documented in production hardening.
+
+Per-area vote:
+
+1. `broker_storage.py`: **GREEN**. Protocol docs are sufficient for third-party implementers. `is_reserved() == True` for completed IDs is the right call so replay reaches CAS and returns 200/409 instead of misleading 404.
+
+2. `broker/app.py`: **GREEN**. Gate placement is right: after JSON/object/required/type validation, before base64/decrypt CPU. Opaque 404 body is correct. `UnknownPairingIdError` mapping to the same 404 is the right race-recovery behavior.
+
+3. `client.py` + `test_bootstrap.py`: **GREEN**. The new tests prove the important wiring: automated QR reserves only when `sender_broker_url` is present, manual flow does not reserve, and storage enforces reserve-before-complete.
+
+4. `examples/trading-bot/bot.py`: **YELLOW** for the startup fallthrough and stale `--manual` docstring. Storage sharing and in-process broker model are otherwise correct. Timeout message points users to the right fallback.
+
+5. Docs: **YELLOW** only for the §8.5 “Three guards” / missing 404 polish. The fixed URL + registry explanation and multi-process warning are accurate.
+
+6. Consult 93 plan gaps: no major missing implementation item found.
+
+7. New security/footgun notes: no RED security issue. The remaining startup behavior is a DX footgun, not a protocol flaw.
+
+8. Commit-readiness vote: **YELLOW**. I would fix the startup failure check and the small docs/docstring issues before committing. I did not run tests in this review mode; I only inspected the diff and files read-only.
