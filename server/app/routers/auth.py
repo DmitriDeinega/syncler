@@ -88,6 +88,9 @@ async def login(
         encrypted_master_key=_encode_base64(user.encrypted_master_key),
         auth_salt=_encode_base64(user.auth_salt),
         argon2_params_version=user.argon2_params_version,
+        # Phase 8 §10.10 downgrade defense: the client compares this to its
+        # locally-persisted high-water mark before unwrapping the MK.
+        key_generation=user.key_generation,
     )
 
 

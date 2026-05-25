@@ -26,6 +26,7 @@ from app.schemas import (
     PairingPreviewResponse,
     decode_base64,
 )
+from app.services.key_generation import lock_user_and_gate
 from app.services.pairing import (
     PairingAlreadyExistsError,
     PairingTokenConsumedError,
@@ -271,9 +272,20 @@ async def preview(
 @router.post("/complete", response_model=PairingCompleteResponse, status_code=status.HTTP_201_CREATED)
 async def complete(
     payload: PairingCompleteRequest,
+    request: Request,
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> PairingCompleteResponse:
+    # Phase 8 §10.5 — lock user row + 426/409 gates BEFORE writing the new
+    # pairing row, otherwise a rotation racing with /complete could leave
+    # a pairing with stale key_generation.
+    locked_user = await lock_user_and_gate(
+        db,
+        request=request,
+        user_id=ctx.user.id,
+        key_generation_observed=payload.key_generation_observed,
+    )
+
     # Accept URL-safe + standard base64.
     raw = payload.pairing_token
     try:
@@ -295,6 +307,9 @@ async def complete(
             user=ctx.user,
             pairing_token=token,
             encrypted_initial_state=encrypted_initial_state,
+            # Phase 8 §10.4 — stamp the new row with the generation just
+            # locked. Re-reading inside the user-row lock is race-free.
+            key_generation=locked_user.key_generation,
         )
     except PairingTokenNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="pairing token not found") from exc
@@ -322,9 +337,21 @@ async def complete(
 @router.post("/{pairing_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke(
     pairing_id: uuid.UUID,
+    request: Request,
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
+    # Phase 8 §10.5 — revoke removes a row from the active-pairing set
+    # that rotation enumerates; same lock-first contract. revoke does
+    # NOT require key_generation_observed (no new blob is written), so
+    # ``require_observed=False`` per Gemini 104 YELLOW.
+    await lock_user_and_gate(
+        db,
+        request=request,
+        user_id=ctx.user.id,
+        key_generation_observed=None,
+        require_observed=False,
+    )
     try:
         await revoke_pairing(db, user=ctx.user, pairing_id=pairing_id)
     except PairingTokenNotFoundError as exc:

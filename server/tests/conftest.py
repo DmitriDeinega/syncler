@@ -145,8 +145,26 @@ async def app_client(db_session: AsyncSession) -> AsyncIterator[AsyncClient]:
     app.dependency_overrides[get_db] = override_get_db
     transport = ASGITransport(app=app, client=("127.0.0.1", 12345))
 
+    # Phase 8: services that open a SEPARATE session (e.g. rotation's
+    # failed-proof counter, which intentionally escapes the request
+    # transaction) read ``app.db._session_factory``. That global is
+    # bound to whatever event loop populated it first — Windows
+    # proactor sockets carry the loop reference. Each test runs in
+    # its own ``event_loop`` fixture, so the global pool must be
+    # reset, otherwise the second test inherits a pool of asyncpg
+    # connections tied to the previous (closed) loop.
+    from app import db as db_module
+    if db_module._engine is not None:
+        await db_module._engine.dispose()
+    db_module._engine = None
+    db_module._session_factory = None
+
     try:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
     finally:
         app.dependency_overrides.clear()
+        if db_module._engine is not None:
+            await db_module._engine.dispose()
+        db_module._engine = None
+        db_module._session_factory = None

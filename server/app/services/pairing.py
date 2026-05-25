@@ -114,6 +114,7 @@ async def complete_pairing(
     user: User,
     pairing_token: bytes,
     encrypted_initial_state: bytes,
+    key_generation: int = 1,
 ) -> tuple[Pairing, Sender, PendingPairing]:
     now = datetime.now(UTC)
 
@@ -172,6 +173,11 @@ async def complete_pairing(
         user_id=user.id,
         sender_id=sender.id,
         encrypted_state=encrypted_initial_state,
+        # Phase 8 (docs/crypto-spec.md §10.4): stamp the row with the
+        # generation the AAD was bound to. The caller passes the locked
+        # users.key_generation read inside the user-row FOR UPDATE lock,
+        # so this is race-free against concurrent rotation.
+        key_generation=key_generation,
     )
     db.add(pairing)
     await db.commit()

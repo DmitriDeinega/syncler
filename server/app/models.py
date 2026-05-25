@@ -25,6 +25,12 @@ class User(Base):
     encrypted_master_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     auth_salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     argon2_params_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Phase 8: master-key rotation generation counter. Bumps on root_*
+    # rotations; stays at the same value on password_rewrap.
+    # See docs/crypto-spec.md §10.
+    key_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -95,6 +101,14 @@ class Pairing(Base):
         index=True,
     )
     encrypted_state: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Phase 8 CAS counters for the encrypted_state blob and the rotation
+    # generation it was last encrypted under. See docs/crypto-spec.md §10.
+    state_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
+    key_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -239,6 +253,11 @@ class EncryptedUserState(Base):
     )
     state_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     encrypted_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Phase 8: master-key generation the blob is encrypted under. See
+    # docs/crypto-spec.md §10. Mismatch on read = wrong key.
+    key_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -333,3 +352,73 @@ class RateLimitEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+
+class RotationChallenge(Base):
+    """Phase 8b — single-use rotation challenge nonces.
+
+    Issued by `POST /v1/account/rotate-master-key/challenge` and
+    consumed by `POST /v1/account/rotate-master-key` inside the
+    rotation transaction. See docs/crypto-spec.md §10.6.
+    """
+
+    __tablename__ = "rotation_challenges"
+    __table_args__ = (
+        CheckConstraint(
+            "octet_length(challenge) = 32",
+            name="ck_rotation_challenges_challenge_length",
+        ),
+    )
+
+    challenge: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id: Mapped[UUID] = mapped_column(UUID_TYPE, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True,
+    )
+
+
+class MasterKeyRotationAudit(Base):
+    """Phase 8b — durable audit log of master-key rotations.
+
+    One row per successful rotation, written inside the same
+    transaction as the rotation itself. See docs/crypto-spec.md §10.3.
+    Excludes all secret material.
+    """
+
+    __tablename__ = "master_key_rotation_audit"
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('password_rewrap','root_hygiene_rotation','root_compromise_rotation')",
+            name="ck_mkr_audit_reason",
+        ),
+        # Spec §10.3 — most-recent rotation lookups are the hot path
+        # (success rate-limit + forensics); DESC matches the query.
+        Index(
+            "ix_mkr_audit_user_time",
+            "user_id",
+            text("occurred_at DESC"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    old_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    new_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    initiating_session_id: Mapped[UUID | None] = mapped_column(UUID_TYPE)
+    initiating_device_id: Mapped[UUID | None] = mapped_column(UUID_TYPE)
+    ip: Mapped[str | None] = mapped_column(Text)
+    user_agent: Mapped[str | None] = mapped_column(Text)
+    paired_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )

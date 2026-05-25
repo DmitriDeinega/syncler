@@ -86,6 +86,11 @@ class LoginResponse(BaseModel):
     encrypted_master_key: str
     auth_salt: str
     argon2_params_version: int
+    # Phase 8: master-key generation the wrapped MK and the user-state
+    # blob are encrypted under. The client checks this against its
+    # locally-persisted high-water mark BEFORE unwrapping the MK
+    # (docs/crypto-spec.md §10.10 downgrade defense).
+    key_generation: int = 1
 
 
 class DeviceEnrollRequest(BaseModel):
@@ -379,6 +384,9 @@ class BootstrapKeyRegisterResponse(BaseModel):
 class PairingCompleteRequest(BaseModel):
     pairing_token: str  # url-safe or standard base64 (32 bytes)
     encrypted_initial_state: str  # base64
+    # Phase 8 (docs/crypto-spec.md §10.5): the AAD on encrypted_initial_state
+    # binds this generation; mismatch → 409 so the client refetches.
+    key_generation_observed: int | None = None
 
     @field_validator("pairing_token")
     @classmethod
@@ -425,11 +433,19 @@ class StateGetResponse(BaseModel):
     state_version: int
     encrypted_blob: str  # base64
     updated_at: datetime | None
+    # Phase 8: the generation the row is encrypted under. Defaults to 1
+    # for rows that pre-date the migration's server_default.
+    key_generation: int = 1
 
 
 class StatePutRequest(BaseModel):
     expected_state_version: Annotated[int, Field(ge=0)]
     new_encrypted_blob: str  # base64
+    # Phase 8 (docs/crypto-spec.md §10.5): Phase-8-aware clients pass the
+    # generation they encrypted under; the server 409s if it has rotated
+    # since. Optional in the wire format for legacy compatibility — the
+    # mixed-client gate enforces presence when the client claims Phase 8+.
+    key_generation_observed: int | None = None
 
     @field_validator("new_encrypted_blob")
     @classmethod
@@ -440,6 +456,9 @@ class StatePutRequest(BaseModel):
 
 class StatePutResponse(BaseModel):
     new_state_version: int
+    # Phase 8: echo the row's current generation so the client can refresh
+    # its high-water mark.
+    key_generation: int = 1
 
 
 class StateConflictBody(BaseModel):
@@ -826,3 +845,142 @@ class PluginRevokeRequest(BaseModel):
                 f"reason must be one of {sorted(REVOCATION_REASONS)}; got {value!r}"
             )
         return value
+
+
+# Phase 8: master-key rotation (docs/crypto-spec.md §10).
+
+
+class RotationChallengeResponse(BaseModel):
+    """Response from POST /v1/account/rotate-master-key/challenge."""
+
+    rotation_challenge: str  # base64 32 random bytes
+    expires_at: datetime
+
+
+class RotationPairingEntry(BaseModel):
+    """One pairing's new state in a rotation request."""
+
+    pairing_id: UUID
+    state_version_observed: int
+    new_encrypted_state: str  # base64
+
+    @field_validator("new_encrypted_state")
+    @classmethod
+    def _validate_new_state(cls, value: str) -> str:
+        decode_base64(value, field_name="new_encrypted_state", minimum=16)
+        return value
+
+
+class RotationUserStateBody(BaseModel):
+    """The encrypted_user_state body inside a rotation request."""
+
+    encrypted_blob: str  # base64
+    state_version_observed: int
+
+    @field_validator("encrypted_blob")
+    @classmethod
+    def _validate_blob(cls, value: str) -> str:
+        decode_base64(value, field_name="encrypted_blob", minimum=16)
+        return value
+
+
+class RotateMasterKeyRequest(BaseModel):
+    """Request body for POST /v1/account/rotate-master-key.
+
+    Required-field combinations vary by `reason` — see model_validator
+    below. Spec: docs/crypto-spec.md §10.6.
+    """
+
+    reason: Literal[
+        "password_rewrap", "root_hygiene_rotation", "root_compromise_rotation"
+    ]
+    key_generation_observed: int
+    rotation_challenge: str  # base64 32 bytes
+    current_password_proof: str  # base64 32 bytes (auth_key)
+    new_encrypted_master_key: str  # base64
+
+    # Required for password_rewrap and root_compromise_rotation;
+    # forbidden for root_hygiene_rotation.
+    new_auth_salt: str | None = None
+    new_auth_key_proof: str | None = None
+
+    # Forbidden for password_rewrap; required for root_*.
+    new_encrypted_user_state: RotationUserStateBody | None = None
+    pairings: list[RotationPairingEntry] | None = None
+
+    @field_validator("rotation_challenge")
+    @classmethod
+    def _validate_challenge(cls, value: str) -> str:
+        decode_base64(value, field_name="rotation_challenge", exact=32)
+        return value
+
+    @field_validator("current_password_proof")
+    @classmethod
+    def _validate_proof(cls, value: str) -> str:
+        decode_base64(value, field_name="current_password_proof", exact=32)
+        return value
+
+    @field_validator("new_encrypted_master_key")
+    @classmethod
+    def _validate_new_wrapped(cls, value: str) -> str:
+        decode_base64(value, field_name="new_encrypted_master_key", minimum=32)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_combinations(self) -> "RotateMasterKeyRequest":
+        # Per §10.1 table.
+        if self.reason == "password_rewrap":
+            if self.new_auth_salt is None or self.new_auth_key_proof is None:
+                raise ValueError(
+                    "password_rewrap requires new_auth_salt + new_auth_key_proof",
+                )
+            if self.new_encrypted_user_state is not None or self.pairings is not None:
+                raise ValueError(
+                    "password_rewrap MUST omit new_encrypted_user_state + pairings",
+                )
+        elif self.reason == "root_hygiene_rotation":
+            if self.new_auth_salt is not None or self.new_auth_key_proof is not None:
+                raise ValueError(
+                    "root_hygiene_rotation MUST omit new_auth_salt + new_auth_key_proof",
+                )
+            if self.new_encrypted_user_state is None or self.pairings is None:
+                raise ValueError(
+                    "root_hygiene_rotation requires new_encrypted_user_state + pairings",
+                )
+        else:  # root_compromise_rotation
+            if self.new_auth_salt is None or self.new_auth_key_proof is None:
+                raise ValueError(
+                    "root_compromise_rotation requires new_auth_salt + new_auth_key_proof",
+                )
+            if self.new_encrypted_user_state is None or self.pairings is None:
+                raise ValueError(
+                    "root_compromise_rotation requires new_encrypted_user_state + pairings",
+                )
+
+        # Validate the conditional base64 fields when they ARE present.
+        if self.new_auth_salt is not None:
+            decode_base64(self.new_auth_salt, field_name="new_auth_salt", exact=16)
+        if self.new_auth_key_proof is not None:
+            decode_base64(
+                self.new_auth_key_proof, field_name="new_auth_key_proof", exact=32,
+            )
+        return self
+
+
+class RotationUserStateResult(BaseModel):
+    state_version: int
+    key_generation: int
+
+
+class RotationPairingResult(BaseModel):
+    pairing_id: UUID
+    state_version: int
+    key_generation: int
+
+
+class RotateMasterKeyResponse(BaseModel):
+    """Response body for a successful rotation. Spec §10.8."""
+
+    key_generation: int
+    encrypted_user_state: RotationUserStateResult | None = None  # null for password_rewrap
+    pairings: list[RotationPairingResult] = []

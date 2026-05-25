@@ -6,7 +6,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import dispose_engine, get_db, init_engine
-from app.models import LiveCard, Message, Pairing, RateLimitEvent
+from app.models import LiveCard, Message, Pairing, RateLimitEvent, RotationChallenge
 from app.services.nonce_replay import cleanup_expired_with_lock
 
 
@@ -29,6 +29,11 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
     # DELETE concurrently. Returns -1 if another worker held the lock
     # (no-op for this invocation); we surface that as 0 in the summary.
     nonce_replay = await cleanup_expired_with_lock(session)
+    # Phase 8: rotation challenges expire in ~5 min; sweep stragglers so
+    # the table doesn't grow unboundedly on long-running deployments.
+    rotation_challenges = await session.execute(
+        delete(RotationChallenge).where(RotationChallenge.expires_at < now),
+    )
     await session.commit()
 
     return {
@@ -37,6 +42,7 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
         "pairings": pairings.rowcount or 0,
         "rate_limit_events": rate_limit_events.rowcount or 0,
         "nonce_replay": max(nonce_replay, 0),
+        "rotation_challenges": rotation_challenges.rowcount or 0,
     }
 
 

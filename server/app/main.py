@@ -9,7 +9,18 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.config import get_settings
 from app.db import dispose_engine, init_engine
-from app.routers import auth, cards, devices, events, messages, pairing, plugins, senders, state
+from app.routers import (
+    auth,
+    cards,
+    devices,
+    events,
+    messages,
+    pairing,
+    plugins,
+    rotation,
+    senders,
+    state,
+)
 
 
 @asynccontextmanager
@@ -34,6 +45,7 @@ def _app_title() -> str:
 app = FastAPI(title=_app_title(), version=__version__, lifespan=lifespan)
 app.include_router(auth.router, prefix="/v1/auth")
 app.include_router(auth.account_router, prefix="/v1")
+app.include_router(rotation.router, prefix="/v1/account")
 app.include_router(devices.router, prefix="/v1/auth/devices")
 app.include_router(senders.router, prefix="/v1/senders")
 app.include_router(pairing.router, prefix="/v1/pairing")

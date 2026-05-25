@@ -40,6 +40,7 @@ async def upsert_state_cas(
     user_id: uuid.UUID,
     expected_state_version: int,
     new_encrypted_blob: bytes,
+    key_generation: int = 1,
 ) -> EncryptedUserState:
     """Compare-and-swap update of the user's encrypted state.
 
@@ -70,6 +71,10 @@ async def upsert_state_cas(
             user_id=user_id,
             state_version=1,
             encrypted_blob=new_encrypted_blob,
+            # Phase 8 §10.4: stamp the row with the locked user generation
+            # so AAD lockstep holds. Caller passes the value read inside
+            # the user-row FOR UPDATE lock.
+            key_generation=key_generation,
         )
         db.add(row)
         try:
@@ -104,6 +109,12 @@ async def upsert_state_cas(
         .values(
             state_version=new_version,
             encrypted_blob=new_encrypted_blob,
+            # Phase 8 §10.4: restate the row's key_generation on every
+            # CAS write. Rotation step 9 sets it; PUT /v1/state keeps it
+            # in sync with the locked users.key_generation. Same value
+            # on the steady path; defense-in-depth if anything ever
+            # drifted.
+            key_generation=key_generation,
             updated_at=datetime.now(UTC),
         )
         .returning(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthContext, current_auth_context
@@ -17,6 +17,7 @@ from app.schemas import (
     decode_base64,
 )
 from app.services.events import get_event_bus
+from app.services.key_generation import lock_user_and_gate
 from app.services.state import (
     StateConflictError,
     get_state,
@@ -37,20 +38,36 @@ async def get_user_state(
 ) -> StateGetResponse:
     state = await get_state(db, ctx.user.id)
     if state is None:
-        return StateGetResponse(state_version=0, encrypted_blob="", updated_at=None)
+        return StateGetResponse(
+            state_version=0,
+            encrypted_blob="",
+            updated_at=None,
+            key_generation=ctx.user.key_generation,
+        )
     return StateGetResponse(
         state_version=state.state_version,
         encrypted_blob=_b64(state.encrypted_blob),
         updated_at=state.updated_at,
+        key_generation=state.key_generation,
     )
 
 
 @router.put("", response_model=StatePutResponse)
 async def put_user_state(
     payload: StatePutRequest,
+    request: Request,
     ctx: AuthContext = Depends(current_auth_context),
     db: AsyncSession = Depends(get_db),
 ) -> StatePutResponse:
+    # Phase 8 §10.5 — first DB op MUST be the user-row lock; mixed-client
+    # 426 and key_generation 409 are enforced before any blob write.
+    locked_user = await lock_user_and_gate(
+        db,
+        request=request,
+        user_id=ctx.user.id,
+        key_generation_observed=payload.key_generation_observed,
+    )
+
     new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
     try:
         updated = await upsert_state_cas(
@@ -58,6 +75,10 @@ async def put_user_state(
             user_id=ctx.user.id,
             expected_state_version=payload.expected_state_version,
             new_encrypted_blob=new_blob,
+            # Phase 8 §10.4: stamp the row with the locked-user
+            # generation so AAD lockstep holds. The read is race-free
+            # against rotation via lock_user_and_gate above.
+            key_generation=locked_user.key_generation,
         )
     except StateConflictError as exc:
         # 409 with the current state so client can merge and retry.
@@ -78,4 +99,7 @@ async def put_user_state(
         event_type="state.changed",
         data={"version": updated.state_version},
     )
-    return StatePutResponse(new_state_version=updated.state_version)
+    return StatePutResponse(
+        new_state_version=updated.state_version,
+        key_generation=locked_user.key_generation,
+    )
