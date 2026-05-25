@@ -72,7 +72,7 @@ class PluginLoader(
 
                 val stored = bundleStore.write(manifest.id, bundleBytes)
                 val grantedCapabilities = permissionReader(manifest.id).intersect(manifest.declaredCapabilities.toSet())
-                instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes)
+                instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes, manifestJson)
                     .also(PluginRegistry::put)
             }.onFailure {
                 auditLogger.denied(null, "plugin_load_failed", it.message)
@@ -189,6 +189,7 @@ interface PluginInstanceFactory {
         grantedCapabilities: Set<String>,
         bundleFilePath: String,
         bundleBytes: ByteArray,
+        manifestJson: String,
     ): PluginInstance
 }
 
@@ -220,6 +221,7 @@ class SandboxedPluginInstanceFactory(
         grantedCapabilities: Set<String>,
         bundleFilePath: String,
         bundleBytes: ByteArray,
+        manifestJson: String,
     ): PluginInstance {
         val sandboxToken = sandboxRouter.allocateToken()
         val instance = PluginInstance(
@@ -249,7 +251,7 @@ class SandboxedPluginInstanceFactory(
         bridgeDispatcher.registerBridge(sandboxToken, bridge)
         bridgeDispatcher.registerLifecycleListener(
             sandboxToken,
-            RegistryUnloadListener(manifest.id),
+            RegistryUnloadListener(manifest.id, sandboxToken),
         )
 
         val bundleHashHex = MessageDigest.getInstance("SHA-256")
@@ -267,7 +269,11 @@ class SandboxedPluginInstanceFactory(
             declaredEndpoints = manifest.declaredEndpoints,
             dismissBehavior = manifest.dismissBehavior.orEmpty(),
             timeoutMillis = DEFAULT_TIMEOUT_MS,
-            diagnosticManifestJson = "",
+            // 64KB cap mirrors PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP.
+            // The wire layer truncates too; this is belt-and-suspenders so we
+            // don't ship a giant payload that won't fit in the Binder
+            // transaction.
+            diagnosticManifestJson = manifestJson.take(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP),
         )
 
         val handle = try {
@@ -294,9 +300,22 @@ class SandboxedPluginInstanceFactory(
      * unloaded. Without this the host registry would hold a
      * dangling instance whose sandbox-side coordinator has
      * already gone away.
+     *
+     * Triad 121 generation fence: routes through
+     * [PluginRegistry.handleSandboxTerminated] keyed by
+     * [sandboxToken], not [PluginRegistry.unload] keyed only by
+     * `pluginId`. On reload of the same plugin, a late callback
+     * from the predecessor token finds the registry's current
+     * entry pointing at the new token and skips eviction.
+     *
+     * Also skips the AIDL `unloadPlugin` round-trip — the
+     * sandbox is already torn down by the time we get here, so
+     * re-acquiring the connection just to send a redundant
+     * unload would waste a bind + ref-count.
      */
     private inner class RegistryUnloadListener(
         private val pluginId: String,
+        private val sandboxToken: Int,
     ) : SandboxBridgeDispatcher.LifecycleListener {
         override fun onPluginReady() = Unit
         override fun onWebViewError(code: String, message: String) {
@@ -304,10 +323,10 @@ class SandboxedPluginInstanceFactory(
         }
         override fun onPluginCrashed(reason: String) {
             auditLogger.denied(pluginId, "plugin_crashed", reason)
-            PluginRegistry.unload(pluginId)
+            PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
         }
         override fun onPluginUnloaded() {
-            PluginRegistry.unload(pluginId)
+            PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
         }
     }
 
