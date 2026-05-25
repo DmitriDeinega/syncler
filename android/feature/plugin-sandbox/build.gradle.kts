@@ -30,6 +30,13 @@ kotlin {
 dependencies {
     implementation(project(":core:plugin-aidl"))
 
+    // Phase 10b step 5: the sandbox runs the JS in a WebView in
+    // the :plugin process. androidx.webkit gives us SafeBrowsing
+    // and the WebViewFeature compat layer the in-process loader
+    // already uses (so behavior is consistent across the
+    // multi-process port).
+    implementation(libs.androidx.webkit)
+
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.timber)
 

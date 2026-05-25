@@ -33,7 +33,13 @@ class PluginSandboxService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val registry = PluginTokenRegistry()
-    private val webViewHostFactory: PluginWebViewHostFactory = NoopPluginWebViewHostFactory
+    // Phase 10b step 5: the production factory builds real
+    // WebView-backed sandbox hosts using this Service as Context.
+    // Tests can override via WebViewHostFactoryOverride (step 5's
+    // connectedAndroidTest harness).
+    private val webViewHostFactory: PluginWebViewHostFactory by lazy {
+        WebViewHostFactoryOverride.get() ?: RealPluginWebViewHostFactory(applicationContext)
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -244,4 +250,26 @@ private object NoopPluginWebViewHost : PluginWebViewHost {
     override fun destroy() {
         // No-op.
     }
+}
+
+/**
+ * Step 5 test hook: connectedAndroidTest sets a recording factory
+ * BEFORE binding the service so the e2e test can assert on
+ * sandbox-side behavior without instantiating a real WebView (the
+ * test harness can't always start a WebView on an emulator).
+ *
+ * Setting the override after the service has been instantiated has
+ * no effect — the factory is resolved on first use via the
+ * service's `lazy` delegate. Tests that need to swap mid-run
+ * should kill the `:plugin` process between scenarios.
+ */
+object WebViewHostFactoryOverride {
+    @Volatile
+    private var override: PluginWebViewHostFactory? = null
+
+    fun set(factory: PluginWebViewHostFactory?) {
+        override = factory
+    }
+
+    internal fun get(): PluginWebViewHostFactory? = override
 }
