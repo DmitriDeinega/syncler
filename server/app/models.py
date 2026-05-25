@@ -31,6 +31,14 @@ class User(Base):
     key_generation: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="1",
     )
+    # Phase 9b: per-user monotonic counter bumped on any device
+    # enrollment / revocation / encryption_public_key rotation. Senders
+    # include the last-seen value in `recipient_directory_version` on
+    # publish so the server can reject stale recipient sets with
+    # 409 stale_recipient_set. See docs/crypto-spec.md §11.10.
+    device_directory_version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0",
+    )
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -45,10 +53,22 @@ class Device(Base):
         index=True,
     )
     public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Phase 9b: X25519 public key for HPKE recipient envelopes
+    # (docs/crypto-spec.md §11). 32 bytes; NULL until the device
+    # re-enrolls under the V2 wire (migration 0011 doesn't backfill).
+    # CHECK constraint in migration enforces 32-byte length when set.
+    encryption_public_key: Mapped[bytes | None] = mapped_column(LargeBinary)
     fcm_token: Mapped[str | None] = mapped_column(Text)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Phase 9b: bumped on encryption_public_key rotation so the
+    # sender directory's `updated_at` field reflects the latest
+    # change. Trigger plus an app-side bump on the rotation
+    # endpoint keep this honest.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
 
 
 class Sender(Base):
