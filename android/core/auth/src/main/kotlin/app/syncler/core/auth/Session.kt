@@ -161,6 +161,21 @@ class Session @Inject constructor(
      * that a clearable multibinding would introduce (clearables need the
      * Session for the master key; Session would need the clearable Set).
      */
+    /**
+     * Phase 8e — clear ONLY the persisted token (not the in-memory
+     * masterKey). Used by `root_compromise_rotation` after the
+     * server confirms the rotation: the server has revoked our
+     * session, so we wipe SessionStore immediately to remove the
+     * dangling-revoked-token window if the app is killed before
+     * the UI fires its full logout. The in-memory state stays
+     * intact so the post-success "Sign out" dialog can render
+     * cleanly; the surrounding UI's onLogout callback eventually
+     * calls [logout] to wipe the rest.
+     */
+    fun clearPersistedTokenForCompromise() {
+        tokenStore.clearToken()
+    }
+
     suspend fun logout() {
         val previous = state.value
         previous.masterKey?.fill(0)

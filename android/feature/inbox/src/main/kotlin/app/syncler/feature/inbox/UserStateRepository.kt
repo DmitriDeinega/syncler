@@ -484,7 +484,14 @@ class UserStateRepository @Inject constructor(
             stateVersion = stateVersion,
         )
         val plaintext = Aead.decrypt(masterKey, wire, aad = aad)
-        return EncryptedUserState.fromJson(plaintext.toString(Charsets.UTF_8))
+        // Codex 109 hygiene: wipe the decrypted bytes after JSON
+        // parse. The String the JVM internalizes is still in heap
+        // memory but at least the original ByteArray is cleared.
+        return try {
+            EncryptedUserState.fromJson(plaintext.toString(Charsets.UTF_8))
+        } finally {
+            plaintext.fill(0)
+        }
     }
 
     private companion object {

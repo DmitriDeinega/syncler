@@ -143,6 +143,32 @@ class RotationRepositoryTest {
     }
 
     @Test
+    fun rotateHygieneRotatesActivePairings() = runTest {
+        val fixture = newFixture()
+        fixture.signupAndLogin()
+        fixture.seedUserState()
+        val pairingId = "pairing-active-1"
+        fixture.seedActivePairing(
+            pairingId = pairingId,
+            plaintext = "{\"sender\":\"acme\"}".toByteArray(),
+        )
+
+        val result = fixture.rotation.rotateHygiene(PASSWORD.toCharArray())
+        assertTrue(result.toString(), result.isSuccess)
+        val payload = result.getOrNull()!!
+        assertEquals(1, payload.pairingsRotated)
+        val body = fixture.api.rotateCallBody!!
+        assertEquals(1, body.pairings!!.size)
+        val entry = body.pairings!!.first()
+        assertEquals(pairingId, entry.pairingId)
+        assertEquals(3, entry.stateVersionObserved)  // matches seeded state_version
+        assertTrue(
+            "new_encrypted_state must be non-empty",
+            entry.newEncryptedState.isNotEmpty(),
+        )
+    }
+
+    @Test
     fun rotateCompromiseAlsoChangesAuthSaltAndProof() = runTest {
         val fixture = newFixture()
         fixture.signupAndLogin()
@@ -232,6 +258,42 @@ class RotationRepositoryTest {
                 updatedAt = null,
                 keyGeneration = 1,
             )
+        }
+
+        /**
+         * Phase 8e — seed an active pairing whose encrypted_state is
+         * AAD-bound under the current MK. The fake's listPairings +
+         * getPairingState will return this entry so the rotation
+         * flow can exercise the GET → decrypt → re-encrypt → POST
+         * path with a real pairing in the bundle.
+         */
+        fun seedActivePairing(
+            pairingId: String,
+            plaintext: ByteArray,
+            stateVersion: Int = 3,
+        ) {
+            val mk = session.sessionState.value.masterKey!!
+            val userId = session.currentUserId()!!
+            val aad = app.syncler.core.crypto.RotationAad.pairingState(
+                userId = userId,
+                pairingId = pairingId,
+                keyGeneration = 1,
+                stateVersion = stateVersion,
+            )
+            val wire = app.syncler.core.crypto.Aead.encrypt(mk, plaintext, aad = aad)
+            api.seededPairings += app.syncler.core.network.PairingItemDto(
+                id = pairingId,
+                senderId = "sender-x",
+                createdAt = "2026-05-20T00:00:00Z",
+                revokedAt = null,
+            )
+            api.seededPairingStates[pairingId] =
+                app.syncler.core.network.PairingStateResponseDto(
+                    pairingId = pairingId,
+                    encryptedState = java.util.Base64.getEncoder().encodeToString(wire),
+                    stateVersion = stateVersion,
+                    keyGeneration = 1,
+                )
         }
     }
 
@@ -368,7 +430,12 @@ private class RotationFakeApi(
     override suspend fun previewPairing(token: String) = stub()
     override suspend fun completePairing(body: app.syncler.core.network.PairingCompleteRequestDto) = stub()
     override suspend fun revokePairing(id: String): Response<Unit> = stub()
-    override suspend fun listPairings(): List<app.syncler.core.network.PairingItemDto> = emptyList()
+    val seededPairings = mutableListOf<app.syncler.core.network.PairingItemDto>()
+    val seededPairingStates =
+        mutableMapOf<String, app.syncler.core.network.PairingStateResponseDto>()
+
+    override suspend fun listPairings(): List<app.syncler.core.network.PairingItemDto> =
+        seededPairings.toList()
 
     // Phase 8e — set by the test fixture before calling rotateHygiene/
     // rotateCompromise so the fake can return a real (AAD-bound) blob.
@@ -376,7 +443,8 @@ private class RotationFakeApi(
     override suspend fun getUserState() = seededUserState
         ?: error("test must seed getUserState before invoking the rotation flow")
     override suspend fun getPairingState(id: String): app.syncler.core.network.PairingStateResponseDto =
-        stub()
+        seededPairingStates[id]
+            ?: error("test must seed pairing state for id=$id")
     override suspend fun putUserState(
         body: app.syncler.core.network.StatePutRequestDto,
     ): Response<app.syncler.core.network.StatePutResponseDto> = stub()

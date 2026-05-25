@@ -321,43 +321,58 @@ class RotationRepository @Inject constructor(
                 keyGeneration = userStateResp.keyGeneration,
                 stateVersion = userStateResp.stateVersion,
             )
-            val statePlaintext = Aead.decrypt(
+            // Pre-allocate the plaintext slots OUTSIDE the try below so the
+            // surrounding `finally` can zero them regardless of which step
+            // threw. Codex / Gemini 109 RED: inline `.fill(0)` after
+            // re-encryption left plaintexts in memory if an intermediate
+            // throw skipped over the zeroing.
+            val statePlaintext: ByteArray = Aead.decrypt(
                 currentMasterKey,
                 java.util.Base64.getDecoder().decode(userStateResp.encryptedBlob),
                 aad = oldStateAad,
             )
-
-            // Step 5 — fetch active pairings + each pairing's state.
-            val pairingList = api.listPairings().filter { it.revokedAt == null }
-            // Capture old plaintexts + versions for re-encryption.
+            // Snapshot of every decrypted pairing — populated incrementally
+            // inside the try below. If a subsequent decrypt or re-encrypt
+            // throws we still hit `finally` and zero whatever we already
+            // pulled.
             data class PairingSnapshot(
                 val pairingId: String,
                 val stateVersion: Int,
                 val plaintext: ByteArray,
             )
-            val snapshots = pairingList.map { item ->
-                val resp = api.getPairingState(item.id)
-                val oldPairAad = RotationAad.pairingState(
-                    userId = userId,
-                    pairingId = item.id,
-                    keyGeneration = resp.keyGeneration,
-                    stateVersion = resp.stateVersion,
-                )
-                val plaintext = Aead.decrypt(
-                    currentMasterKey,
-                    java.util.Base64.getDecoder().decode(resp.encryptedState),
-                    aad = oldPairAad,
-                )
-                PairingSnapshot(
-                    pairingId = item.id,
-                    stateVersion = resp.stateVersion,
-                    plaintext = plaintext,
-                )
-            }
-
-            // Step 6 — generate new MK.
+            val snapshots = mutableListOf<PairingSnapshot>()
+            // Compromise-mode derived keys live here so the outer finally
+            // can wipe them regardless of where we throw.
+            var newWrapKey: ByteArray? = null
+            var newAuthKey: ByteArray? = null
             val newMasterKey = MasterKey.generate()
             try {
+                // Step 5 — fetch active pairings + each pairing's state.
+                val pairingList = api.listPairings().filter { it.revokedAt == null }
+                for (item in pairingList) {
+                    val resp = api.getPairingState(item.id)
+                    val oldPairAad = RotationAad.pairingState(
+                        userId = userId,
+                        pairingId = item.id,
+                        keyGeneration = resp.keyGeneration,
+                        stateVersion = resp.stateVersion,
+                    )
+                    val plaintext = Aead.decrypt(
+                        currentMasterKey,
+                        java.util.Base64.getDecoder().decode(resp.encryptedState),
+                        aad = oldPairAad,
+                    )
+                    // Append BEFORE any further work so finally can wipe
+                    // even if Aead.decrypt on the next pairing throws.
+                    snapshots.add(
+                        PairingSnapshot(
+                            pairingId = item.id,
+                            stateVersion = resp.stateVersion,
+                            plaintext = plaintext,
+                        ),
+                    )
+                }
+
                 // Step 7 — re-encrypt user state under new MK with NEW AAD.
                 val newStateVersion = userStateResp.stateVersion + 1
                 val newStateAad = RotationAad.userState(
@@ -390,20 +405,24 @@ class RotationRepository @Inject constructor(
                         newEncryptedState = newPairBlob.toBase64(),
                     )
                 }
-                // Zero the old plaintext scratch.
-                snapshots.forEach { it.plaintext.fill(0) }
-                statePlaintext.fill(0)
 
                 // Step 9 — wrap new MK. Compromise uses new wrap key + new salt.
-                val (newWrapKey, newAuthKey, newAuthSalt) = if (compromise) {
-                    val newSalt = ByteArray(KeyDerivation.SALT_LENGTH_BYTES)
+                val newAuthSalt: ByteArray
+                if (compromise) {
+                    val freshSalt = ByteArray(KeyDerivation.SALT_LENGTH_BYTES)
                         .also(secureRandom::nextBytes)
                     val keys = withContext(Dispatchers.Default) {
-                        KeyDerivation.derive(newPassword, newSalt)
+                        KeyDerivation.derive(newPassword, freshSalt)
                     }
-                    Triple(keys.masterKeyWrapKey, keys.authKey, newSalt)
+                    newWrapKey = keys.masterKeyWrapKey
+                    newAuthKey = keys.authKey
+                    newAuthSalt = freshSalt
                 } else {
-                    Triple(currentKeys.masterKeyWrapKey, null, currentAuthSalt)
+                    // Hygiene reuses the existing wrap key + salt. Do NOT
+                    // null out currentKeys.masterKeyWrapKey — the outer
+                    // finally still wipes it.
+                    newWrapKey = currentKeys.masterKeyWrapKey
+                    newAuthSalt = currentAuthSalt
                 }
                 val newMkWrapAad = RotationAad.masterKeyWrap(
                     userId = userId,
@@ -449,15 +468,19 @@ class RotationRepository @Inject constructor(
                     source = "rotate-master-key",
                 )
 
-                // For compromise, the server revoked our session too —
-                // don't bother updating Session, the caller will log out.
-                // For hygiene we keep going: update Session with the new
-                // MK + new generation. Note: for compromise we ALSO update
-                // so the caller has a coherent view until they trigger
-                // logout (defense in depth).
                 if (compromise) {
-                    // Compromise rotates everything; pass new salt + new
-                    // wrapped MK so the cached values match the wire.
+                    // Server revoked our session. Wipe the persisted
+                    // token IMMEDIATELY so an app-kill before the UI
+                    // fires its full logout doesn't leave a revoked
+                    // token in SessionStore (Codex 109 YELLOW: close
+                    // the revoked-token window). The in-memory state
+                    // stays intact for the Success dialog to render;
+                    // the UI's onLogout callback wipes the rest.
+                    session.clearPersistedTokenForCompromise()
+                    // Still update in-memory so observers see a
+                    // coherent state until the explicit logout fires
+                    // (defense in depth — and unifies the Session-
+                    // shape between modes).
                     session.updateAfterRotation(
                         newMasterKey = newMasterKey,
                         newKeyGeneration = body.keyGeneration,
@@ -465,6 +488,8 @@ class RotationRepository @Inject constructor(
                         newEncryptedMasterKey = newWrappedMk,
                     )
                 } else {
+                    // Hygiene keeps sessions live. Update Session with
+                    // the new MK + new generation; salt unchanged.
                     session.updateAfterRotation(
                         newMasterKey = newMasterKey,
                         newKeyGeneration = body.keyGeneration,
@@ -479,7 +504,22 @@ class RotationRepository @Inject constructor(
                     pairingsRotated = newPairingEntries.size,
                 )
             } finally {
+                // §10.x hygiene — wipe every plaintext byte array we
+                // touched regardless of which step threw. Codex 109
+                // YELLOW + Gemini 109 YELLOW called this out: the
+                // previous inline `.fill(0)` was only reached on the
+                // happy path.
                 newMasterKey.fill(0)
+                statePlaintext.fill(0)
+                snapshots.forEach { it.plaintext.fill(0) }
+                // Hygiene reuses currentKeys.masterKeyWrapKey for
+                // newWrapKey — that's the SAME byte array, so the
+                // outer finally below wipes it. Only wipe here when
+                // it's a freshly-derived key (compromise path).
+                if (compromise) {
+                    newWrapKey?.fill(0)
+                    newAuthKey?.fill(0)
+                }
             }
         } finally {
             currentKeys.authKey.fill(0)
