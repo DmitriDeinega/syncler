@@ -74,6 +74,31 @@ interface SynclerApi {
     @retrofit2.http.PUT("/v1/state")
     suspend fun putUserState(@Body body: StatePutRequestDto): Response<StatePutResponseDto>
 
+    /**
+     * Phase 8 master-key rotation (docs/crypto-spec.md §10.6).
+     *
+     * Issues a fresh single-use 32-byte challenge bound to the calling
+     * device. The /rotate-master-key call below must consume it within
+     * ~5 minutes.
+     */
+    @POST("/v1/account/rotate-master-key/challenge")
+    suspend fun rotateMasterKeyChallenge(): RotationChallengeResponseDto
+
+    /**
+     * Phase 8 master-key rotation. The server runs the 14-step
+     * transaction per §10.8 — returns 200 with the new generation +
+     * row versions on success, or one of:
+     *   - 401 invalid_password_proof / rotation_challenge_invalid
+     *   - 426 account_upgraded_requires_newer_client (mixed-client gate)
+     *   - 409 key_generation_mismatch / pairing_set_changed /
+     *         pairing_state_changed / state_version_mismatch
+     *   - 429 rotation_success_rate_limited / rotate_proof_fail_rate_limited
+     */
+    @POST("/v1/account/rotate-master-key")
+    suspend fun rotateMasterKey(
+        @Body body: RotateMasterKeyRequestDto,
+    ): Response<RotateMasterKeyResponseDto>
+
     @GET("/v1/plugins/{sender_id}/{plugin_identifier}/latest")
     suspend fun getPluginLatest(
         @Path("sender_id") senderId: String,
@@ -160,17 +185,32 @@ data class StateGetResponseDto(
     @Json(name = "state_version") val stateVersion: Int,
     @Json(name = "encrypted_blob") val encryptedBlob: String,
     @Json(name = "updated_at") val updatedAt: String?,
+    /**
+     * Phase 8 (docs/crypto-spec.md §10.4): the generation the row is
+     * encrypted under. Defaults to 1 for pre-Phase-8 server responses
+     * and for rows that pre-date the migration's server_default.
+     */
+    @Json(name = "key_generation") val keyGeneration: Int = 1,
 )
 
 @JsonClass(generateAdapter = true)
 data class StatePutRequestDto(
     @Json(name = "expected_state_version") val expectedStateVersion: Int,
     @Json(name = "new_encrypted_blob") val newEncryptedBlob: String,
+    /**
+     * Phase 8 (§10.5 MUST clause): the AAD-bound generation the client
+     * encrypted under. Server 409s if it doesn't match the locked
+     * users.key_generation. Null is acceptable for legacy callers
+     * pre-Phase-8; Phase-8-aware clients always populate.
+     */
+    @Json(name = "key_generation_observed") val keyGenerationObserved: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)
 data class StatePutResponseDto(
     @Json(name = "new_state_version") val newStateVersion: Int,
+    /** Phase 8: row's stamped generation post-write. */
+    @Json(name = "key_generation") val keyGeneration: Int = 1,
 )
 
 @JsonClass(generateAdapter = true)
@@ -213,6 +253,11 @@ data class PairingPreviewResponseDto(
 data class PairingCompleteRequestDto(
     @Json(name = "pairing_token") val pairingToken: String,
     @Json(name = "encrypted_initial_state") val encryptedInitialState: String,
+    /**
+     * Phase 8 (§10.5): the encrypted_initial_state AAD binds this
+     * generation; mismatch → 409 so the client refetches.
+     */
+    @Json(name = "key_generation_observed") val keyGenerationObserved: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -335,6 +380,13 @@ data class LoginResponse(
     @Json(name = "encrypted_master_key") val encryptedMasterKey: String,
     @Json(name = "auth_salt") val authSalt: String,
     @Json(name = "argon2_params_version") val argon2ParamsVersion: Int,
+    /**
+     * Phase 8 (docs/crypto-spec.md §10.10): the generation the wrapped
+     * MK + user-state blob are encrypted under. The client compares
+     * this to its locally-persisted high-water mark BEFORE unwrapping
+     * the MK (downgrade defense).
+     */
+    @Json(name = "key_generation") val keyGeneration: Int = 1,
 )
 
 @JsonClass(generateAdapter = true)
@@ -359,4 +411,98 @@ data class DeviceItem(
     @Json(name = "last_seen") val lastSeen: String?,
     @Json(name = "revoked_at") val revokedAt: String?,
     @Json(name = "has_fcm_token") val hasFcmToken: Boolean,
+)
+
+// ---------------------------------------------------------------------------
+// Phase 8 master-key rotation DTOs (docs/crypto-spec.md §10.6).
+// ---------------------------------------------------------------------------
+
+@JsonClass(generateAdapter = true)
+data class RotationChallengeResponseDto(
+    @Json(name = "rotation_challenge") val rotationChallenge: String,
+    @Json(name = "expires_at") val expiresAt: String,
+)
+
+/**
+ * Rotation request — per-mode field combinations are enforced by the
+ * server's pydantic model_validator (see crypto-spec §10.1 reason×field
+ * matrix). The client builds the right shape based on the chosen
+ * [reason]:
+ *   - ``password_rewrap``: send new_auth_salt + new_auth_key_proof;
+ *     omit new_encrypted_user_state + pairings.
+ *   - ``root_hygiene_rotation``: omit new_auth_salt + new_auth_key_proof;
+ *     send new_encrypted_user_state + pairings.
+ *   - ``root_compromise_rotation``: send all four.
+ */
+@JsonClass(generateAdapter = true)
+data class RotateMasterKeyRequestDto(
+    val reason: String,
+    @Json(name = "key_generation_observed") val keyGenerationObserved: Int,
+    @Json(name = "rotation_challenge") val rotationChallenge: String,
+    @Json(name = "current_password_proof") val currentPasswordProof: String,
+    @Json(name = "new_encrypted_master_key") val newEncryptedMasterKey: String,
+    @Json(name = "new_auth_salt") val newAuthSalt: String? = null,
+    @Json(name = "new_auth_key_proof") val newAuthKeyProof: String? = null,
+    @Json(name = "new_encrypted_user_state") val newEncryptedUserState: RotationUserStateBodyDto? = null,
+    val pairings: List<RotationPairingEntryDto>? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class RotationUserStateBodyDto(
+    @Json(name = "encrypted_blob") val encryptedBlob: String,
+    @Json(name = "state_version_observed") val stateVersionObserved: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class RotationPairingEntryDto(
+    @Json(name = "pairing_id") val pairingId: String,
+    @Json(name = "state_version_observed") val stateVersionObserved: Int,
+    @Json(name = "new_encrypted_state") val newEncryptedState: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class RotateMasterKeyResponseDto(
+    @Json(name = "key_generation") val keyGeneration: Int,
+    @Json(name = "encrypted_user_state") val encryptedUserState: RotationUserStateResultDto? = null,
+    val pairings: List<RotationPairingResultDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class RotationUserStateResultDto(
+    @Json(name = "state_version") val stateVersion: Int,
+    @Json(name = "key_generation") val keyGeneration: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class RotationPairingResultDto(
+    @Json(name = "pairing_id") val pairingId: String,
+    @Json(name = "state_version") val stateVersion: Int,
+    @Json(name = "key_generation") val keyGeneration: Int,
+)
+
+/**
+ * 426 / 409 / 429 detail bodies the server emits per spec §10.5 + §10.8.
+ * Retrofit error-body parsing routes through these envelope types.
+ */
+@JsonClass(generateAdapter = true)
+data class KeyGenerationMismatchDetailDto(
+    val error: String,
+    @Json(name = "current_key_generation") val currentKeyGeneration: Int,
+    @Json(name = "client_action") val clientAction: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class KeyGenerationMismatchResponseDto(
+    val detail: KeyGenerationMismatchDetailDto,
+)
+
+@JsonClass(generateAdapter = true)
+data class UpgradeRequiredDetailDto(
+    val error: String,
+    @Json(name = "minimum_supported_phase") val minimumSupportedPhase: Int,
+)
+
+@JsonClass(generateAdapter = true)
+data class UpgradeRequiredResponseDto(
+    val detail: UpgradeRequiredDetailDto,
 )

@@ -55,6 +55,7 @@ class UserStateRepository @Inject constructor(
     private val prefs: UserStatePrefs,
     private val api: SynclerApi,
     private val session: Session,
+    private val keyGenerationStore: app.syncler.core.auth.KeyGenerationStore,
     private val clock: Clock,
 ) : UserStateMutator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -244,11 +245,31 @@ class UserStateRepository @Inject constructor(
         val masterKey = session.sessionState.value.masterKey ?: return@withLock Result.success(Unit)
         runCatching {
             val response = api.getUserState()
+            // Phase 8 §10.10 — refuse to operate on a stale snapshot
+            // (catches a malicious server returning a pre-rotation
+            // blob after the client has already rotated up).
+            verifyResponseKeyGeneration(response.keyGeneration, source = "state.get")
             val remoteState = decodeRemote(response.encryptedBlob, masterKey)
             val merged = StateMerger.merge(local = _state.value, remote = remoteState)
             _state.value = merged
             persist(merged, remoteVersion = response.stateVersion)
         }.onFailure { Timber.tag(TAG).w(it, "pull failed") }
+    }
+
+    /**
+     * §10.10 enforcement entry-point for non-login responses. Reads
+     * the active session's userId; skips the check when no session is
+     * unlocked (defensive: an interleaved logout shouldn't crash a
+     * pending pull). The user is the one we already validated at
+     * login, so the high-water mark scope is correct.
+     */
+    private fun verifyResponseKeyGeneration(observed: Int, source: String) {
+        val userId = session.currentUserId() ?: return
+        keyGenerationStore.verifyAndBump(
+            userId = userId,
+            observed = observed,
+            source = source,
+        )
     }
 
     /**
@@ -290,7 +311,13 @@ class UserStateRepository @Inject constructor(
     private suspend fun attemptPush(masterKey: ByteArray) {
         val first = doPut(expectedVersion = lastKnownRemoteVersion(), masterKey = masterKey)
         if (first.isSuccessful) {
-            first.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
+            first.body()?.let { body ->
+                // §10.10 — every successful response carrying a
+                // key_generation MUST be checked against the local
+                // high-water mark.
+                verifyResponseKeyGeneration(body.keyGeneration, source = "state.put")
+                setLastKnownRemoteVersion(body.newStateVersion)
+            }
             return
         }
         if (first.code() != 409) {
@@ -299,6 +326,9 @@ class UserStateRepository @Inject constructor(
 
         // 409: pull the newer blob, merge, re-PUT exactly once.
         val pull = api.getUserState()
+        // Same §10.10 check on this GET — defense in depth before
+        // we even merge.
+        verifyResponseKeyGeneration(pull.keyGeneration, source = "state.get")
         val remoteState = decodeRemote(pull.encryptedBlob, masterKey)
         _state.value = StateMerger.merge(local = _state.value, remote = remoteState)
         persist(_state.value, remoteVersion = pull.stateVersion)
@@ -320,7 +350,10 @@ class UserStateRepository @Inject constructor(
 
         val retry = doPut(expectedVersion = pull.stateVersion, masterKey = masterKey)
         if (retry.isSuccessful) {
-            retry.body()?.newStateVersion?.let { setLastKnownRemoteVersion(it) }
+            retry.body()?.let { body ->
+                verifyResponseKeyGeneration(body.keyGeneration, source = "state.put")
+                setLastKnownRemoteVersion(body.newStateVersion)
+            }
             return
         }
         Timber.tag(TAG).w(
@@ -339,6 +372,11 @@ class UserStateRepository @Inject constructor(
             StatePutRequestDto(
                 expectedStateVersion = expectedVersion,
                 newEncryptedBlob = blob,
+                // Phase 8 §10.5 — bind the AAD to the locked-server
+                // generation. The Session's value is set at login from
+                // LoginResponse.key_generation and bumped on every
+                // successful rotation.
+                keyGenerationObserved = session.currentKeyGeneration(),
             ),
         )
     }

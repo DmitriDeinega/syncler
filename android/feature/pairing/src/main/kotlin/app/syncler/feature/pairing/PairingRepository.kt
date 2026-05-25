@@ -40,6 +40,7 @@ class PairingRepository @Inject constructor(
     private val api: SynclerApi,
     private val brokerApi: BrokerApi,
     private val pairedSenderStore: PairedSenderStore,
+    private val session: app.syncler.core.auth.Session,
 ) {
     fun parseBrokerUrl(url: String): PairingCandidate? {
         // Debug builds accept plain http:// so devs can pair against a local
@@ -74,6 +75,10 @@ class PairingRepository @Inject constructor(
                     encryptedInitialState,
                     Base64.NO_WRAP,
                 ),
+                // Phase 8 §10.5 — bind the encrypted_initial_state AAD
+                // to the locked-server generation. Server 409s on
+                // mismatch so the client knows to refetch.
+                keyGenerationObserved = session.currentKeyGeneration(),
             ),
         )
         // Defense-in-depth: confirm the server's complete-response identity

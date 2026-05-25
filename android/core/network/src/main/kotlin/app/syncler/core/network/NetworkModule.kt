@@ -37,7 +37,7 @@ object NetworkModule {
             // have to be temporarily unlocked with it), honor it. Only
             // inject the Session-provided token when no header is present.
             val incoming = chain.request()
-            val request = if (incoming.header("Authorization") != null) {
+            val withAuth = if (incoming.header("Authorization") != null) {
                 incoming
             } else {
                 val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
@@ -49,8 +49,22 @@ object NetworkModule {
                         .build()
                 }
             }
-            chain.proceed(request)
+            // Phase 8 §10.11 — mixed-client gate. Phase-8-aware apps
+            // advertise minimum-phase 8 so the server serves us (and
+            // 426s any pre-Phase-8 client on a rotated account). We
+            // set this on every outbound request — refactoring an
+            // endpoint can never accidentally strip the header.
+            val withPhase = withAuth.newBuilder()
+                .header(CLIENT_MIN_PHASE_HEADER, CLIENT_MIN_PHASE_VALUE)
+                .build()
+            chain.proceed(withPhase)
         }
+
+    /** Header name per docs/crypto-spec.md §10.11. */
+    private const val CLIENT_MIN_PHASE_HEADER = "X-Syncler-Client-Min-Phase"
+
+    /** Phase the current build supports. Bumped only on protocol upgrades. */
+    private const val CLIENT_MIN_PHASE_VALUE = "8"
 
     @Provides
     @Singleton

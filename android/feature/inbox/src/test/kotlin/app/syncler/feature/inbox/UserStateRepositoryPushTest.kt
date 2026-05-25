@@ -50,7 +50,9 @@ class UserStateRepositoryPushTest {
         val prefs = InMemoryUserStatePrefs()
         val api = AlwaysConflictApi()
         val session = unlockedSession()
-        val repo = UserStateRepository(prefs, api, session, java.time.Clock.systemUTC())
+        val repo = UserStateRepository(
+            prefs, api, session, NoopKeyGenerationStore(), java.time.Clock.systemUTC(),
+        )
 
         // Local mutation triggers markDirty + push; push hits 409, retries via
         // handleConflictAndRetry, retry also 409, repo throws → outer
@@ -74,7 +76,9 @@ class UserStateRepositoryPushTest {
         val prefs = InMemoryUserStatePrefs()
         val api = AlwaysSucceedsApi()
         val session = unlockedSession()
-        val repo = UserStateRepository(prefs, api, session, java.time.Clock.systemUTC())
+        val repo = UserStateRepository(
+            prefs, api, session, NoopKeyGenerationStore(), java.time.Clock.systemUTC(),
+        )
 
         repo.markRead("msg-1")
 
@@ -92,6 +96,11 @@ class UserStateRepositoryPushTest {
         session.authenticate(token = "test-token", masterKey = ByteArray(32) { 0x42 })
         return session
     }
+}
+
+private class NoopKeyGenerationStore : app.syncler.core.auth.KeyGenerationStore {
+    override fun read(userId: String): Int = 0
+    override fun bump(userId: String, observed: Int): Int = observed
 }
 
 private class InMemoryUserStatePrefs : UserStatePrefs {
@@ -143,6 +152,11 @@ private class AlwaysSucceedsApi : SynclerApi by StubApi() {
  */
 private class StubApi : SynclerApi {
     private fun stub(): Nothing = throw UnsupportedOperationException("not implemented by test stub")
+
+    override suspend fun rotateMasterKeyChallenge(): app.syncler.core.network.RotationChallengeResponseDto = stub()
+    override suspend fun rotateMasterKey(
+        body: app.syncler.core.network.RotateMasterKeyRequestDto,
+    ): Response<app.syncler.core.network.RotateMasterKeyResponseDto> = stub()
 
     override suspend fun signup(body: SignupRequest): SignupResponse = stub()
     override suspend fun preLogin(body: PreLoginRequest): PreLoginResponse = stub()

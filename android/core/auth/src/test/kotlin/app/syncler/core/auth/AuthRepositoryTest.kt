@@ -26,7 +26,7 @@ class AuthRepositoryTest {
         val tokenStore = InMemoryTokenStore()
         val session = Session(tokenStore)
         val identityStore = FakeDeviceIdentityStore()
-        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore())
+        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore(), FakeKeyGenerationStore())
 
         val result = repository.signup("User@Example.com", "correct horse battery staple".toCharArray())
 
@@ -54,6 +54,7 @@ class AuthRepositoryTest {
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
             FakePairedSenderStore(),
+            FakeKeyGenerationStore(),
         )
 
         // Run signup to set up a user and pairing-key material the login
@@ -79,6 +80,7 @@ class AuthRepositoryTest {
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
             FakePairedSenderStore(),
+            FakeKeyGenerationStore(),
         )
 
         repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
@@ -96,7 +98,7 @@ class AuthRepositoryTest {
     fun logoutClearsStoredDeviceId() = runTest {
         val api = FakeApi()
         val identityStore = FakeDeviceIdentityStore()
-        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore())
+        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore(), FakeKeyGenerationStore())
         repository.signup("u@example.com", "correct horse battery staple".toCharArray())
         assertEquals("device-1", identityStore.value)
 
@@ -134,6 +136,7 @@ class AuthRepositoryTest {
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
             store,
+            FakeKeyGenerationStore(),
         )
 
         repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
@@ -154,6 +157,7 @@ class AuthRepositoryTest {
             FixedDevicePublicKeyProvider(),
             FakeDeviceIdentityStore(),
             FakePairedSenderStore(),
+            FakeKeyGenerationStore(),
         )
 
         val result = repository.revokeDevice("missing")
@@ -162,14 +166,14 @@ class AuthRepositoryTest {
     }
 }
 
-private class FakeDeviceIdentityStore : DeviceIdentityStore {
+internal class FakeDeviceIdentityStore : DeviceIdentityStore {
     var value: String? = null
     override fun read(): String? = value
     override fun write(deviceId: String) { value = deviceId }
     override fun clear() { value = null }
 }
 
-private class FakePairedSenderStore : app.syncler.core.storage.PairedSenderStore {
+internal class FakePairedSenderStore : app.syncler.core.storage.PairedSenderStore {
     var migrateCalls: Int = 0
     var lastOwnedIds: Set<String>? = null
     override val pairedSenders: kotlinx.coroutines.flow.StateFlow<List<app.syncler.core.storage.PairedSender>> =
@@ -185,7 +189,22 @@ private class FakePairedSenderStore : app.syncler.core.storage.PairedSenderStore
     }
 }
 
-private class InMemoryTokenStore : TokenStore {
+internal class FakeKeyGenerationStore : KeyGenerationStore {
+    private val values = mutableMapOf<String, Int>()
+
+    override fun read(userId: String): Int = values[userId] ?: 0
+
+    override fun bump(userId: String, observed: Int): Int {
+        val current = read(userId)
+        if (observed > current) {
+            values[userId] = observed
+            return observed
+        }
+        return current
+    }
+}
+
+internal class InMemoryTokenStore : TokenStore {
     var token: String? = null
 
     override fun readToken(): String? = token
@@ -197,7 +216,7 @@ private class InMemoryTokenStore : TokenStore {
     }
 }
 
-private class FixedDevicePublicKeyProvider : DevicePublicKeyProvider {
+internal class FixedDevicePublicKeyProvider : DevicePublicKeyProvider {
     override fun publicKey(): ByteArray = ByteArray(KEY_SIZE_BYTES) { 4 }
 }
 
@@ -233,6 +252,7 @@ private class FakeApi(
             encryptedMasterKey = signup.encryptedMasterKey,
             authSalt = signup.authSalt,
             argon2ParamsVersion = signup.argon2ParamsVersion,
+            keyGeneration = 1,
         )
     }
 
@@ -274,6 +294,10 @@ private class FakeApi(
     override suspend fun putUserState(body: app.syncler.core.network.StatePutRequestDto): Response<app.syncler.core.network.StatePutResponseDto> = stub()
     override suspend fun getPluginLatest(senderId: String, pluginIdentifier: String) = stub()
     override suspend fun getPluginById(pluginRowId: String) = stub()
+    override suspend fun rotateMasterKeyChallenge() = stub()
+    override suspend fun rotateMasterKey(
+        body: app.syncler.core.network.RotateMasterKeyRequestDto,
+    ): Response<app.syncler.core.network.RotateMasterKeyResponseDto> = stub()
 
     private fun stub(): Nothing = throw UnsupportedOperationException("not implemented by AuthRepositoryTest fake")
 }

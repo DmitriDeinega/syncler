@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.syncler.feature.settings.ChangePasswordCard
 
 /**
  * The Settings tab: device management + account actions (logout). Replaces
@@ -109,6 +110,11 @@ fun SettingsScreen(
             Spacer(Modifier.height(16.dp))
             Text("Account", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(8.dp))
+            // Phase 8c — `password_rewrap` rotation. Lives in
+            // feature/settings so the Hilt ViewModel + RotationRepository
+            // dependency edge stays out of :app.
+            ChangePasswordCard(modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
             Button(
                 onClick = onLogout,
                 modifier = Modifier.fillMaxWidth(),

@@ -26,6 +26,9 @@ import timber.log.Timber
 data class SignupResult(val userId: String)
 data class LoginResult(val userId: String)
 
+// KeyGenerationDowngradeError moved to SessionStore.kt so it can carry
+// the consolidated verify-and-bump enforcement helper (§10.10).
+
 @Singleton
 class AuthRepository @Inject constructor(
     private val api: SynclerApi,
@@ -33,6 +36,7 @@ class AuthRepository @Inject constructor(
     private val deviceKeyProvider: DevicePublicKeyProvider,
     private val deviceIdentityStore: DeviceIdentityStore,
     private val pairedSenderStore: PairedSenderStore,
+    private val keyGenerationStore: KeyGenerationStore,
 ) : AuthFailureHandler {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -111,6 +115,17 @@ class AuthRepository @Inject constructor(
         require(response.argon2ParamsVersion == KeyDerivation.PARAMS_VERSION) {
             "Unsupported Argon2 params version: ${response.argon2ParamsVersion}"
         }
+        // Phase 8 §10.10 — downgrade defense. BEFORE we unwrap the MK
+        // (which would silently succeed under a stale generation),
+        // the server-returned key_generation MUST be >= our locally-
+        // persisted high-water mark for this user. Otherwise the
+        // server returned a stale wrapped MK + state, and the client
+        // would happily operate on a frozen snapshot.
+        keyGenerationStore.verifyAndBump(
+            userId = response.userId,
+            observed = response.keyGeneration,
+            source = "login",
+        )
         val masterKey = MasterKey.unwrap(response.encryptedMasterKey.base64ToBytes(), keys.masterKeyWrapKey)
         try {
             // Enroll the device using the bootstrap token directly. We do
@@ -132,7 +147,19 @@ class AuthRepository @Inject constructor(
             // Single atomic transition: locked → unlocked WITH the
             // device-bound token already installed. No observer ever
             // sees the bootstrap token in an unlocked session.
-            session.authenticate(enrollResponse.sessionToken, masterKey)
+            session.authenticate(
+                token = enrollResponse.sessionToken,
+                masterKey = masterKey,
+                // Phase 8 — every state-mutating call needs to know
+                // the current generation. The Session is the canonical
+                // in-memory source.
+                keyGeneration = response.keyGeneration,
+                // Phase 8 — cache the salt + wrapped MK so the
+                // "Change password" flow can re-rewrap without
+                // bouncing through pre-login → login again.
+                authSalt = salt,
+                encryptedMasterKey = response.encryptedMasterKey.base64ToBytes(),
+            )
 
             // Phase 1 legacy migration with explicit ownership proof.
             // Fetches the server-side pairing list (scoped to the user

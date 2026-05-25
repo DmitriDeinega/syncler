@@ -30,6 +30,17 @@ class SecurePrefs @Inject constructor(@ApplicationContext context: Context) {
         prefs.edit().putString(key, value).apply()
     }
 
+    /**
+     * Returns the stored int for [key], or [default] if missing /
+     * unparseable. Stored under the same key namespace as strings;
+     * uses ``getInt`` under the hood to avoid silent format flips.
+     */
+    fun getInt(key: String, default: Int): Int = prefs.getInt(key, default)
+
+    fun putInt(key: String, value: Int) {
+        prefs.edit().putInt(key, value).apply()
+    }
+
     fun remove(key: String) {
         prefs.edit().remove(key).apply()
     }

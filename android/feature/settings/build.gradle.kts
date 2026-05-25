@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -27,7 +29,28 @@ kotlin {
 }
 
 dependencies {
+    // Phase 8c — RotationRepository lives in core/auth.
+    implementation(project(":core:auth"))
+    // Retrofit's HttpException is part of the public surface of
+    // RotationRepository's failure path (the rewrap call returns a
+    // retrofit Response and unsuccessful codes are wrapped). The
+    // SettingsViewModel inspects the HTTP status code directly to
+    // map 401/409/426/429 onto user-facing copy.
+    implementation(libs.retrofit)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.material3)
+    implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.hilt.android)
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.timber)
+
+    ksp(libs.hilt.compiler)
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
