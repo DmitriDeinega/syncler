@@ -28,6 +28,7 @@ include(
     ":core:auth",
     ":core:crypto",
     ":core:network",
+    ":core:plugin-aidl",
     ":core:push",
     ":core:storage",
     ":feature:inbox",
