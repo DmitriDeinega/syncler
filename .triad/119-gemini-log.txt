@@ -1,0 +1,36 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+**Verdict: GREEN**
+
+The implementation of Phase 10b Step 5 is solid. The move to a real WebView host for the sandbox process, combined with the `HostSignals` contract and the cross-process test harness, provides a robust foundation for the upcoming transition in Step 6.
+
+### Analysis of Concerns
+
+1.  **`onPageFinished` as ready signal:**
+    *   **Verdict: PROCEED.** While `onPageFinished` indicates the main frame has loaded, it doesn't guarantee JS execution of the bundle if there are async scripts. However, since you are injecting the script into the `PluginHtmlShell` via `loadDataWithBaseURL`, the HTML parser will execute inline and non-async script tags before finishing the page. If the plugin's entry point depends on a specific internal JS global, it’s safer to have the JS itself call a bridge method (e.g., `reportReady`) rather than relying on `onPageFinished`. That said, for Step 5, `onPageFinished` is a standard and acceptable proxy.
+
+2.  **`shouldOverrideUrlLoading` for initial load:**
+    *   **Verdict: SAFE.** `loadDataWithBaseURL` (and `loadUrl`) do **not** trigger `shouldOverrideUrlLoading` for the initial request. It only intercepts navigation attempts (clicks, `window.location` changes) initiated within the WebView. Your current logic correctly blocks unwanted external navigation.
+
+3.  **JsBridge race with destroy:**
+    *   **Verdict: SAFE.** The `WeakReference` or null-checking pattern you've likely used for `hostSignalsRef` is standard. Since AIDL calls are synchronous on the JS-bridge thread but handled by a Binder threadpool, and because you've confirmed `RemoteException` is handled, the worst case is a "dead" call that returns immediately.
+
+4.  **`SandboxBridgeDelivery.deliver` fire-and-forget:**
+    *   **Verdict: ACCEPTABLE.** This is standard for cross-process bridge results. If the host is shutting down, the sandbox is usually also being torn down. A hanging JS promise in a dying sandbox process is not a leak or a functional issue.
+
+5.  **Bundle file path access from `:plugin` process:**
+    *   **Verdict: SAFE.** Since both the main process and `:plugin` share the same UID (defined in `AndroidManifest.xml` via `android:process`), they share the same data directory permissions. Accessing `noBackupFilesDir` from the sandbox process is reliable on all standard Android versions.
+
+6.  **`connectedAndroidTest` scope:**
+    *   **Verdict: ADEQUATE.** Validating the failure paths and the load/unload lifecycle across the Binder interface is the high-risk part of this step. Success path verification is naturally part of Step 6 when you perform manual integration testing.
+
+### Observations
+
+*   **`PluginHtmlShell` Duplication:** As noted, this is temporary until Step 6. No action needed now.
+*   **Test Instrumentation:** The setup in `:feature:plugin-sandbox` looks correct. Ensure `testInstrumentationRunner` is properly set to `androidx.test.runner.AndroidJUnitRunner` in `build.gradle.kts`.
+
+### Conclusion
+
+The wiring is clean, and the separation of concerns between `BridgeDelivery` and `PluginBridge` is a significant architectural improvement. You are ready to proceed to **Step 6** (Rewiring and Deletion of the in-process loader).

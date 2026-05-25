@@ -194,14 +194,14 @@ class PluginTokenCoordinator(
         }
         if (!shouldRun) return
 
-        // Stop accepting new events; let the pump drain anything
-        // in-flight before we destroy the WebView.
+        // Stop accepting new events. We do NOT join the pump
+        // before tearing down the WebView — a hook currently
+        // mid-evaluateJavascript races the WebView destroy and
+        // we accept the JS call may be cancelled in flight.
+        // `webViewHost.destroy` is the canonical "JS is gone"
+        // signal; anything past that point is best-effort.
         eventChannel.close()
 
-        // Best-effort: wait briefly for the pump to drain. If a
-        // hook is mid-evaluateJavascript, we accept it'll finish
-        // racing the WebView destroy — webViewHost.destroy is the
-        // canonical "JS is gone" signal.
         runCatching { webViewHost.destroy() }
             .onFailure { Timber.tag(TAG).w(it, "webViewHost.destroy threw (token=%d)", sandboxToken) }
 

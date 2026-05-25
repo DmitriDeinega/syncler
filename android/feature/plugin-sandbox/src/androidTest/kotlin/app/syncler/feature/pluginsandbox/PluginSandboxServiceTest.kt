@@ -29,19 +29,19 @@ import org.junit.runner.RunWith
  * callback round-trip, [IPluginSandbox.querySandboxState].
  *
  * Scope deliberately stops short of asserting an
- * `onPluginReady` round-trip from JS — the real
- * [RealPluginWebViewHost] in step 5a doesn't yet wire the
- * "plugin reported ready" signal back to the coordinator
- * (`coordinator.reportReady()` is unreachable from the
- * production WebView path today). Step 5d closes that gap;
- * once it lands, this test will be extended with a
- * load → ready → dispatchHook → bridgeCall → unload assertion.
+ * `onPluginReady` round-trip from JS. The signal is wired
+ * sandbox-side (step 5d), but [WebViewHostFactoryOverride] is a
+ * test-process static and is NOT visible inside `:plugin`, so
+ * the test process cannot swap in a recording host to assert
+ * on. Verifying the full load → ready → bridgeCall round-trip
+ * needs either a real-WebView emulator pass or a cross-process
+ * factory override mechanism — both deferred past step 5.
  *
- * Cross-process note: [WebViewHostFactoryOverride] is a
- * test-process static and is NOT visible inside `:plugin`, so we
- * cannot swap in a recording host from here. The trade-off is
- * deliberate — this test verifies the AIDL boundary against the
- * production [RealPluginWebViewHostFactory] rather than a fake.
+ * Cross-process note: this test runs the production
+ * [RealPluginWebViewHostFactory] against the AIDL boundary
+ * rather than a fake; the assertions therefore cover parcel
+ * marshalling + error codes + load/unload lifecycle, not
+ * JS-side behavior.
  */
 @RunWith(AndroidJUnit4::class)
 class PluginSandboxServiceTest {

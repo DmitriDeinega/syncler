@@ -1,0 +1,2650 @@
+Reading prompt from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler\android
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e60c2-52ab-7331-83d0-e5f9c26a6902
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 119 — Phase 10b step 5 (real WebView host + e2e + ready wiring)
+
+Steps 5a / 5b / 5c / 5d shipped at:
+
+- `36bb61d` step 5a — `RealPluginWebViewHost` + `RealPluginWebViewHostFactory` + `PluginHtmlShell` (duplicated from in-process loader byte-for-byte).
+- `9dd6f7c` step 5b — `BridgeDelivery` split (`PluginBridge` now takes delivery, not raw WebView), `SandboxBridgeDispatcher` + `SandboxBridgeDelivery` on the host side.
+- `38cc31c` step 5c — `connectedAndroidTest` harness binding the real `:plugin` service via `ServiceTestRule`. Failure paths only (parcel_malformed, bundle_hash_mismatch, unsupported_renderer, diagnostic_field_oversize, concurrent_load_in_progress) + load → unload → onPluginUnloaded cross-process round-trip.
+- `e2b82ba` step 5d — replaced `fun interface BridgeBroker { bridgeCall }` with `interface HostSignals { bridgeCall + reportReady + reportError }`. `RealPluginWebViewHost` now installs a `WebViewClient` whose `onPageFinished` drives `reportReady` and whose main-frame `onReceivedError` drives `reportError`. `shouldOverrideUrlLoading` blocks anything not equal to `PluginHtmlShell.INITIAL_URL` (`https://plugin.local/`).
+
+## Files in scope
+
+- `android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt`
+- `android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginHtmlShell.kt`
+- `android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginWebViewHost.kt` (HostSignals)
+- `android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginTokenCoordinator.kt` (hostSignals object)
+- `android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginSandboxService.kt` (NoopPluginWebViewHost shape)
+- `android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/BridgeDelivery.kt`
+- `android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginBridge.kt`
+- `android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt`
+- `android/feature/plugin-sandbox/src/androidTest/kotlin/app/syncler/feature/pluginsandbox/PluginSandboxServiceTest.kt`
+- `android/feature/plugin-sandbox/build.gradle.kts` + `android/gradle/libs.versions.toml` (testInstrumentationRunner + androidx-test deps)
+
+## Known scope gaps (already deferred — not blockers, but flag if you disagree)
+
+- **connectedAndroidTest covers failure paths + load/unload only.** The `onPluginReady` round-trip from a real WebView cannot be asserted because `WebViewHostFactoryOverride` is a test-process static and is invisible to `:plugin`. Verification of the success path lands either via emulator manual test or by reshaping the override mechanism (ContentProvider-based, Binder-based hint, or per-process Application class that reads a global) — out of scope for step 5.
+- **`PluginHtmlShell` is duplicated** between :feature:plugin-host (in-process loader) and :feature:plugin-sandbox. Step 6 deletes the in-process loader; deduping before then would be wasted work.
+- **In-process loader still active.** The `:feature:plugin-host` legacy WebView path is the production loader today. Sandbox path is fully wired but PluginLoader / PluginRegistry / PluginHostActivity do not call SandboxRouter yet. Step 6 does that flip.
+
+## Concerns I want a second opinion on
+
+1. **`onPageFinished` as ready signal.** Fires once per load via the `reported` guard. Question: can `loadDataWithBaseURL` cause `onPageFinished` to fire BEFORE the bundle script tags have executed (e.g., if there's any deferred parsing)? If so, hooks dispatched immediately after `onPluginReady` would hit a not-yet-installed `__syncler_internal_dispatch`.
+
+2. **`shouldOverrideUrlLoading` for the initial `loadDataWithBaseURL`.** Does Android invoke `shouldOverrideUrlLoading` for the synthesized base-URL load itself? If yes, the current `return request?.url?.toString() != PluginHtmlShell.INITIAL_URL` returning true for the initial load would block the page from rendering at all.
+
+3. **JsBridge race with destroy.** `destroy()` nulls `hostSignalsRef` synchronously on the calling thread (Binder thread typically), then posts WebView teardown to main. Concurrently a `@JavascriptInterface call` may be in flight on Android's private JS-bridge thread: it null-checks `hostSignalsRef`, gets non-null, then calls `signals.bridgeCall` — which dispatches through AIDL to a host that may have already moved on. AIDL adapter swallows RemoteException, so this should be safe, but worth confirming.
+
+4. **`SandboxBridgeDelivery.deliver` fire-and-forget.** `scope.launch { router.deliverBridgeResult(...) }`. If the scope is cancelled (host shutting down) the result never reaches JS and the JS promise hangs until plugin timeout. The doc comment notes this. Acceptable?
+
+5. **Bundle file path access from `:plugin` process.** `PluginLoadParcel.bundleFilePath` points to a file in the host process's `noBackupFilesDir`. Same UID + same app data dir → `:plugin` should read it. Any failure mode I'm missing (e.g., per-process FS namespace on some OEMs)?
+
+6. **connectedAndroidTest scope.** Failure paths + load/unload cross-process round-trip. Is this enough to ship step 5 with reasonable confidence, or do you want at least one positive-flow test (even if it requires manual emulator validation as a follow-up)?
+
+## Test status
+
+- `:feature:plugin-sandbox:testDebugUnitTest` — 6 tests pass (added `reportReadyFromWebViewTransitionsToReady`, `reportErrorFromWebViewTransitionsToErrored`).
+- `:feature:plugin-host:testDebugUnitTest` — passes.
+- `:feature:plugin-sandbox:compileDebugAndroidTestKotlin` — compiles. Has not been run on a device (no Android emulator/device wired to this dev box).
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on step 5 as a whole (5a + 5b + 5c + 5d): GREEN / YELLOW / RED + items.
+2. Any of the 6 concerns above I should fix before step 6.
+3. Anything new I missed.
+
+If dual-GREEN, step 6 begins (strip in-process loader; rewire PluginLoader / PluginRegistry / PluginHostActivity through SandboxRouter).
+
+**Reply text only. Do NOT call any write/mutation tool. Do not commit, edit, or stage anything.**
+
+codex
+I’ll review this as read-only: first the current diffs around the listed commits/files, then the WebView and bridge lifecycle paths that map to your six concerns.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "class RealPluginWebViewHost|HostSignals|onPageFinished|shouldOverrideUrlLoading|JavascriptInterface|hostSignalsRef|SandboxBridgeDelivery|loadDataWithBaseURL|INITIAL_URL|NoopPluginWebViewHost|WebViewHostFactoryOverride" feature/plugin-sandbox feature/plugin-host gradle -S' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline 36bb61d 9dd6f7c 38cc31c e2b82ba' in D:\Projects\syncler\android
+ succeeded in 291ms:
+?? ../.triad/119-codex-log.txt
+?? ../.triad/119-gemini-log.txt
+?? ../.triad/119-phase10b-step5-review-prompt.md
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 300ms:
+feature/plugin-sandbox\build.gradle.kts:49:    // WebViewHostFactoryOverride lets us swap in a recording host
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:92:        // impl would call from a @JavascriptInterface method.
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:111:        // Simulate WebViewClient.onPageFinished firing.
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:182:    var signals: HostSignals? = null
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:185:    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+feature/plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:40: * Cross-process note: [WebViewHostFactoryOverride] is a
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:6:import android.webkit.JavascriptInterface
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:31: * [mainHandler]. The exception is [JavascriptInterface] methods
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:33: * back onto the main thread via [HostSignals.bridgeCall] →
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:36:class RealPluginWebViewHost(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:46:    private var hostSignalsRef: HostSignals? = null
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:48:    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:72:        hostSignalsRef = hostSignals
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:82:            view.addJavascriptInterface(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:86:            view.loadDataWithBaseURL(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:87:                PluginHtmlShell.INITIAL_URL,
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:100:     * `onPageFinished` is the implicit ready marker — at that
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:101:     * point `loadDataWithBaseURL` has parsed the HTML, the SDK
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:107:     * `onPageFinished` (e.g., from in-bundle SPA navigation —
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:108:     * blocked by [shouldOverrideUrlLoading] anyway) would be a
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:115:        override fun onPageFinished(view: WebView, url: String?) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:118:            hostSignalsRef?.reportReady()
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:132:            hostSignalsRef?.reportError(code, message)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:135:        override fun shouldOverrideUrlLoading(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:141:            return request?.url?.toString() != PluginHtmlShell.INITIAL_URL
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:168:        hostSignalsRef = null
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:171:                webView?.removeJavascriptInterface(PluginHtmlShell.NATIVE_BRIDGE_NAME)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:211:     * forward to [HostSignals.bridgeCall] which routes back to
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:215:        @JavascriptInterface
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:217:            val signals = hostSignalsRef
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:264:class RealPluginWebViewHostFactory(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:83:    private val hostSignals: HostSignals = object : HostSignals {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:28:     * signal is [HostSignals.reportReady], fired once the WebView
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:34:    fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:58: * coordinator: bridge calls (from `JavascriptInterface`), ready,
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:67:interface HostSignals {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:38:    // Tests can override via WebViewHostFactoryOverride (step 5's
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:41:        WebViewHostFactoryOverride.get() ?: RealPluginWebViewHostFactory(applicationContext)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:231:internal object NoopPluginWebViewHostFactory : PluginWebViewHostFactory {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:233:        NoopPluginWebViewHost
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:236:private object NoopPluginWebViewHost : PluginWebViewHost {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:237:    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:266:object WebViewHostFactoryOverride {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginBridge.kt:3:import android.webkit.JavascriptInterface
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginBridge.kt:65:    @JavascriptInterface
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\BridgeDelivery.kt:15: *   `SandboxBridgeDelivery` (in the `sandbox` sub-package),
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:21:            webView?.removeJavascriptInterface(PluginBridge.NATIVE_BRIDGE_NAME)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:230:        webView.addJavascriptInterface(bridge, PluginBridge.NATIVE_BRIDGE_NAME)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:232:        webView.loadDataWithBaseURL(PluginWebViewClient.INITIAL_URL, htmlShell, "text/html", "utf-8", null)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHtmlShell.kt:97:    const val INITIAL_URL = "https://plugin.local/"
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHtmlShell.kt:99:    /** Name the JavascriptInterface object is bound under. */
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:20:    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:23:    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:35:        if (url != INITIAL_URL) {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:48:        val allowed = url.toString() == INITIAL_URL && !initialSelfLoadSeen
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:66:        const val INITIAL_URL = "https://syncler-plugin-host/index.html"
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:21: * [SandboxBridgeDelivery], which the per-plugin [PluginBridge]
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:70:        // JavascriptInterface used. It runs the capability logic on
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:73:        // a SandboxBridgeDelivery wired to this sandboxToken.
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:114:class SandboxBridgeDelivery(
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:141:        private const val TAG = "SandboxBridgeDelivery"
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 307ms:
+36bb61d phase 10b step 5a: real PluginWebViewHost in the sandbox
+ android/feature/plugin-sandbox/build.gradle.kts    |   7 +
+ .../feature/pluginsandbox/PluginHtmlShell.kt       | 101 ++++++++++
+ .../feature/pluginsandbox/PluginSandboxService.kt  |  30 ++-
+ .../feature/pluginsandbox/RealPluginWebViewHost.kt | 217 +++++++++++++++++++++
+ 4 files changed, 354 insertions(+), 1 deletion(-)
+9dd6f7c phase 10b step 5b: BridgeDelivery abstraction + SandboxBridgeDispatcher
+ .../syncler/android/pluginhost/BridgeDelivery.kt   |  48 +++++++
+ .../app/syncler/android/pluginhost/PluginBridge.kt |  44 +++++--
+ .../pluginhost/sandbox/SandboxBridgeDispatcher.kt  | 143 +++++++++++++++++++++
+ 3 files changed, 226 insertions(+), 9 deletions(-)
+38cc31c phase 10b step 5c: connectedAndroidTest harness for PluginSandboxService
+ android/feature/plugin-sandbox/build.gradle.kts    |   8 +
+ .../src/androidTest/AndroidManifest.xml            |   2 +
+ .../pluginsandbox/PluginSandboxServiceTest.kt      | 279 +++++++++++++++++++++
+ android/gradle/libs.versions.toml                  |   5 +
+ 4 files changed, 294 insertions(+)
+e2b82ba phase 10b step 5d: wire reportReady/reportError from WebView
+ .../feature/pluginsandbox/PluginSandboxService.kt  |  2 +-
+ .../pluginsandbox/PluginTokenCoordinator.kt        | 28 ++++++---
+ .../feature/pluginsandbox/PluginWebViewHost.kt     | 30 ++++++---
+ .../feature/pluginsandbox/RealPluginWebViewHost.kt | 72 +++++++++++++++++++---
+ .../pluginsandbox/PluginTokenCoordinatorTest.kt    | 41 ++++++++++--
+ 5 files changed, 137 insertions(+), 36 deletions(-)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The tree has only untracked review artifacts outside the Android root; I’m ignoring those. Next I’m reading the actual lifecycle code with line numbers so any verdict is tied to concrete behavior.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginTokenCoordinator.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginHtmlShell.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }' in D:\Projects\syncler\android
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginTokenCoordinator.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginHtmlShell.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+2026-05-25T20:10:26.392660Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+2026-05-25T20:10:26.502474Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginTokenCoordinator.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+2026-05-25T20:10:26.502595Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginHtmlShell.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+2026-05-25T20:10:26.502615Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=0; Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt | ForEach-Object { $i++; '"'{0,4}: {1}' -f "'$i, $_ }'` rejected: blocked by policy
+codex
+The line-number formatting command is blocked by the local policy wrapper, so I’m switching to simpler read/search commands and will cite paths plus function names if exact line numbers are unavailable.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxBridgeDispatcher.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginHtmlShell.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginTokenCoordinator.kt' in D:\Projects\syncler\android
+ succeeded in 478ms:
+package app.syncler.android.pluginhost.sandbox
+
+import app.syncler.android.pluginhost.BridgeDelivery
+import app.syncler.android.pluginhost.PluginBridge
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Host-side adapter from sandbox-originated events to the
+ * existing `PluginBridge` capability dispatch. Phase 10b step 5b.
+ *
+ * `SandboxRouter` calls into this dispatcher whenever the sandbox
+ * emits a `bridgeCall` or a lifecycle event. The dispatcher
+ * routes via the per-token bridge map (one [PluginBridge] per
+ * active plugin) ‚?" capability dispatch happens in the host
+ * process exactly the same way the in-process path did.
+ *
+ * Bridge results flow back to the sandbox via
+ * [SandboxBridgeDelivery], which the per-plugin [PluginBridge]
+ * was constructed with.
+ */
+class SandboxBridgeDispatcher : BridgeDispatcher {
+
+    private val bridges = ConcurrentHashMap<Int, PluginBridge>()
+    private val lifecycleListeners = ConcurrentHashMap<Int, LifecycleListener>()
+
+    /**
+     * Register the [PluginBridge] for a freshly-loaded sandbox
+     * token. Caller (the rewired loader) MUST do this before
+     * the sandbox's `onPluginReady` arrives ‚?" race-free because
+     * we register synchronously before `SandboxRouter.loadPlugin`
+     * returns (the host-side loader controls the order).
+     */
+    fun registerBridge(sandboxToken: Int, bridge: PluginBridge) {
+        bridges[sandboxToken] = bridge
+    }
+
+    /** Remove the bridge mapping for [sandboxToken]. Idempotent. */
+    fun unregisterBridge(sandboxToken: Int) {
+        bridges.remove(sandboxToken)
+        lifecycleListeners.remove(sandboxToken)
+    }
+
+    /**
+     * Hook a per-token lifecycle listener (e.g. the
+     * `PluginRegistry`'s "this plugin is now ready" /
+     * "this plugin crashed" handlers). Optional ‚?" null entry
+     * means we just no-op on lifecycle events for that token.
+     */
+    fun registerLifecycleListener(sandboxToken: Int, listener: LifecycleListener) {
+        lifecycleListeners[sandboxToken] = listener
+    }
+
+    override suspend fun bridgeCall(
+        sandboxToken: Int,
+        method: String,
+        argsJson: String,
+        callbackId: String,
+    ) {
+        val bridge = bridges[sandboxToken] ?: run {
+            Timber.tag(TAG).w(
+                "bridgeCall for unknown token=%d method=%s ‚?" dropping",
+                sandboxToken, method,
+            )
+            return
+        }
+        // PluginBridge.call is the same entry point the in-process
+        // JavascriptInterface used. It runs the capability logic on
+        // its own CoroutineScope and delivers the result via the
+        // BridgeDelivery the bridge was constructed with ‚?" which is
+        // a SandboxBridgeDelivery wired to this sandboxToken.
+        bridge.call(method, argsJson, callbackId)
+    }
+
+    override suspend fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+        lifecycleListeners[sandboxToken]?.onWebViewError(code, message)
+    }
+
+    override suspend fun onPluginReady(sandboxToken: Int) {
+        lifecycleListeners[sandboxToken]?.onPluginReady()
+    }
+
+    override suspend fun onPluginCrashed(sandboxToken: Int, reason: String) {
+        lifecycleListeners[sandboxToken]?.onPluginCrashed(reason)
+        unregisterBridge(sandboxToken)
+    }
+
+    override suspend fun onPluginUnloaded(sandboxToken: Int) {
+        lifecycleListeners[sandboxToken]?.onPluginUnloaded()
+        unregisterBridge(sandboxToken)
+    }
+
+    interface LifecycleListener {
+        fun onPluginReady()
+        fun onWebViewError(code: String, message: String)
+        fun onPluginCrashed(reason: String)
+        fun onPluginUnloaded()
+    }
+
+    companion object {
+        private const val TAG = "SandboxBridgeDispatch"
+    }
+}
+
+/**
+ * [BridgeDelivery] that ships a capability result back to a
+ * sandboxed plugin via `SandboxRouter.deliverBridgeResult`. The
+ * per-plugin [PluginBridge] is constructed with one of these so
+ * its `deliver(callbackId, json)` path no longer touches a
+ * WebView directly.
+ */
+class SandboxBridgeDelivery(
+    private val sandboxToken: Int,
+    private val routerProvider: () -> SandboxRouter?,
+    private val scope: CoroutineScope,
+) : BridgeDelivery {
+    override fun deliver(callbackId: String, resultJson: String) {
+        val router = routerProvider() ?: run {
+            Timber.tag(TAG).w(
+                "deliver for token=%d callback=%s ‚?" router gone, dropping",
+                sandboxToken, callbackId,
+            )
+            return
+        }
+        // Fire-and-forget ‚?" the BridgeDelivery contract is no-await.
+        // Launch on the SandboxBridgeDispatcher's scope so a slow
+        // AIDL call doesn't pin the coroutine the bridge's
+        // capability work ran on.
+        scope.launch {
+            runCatching {
+                router.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+            }.onFailure {
+                Timber.tag(TAG).w(it, "deliverBridgeResult threw (token=%d)", sandboxToken)
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "SandboxBridgeDelivery"
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 479ms:
+package app.syncler.feature.pluginsandbox
+
+/**
+ * Phase 10b step 5: HTML + bridge JS shell for plugin bundles.
+ *
+ * Mirrors `app.syncler.android.pluginhost.PluginHtmlShell` (the
+ * in-process loader's shell) byte-for-byte so capability calls
+ * and lifecycle hooks behave identically across the multi-
+ * process port. Duplicated here intentionally ‚?" the in-process
+ * shell will be deleted in step 6, but until then both paths
+ * MUST agree.
+ *
+ * The shell wraps the plugin bundle in:
+ *   1. A capability stub that translates `platform.*` calls into
+ *      `__syncler_native__.call(method, JSON.stringify(args),
+ *      callbackId)` JS-bridge invocations.
+ *   2. A callback router (`window.__syncler_internal_callback`)
+ *      keyed by `callbackId` ‚?" the sandbox's `deliverBridgeResult`
+ *      evaluates this with `{success, value}` or `{success: false,
+ *      error, message}` payloads.
+ *   3. A host-hook dispatcher (`__syncler_internal_dispatch`)
+ *      that wraps the plugin's SDK-registered hook map and
+ *      routes return values back via the same callback path.
+ */
+internal object PluginHtmlShell {
+    fun render(bundleJs: String): String {
+        val escapedBundle = bundleJs.replace("</script", "<\\/script", ignoreCase = true)
+        return """
+            <!doctype html>
+            <html>
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+            <body>
+            <script>
+            (() => {
+              const callbacks = new Map();
+              let nextCallbackId = 1;
+              window.__syncler_internal_callback = (callbackId, result) => {
+                const callback = callbacks.get(callbackId);
+                if (!callback) return;
+                callbacks.delete(callbackId);
+                if (result && result.success) callback.resolve(result.value);
+                else callback.reject({ error: result?.error || "unknown_error", message: result?.message });
+              };
+              const nativeCall = (method, args) => new Promise((resolve, reject) => {
+                const callbackId = String(nextCallbackId++);
+                callbacks.set(callbackId, { resolve, reject });
+                window.__syncler_native__.call(method, JSON.stringify(args || {}), callbackId);
+              });
+              const asResponse = async (payload) => new Response(payload.body || "", {
+                status: payload.status || 200,
+                headers: payload.headers || {}
+              });
+              window.platform = {
+                __version__: "1.0.0",
+                showNotification: (opts) => nativeCall("platform.showNotification", opts),
+                storage: {
+                  get: (key, opts) => nativeCall("platform.storage.get", { key, opts }).then((r) => r.value ?? null),
+                  set: (key, value, opts) => nativeCall("platform.storage.set", { key, value, opts }),
+                  delete: (key, opts) => nativeCall("platform.storage.delete", { key, opts })
+                },
+                network: {
+                  fetch: (url, init) => nativeCall("platform.network.fetch", { url, init }).then(asResponse)
+                },
+                camera: { capture: (opts) => nativeCall("platform.camera.capture", opts) },
+                gallery: { pick: (opts) => nativeCall("platform.gallery.pick", opts) },
+                file: { pick: (opts) => nativeCall("platform.file.pick", opts) },
+                location: { current: (opts) => nativeCall("platform.location.current", opts) },
+                message: {
+                  respond: (actionId, payload) => nativeCall("platform.message.respond", { actionId, payload }),
+                  dismissBehavior: (behavior) => nativeCall("platform.message.dismissBehavior", { behavior })
+                }
+              };
+            })();
+            </script>
+            <script>$escapedBundle</script>
+            <script>
+            (() => {
+              const sdkDispatch = window.__syncler_internal_dispatch;
+              window.__syncler_internal_dispatch = (hook, args, callbackId) => {
+                const promise = sdkDispatch ? Promise.resolve(sdkDispatch(hook, args || [])) : Promise.reject(new Error("plugin dispatcher unavailable"));
+                if (callbackId) {
+                  promise.then(
+                    (value) => window.__syncler_internal_callback(callbackId, { success: true, value }),
+                    (error) => window.__syncler_internal_callback(callbackId, { success: false, error: "plugin_dispatch_failed", message: String(error && error.message || error) })
+                  );
+                }
+                return promise;
+              };
+            })();
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+    }
+
+    /** Sentinel base URL for the WebView ‚?" matches the in-process loader. */
+    const val INITIAL_URL = "https://plugin.local/"
+
+    /** Name the JavascriptInterface object is bound under. */
+    const val NATIVE_BRIDGE_NAME = "__syncler_native__"
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 483ms:
+package app.syncler.feature.pluginsandbox
+
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.webkit.WebViewFeature
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.io.File
+import java.security.MessageDigest
+import timber.log.Timber
+
+/**
+ * Real `PluginWebViewHost` ‚?" runs in the `:plugin` subprocess
+ * with a per-token Android `WebView`. Phase 10b step 5.
+ *
+ * Constructed on demand by [RealPluginWebViewHostFactory] which
+ * the `PluginSandboxService` wires in for production builds.
+ * Unit tests use the recording `FakePluginWebViewHost` in the
+ * sandbox test source set instead.
+ *
+ * Threading: WebView is single-threaded ‚?" every API call
+ * happens on the main looper. AIDL Binder threads land in the
+ * coordinator's serial channel, the coordinator dispatches to
+ * this class, and this class marshals to the main thread via
+ * [mainHandler]. The exception is [JavascriptInterface] methods
+ * which Android invokes on a private JS-bridge thread; we hop
+ * back onto the main thread via [HostSignals.bridgeCall] ‚+'
+ * [SandboxRouter] only after the bytes leave the WebView.
+ */
+class RealPluginWebViewHost(
+    private val appContext: Context,
+) : PluginWebViewHost {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var webView: WebView? = null
+
+    @Volatile
+    private var hostSignalsRef: HostSignals? = null
+
+    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+        // Defense-in-depth (Phase 10a ?10.x): re-verify the bundle
+        // hash sandbox-side. The host already checked, but a TOCTOU
+        // between host stage and sandbox read would slip through
+        // without this.
+        val bundleFile = File(parcel.bundleFilePath)
+        if (!bundleFile.exists()) {
+            throw IllegalStateException(LoadFailureCodes.PARCEL_MALFORMED)
+        }
+        val bundleBytes = bundleFile.readBytes()
+        val actualHashHex = sha256Hex(bundleBytes)
+        if (!actualHashHex.equals(parcel.bundleHashHex, ignoreCase = true)) {
+            Timber.tag(TAG).e(
+                "bundle hash mismatch token=%d expected=%s actual=%s",
+                parcel.sandboxToken, parcel.bundleHashHex, actualHashHex,
+            )
+            throw IllegalStateException(LoadFailureCodes.BUNDLE_HASH_MISMATCH)
+        }
+        if (parcel.renderer != "script") {
+            // Step 5 ships the script renderer only. Template plugins
+            // are rendered host-side and don't need the sandbox.
+            throw IllegalStateException(LoadFailureCodes.UNSUPPORTED_RENDERER)
+        }
+
+        hostSignalsRef = hostSignals
+        val htmlShell = PluginHtmlShell.render(bundleBytes.toString(Charsets.UTF_8))
+
+        runOnMain {
+            val view = WebView(appContext)
+            harden(view.settings)
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+                androidx.webkit.WebSettingsCompat.setSafeBrowsingEnabled(view.settings, true)
+            }
+            view.webViewClient = ReadinessWebViewClient()
+            view.addJavascriptInterface(
+                JsBridge(parcel.sandboxToken),
+                PluginHtmlShell.NATIVE_BRIDGE_NAME,
+            )
+            view.loadDataWithBaseURL(
+                PluginHtmlShell.INITIAL_URL,
+                htmlShell,
+                "text/html",
+                "utf-8",
+                null,
+            )
+            webView = view
+        }
+    }
+
+    /**
+     * Phase 10b step 5d: bridge WebView page-load lifecycle into
+     * the coordinator's `reportReady` / `reportError` signals.
+     * `onPageFinished` is the implicit ready marker ‚?" at that
+     * point `loadDataWithBaseURL` has parsed the HTML, the SDK
+     * shell + bundle script tags have both executed, and
+     * subsequent `dispatchHook` calls can rely on
+     * `__syncler_internal_dispatch` being installed.
+     *
+     * Fires once per load via the [reported] guard. A second
+     * `onPageFinished` (e.g., from in-bundle SPA navigation ‚?"
+     * blocked by [shouldOverrideUrlLoading] anyway) would be a
+     * no-op rather than a duplicate `onPluginReady`.
+     */
+    private inner class ReadinessWebViewClient : WebViewClient() {
+        @Volatile
+        private var reported: Boolean = false
+
+        override fun onPageFinished(view: WebView, url: String?) {
+            if (reported) return
+            reported = true
+            hostSignalsRef?.reportReady()
+        }
+
+        override fun onReceivedError(
+            view: WebView,
+            request: WebResourceRequest?,
+            error: WebResourceError?,
+        ) {
+            // Only surface main-frame errors as plugin failures ‚?"
+            // subresource 404s are routine and the bundle should
+            // handle them. URL match is the cheapest gate.
+            if (request?.isForMainFrame != true) return
+            val code = error?.errorCode?.toString() ?: "webview_error"
+            val message = error?.description?.toString() ?: ""
+            hostSignalsRef?.reportError(code, message)
+        }
+
+        override fun shouldOverrideUrlLoading(
+            view: WebView,
+            request: WebResourceRequest?,
+        ): Boolean {
+            // Plugin pages are not allowed to navigate. Block
+            // everything except the initial `plugin.local/`.
+            return request?.url?.toString() != PluginHtmlShell.INITIAL_URL
+        }
+    }
+
+    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        val script = buildString {
+            append("window.__syncler_internal_dispatch(")
+            append(quoteJsString(hook))
+            append(",[")
+            // payloadJson is already a JSON-encoded value ‚?" we pass
+            // it as a single positional arg. The sdk-side dispatcher
+            // accepts an args array; wrap accordingly.
+            append(payloadJson)
+            append("],")
+            append(quoteJsString(callbackId))
+            append(")")
+        }
+        evalJs(script)
+    }
+
+    override fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        val script = "window.__syncler_internal_callback(" +
+            quoteJsString(callbackId) + "," + resultJson + ")"
+        evalJs(script)
+    }
+
+    override fun destroy() {
+        hostSignalsRef = null
+        runOnMain {
+            runCatching {
+                webView?.removeJavascriptInterface(PluginHtmlShell.NATIVE_BRIDGE_NAME)
+                webView?.stopLoading()
+                webView?.destroy()
+            }.onFailure { Timber.tag(TAG).w(it, "webView destroy threw") }
+            webView = null
+        }
+    }
+
+    /** Hardening ‚?" matches `PluginLoader.harden` byte-for-byte. */
+    private fun harden(settings: WebSettings) {
+        settings.javaScriptEnabled = true
+        settings.allowFileAccess = false
+        settings.allowFileAccessFromFileURLs = false
+        settings.allowUniversalAccessFromFileURLs = false
+        settings.allowContentAccess = false
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        settings.domStorageEnabled = false
+        settings.databaseEnabled = false
+    }
+
+    private fun evalJs(script: String) {
+        runOnMain {
+            val view = webView ?: return@runOnMain
+            runCatching { view.evaluateJavascript(script, null) }
+                .onFailure { Timber.tag(TAG).w(it, "evaluateJavascript threw") }
+        }
+    }
+
+    private fun runOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            mainHandler.post(block)
+        }
+    }
+
+    /**
+     * JS-bridge object the plugin's wrapper calls via
+     * `window.__syncler_native__.call(method, argsJson, callbackId)`.
+     * Android invokes [call] on a private bridge thread ‚?" we
+     * forward to [HostSignals.bridgeCall] which routes back to
+     * the host via the AIDL callback.
+     */
+    private inner class JsBridge(private val sandboxToken: Int) {
+        @JavascriptInterface
+        fun call(method: String?, argsJson: String?, callbackId: String?) {
+            val signals = hostSignalsRef
+            if (signals == null) {
+                Timber.tag(TAG).w(
+                    "JS bridge call after destroy (token=%d method=%s) ‚?" dropping",
+                    sandboxToken, method,
+                )
+                return
+            }
+            signals.bridgeCall(
+                method = method.orEmpty(),
+                argsJson = argsJson.orEmpty(),
+                callbackId = callbackId.orEmpty(),
+            )
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun quoteJsString(s: String): String {
+        val escaped = buildString {
+            for (c in s) {
+                when (c) {
+                    '\\' -> append("\\\\")
+                    '"' -> append("\\\"")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else -> if (c.code < 0x20) append("\\u%04x".format(c.code)) else append(c)
+                }
+            }
+        }
+        return "\"$escaped\""
+    }
+
+    companion object {
+        private const val TAG = "PluginWebViewHost"
+    }
+}
+
+/**
+ * Production factory wired into `PluginSandboxService` ‚?"
+ * produces one [RealPluginWebViewHost] per `loadPlugin` call,
+ * each holding its own WebView in the `:plugin` process.
+ */
+class RealPluginWebViewHostFactory(
+    private val appContext: Context,
+) : PluginWebViewHostFactory {
+    override fun create(parcel: PluginLoadParcel): PluginWebViewHost =
+        RealPluginWebViewHost(appContext)
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 490ms:
+package app.syncler.feature.pluginsandbox
+
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Per-token coordinator. Holds the [PluginSandboxState], the per-
+ * token serial Channel (so concurrent host-side oneway calls land
+ * in order), and the [PluginWebViewHost] instance.
+ *
+ * The coordinator itself is thread-safe via the [stateLock]
+ * monitor. Hook + bridge-result delivery hops through [eventChannel]
+ * so the WebView host sees them sequentially even when multiple
+ * Binder threads call us at once.
+ *
+ * Lifecycle: created on [loadPlugin], destroyed on [unload] OR
+ * `process death` (no in-process signal for that ‚?" see
+ * [PluginSandboxService] for the host-side handling).
+ *
+ * See `docs/plugin-host-multi-process.md` "Lifecycle + state
+ * machine" + "Threading".
+ */
+class PluginTokenCoordinator(
+    val sandboxToken: Int,
+    val pluginId: String,
+    private val callback: PluginHostCallbackLocal,
+    private val webViewHost: PluginWebViewHost,
+    parentScope: CoroutineScope,
+) {
+    private val stateLock = Any()
+
+    @Volatile
+    private var _state: PluginSandboxState = PluginSandboxState.LOADING
+
+    val state: PluginSandboxState get() = _state
+
+    /**
+     * Per-token serial queue. CAPACITY=64 ‚?" generous; if the queue
+     * backs up that far we have a plugin that can't keep up and
+     * the host should slow down anyway. Channel.UNLIMITED is
+     * tempting but lets a runaway host OOM the sandbox.
+     */
+    private val eventChannel = Channel<Event>(capacity = 64)
+
+    private val tokenScope: CoroutineScope = CoroutineScope(
+        parentScope.coroutineContext + SupervisorJob() + Dispatchers.Default,
+    )
+
+    private val pumpJob: Job = tokenScope.launch {
+        for (event in eventChannel) {
+            when (event) {
+                is Event.Hook -> webViewHost.dispatchHook(
+                    event.hook, event.payloadJson, event.callbackId,
+                )
+                is Event.BridgeResult -> webViewHost.deliverBridgeResult(
+                    event.callbackId, event.resultJson,
+                )
+            }
+        }
+    }
+
+    /**
+     * Kick off the WebView load. Caller is the AIDL `loadPlugin`
+     * entry point. May throw with a [LoadFailureCodes] string.
+     */
+    fun startLoad(parcel: PluginLoadParcel) {
+        synchronized(stateLock) {
+            check(_state == PluginSandboxState.LOADING) {
+                "startLoad called in state $_state ‚?" bug"
+            }
+        }
+        webViewHost.startLoad(parcel, hostSignals)
+    }
+
+    private val hostSignals: HostSignals = object : HostSignals {
+        override fun bridgeCall(method: String, argsJson: String, callbackId: String) {
+            // No-state-gate here intentionally ‚?" the WebView may emit
+            // a bridge call between our state transition to UNLOADING
+            // and the actual WebView teardown. We deliver up to the
+            // host; the host's pending-callback map decides whether to
+            // satisfy or drop. The adapter in PluginSandboxService
+            // swallows any RemoteException from a dead host.
+            callback.bridgeCall(sandboxToken, method, argsJson, callbackId)
+        }
+
+        override fun reportReady() {
+            this@PluginTokenCoordinator.reportReady()
+        }
+
+        override fun reportError(code: String, message: String) {
+            this@PluginTokenCoordinator.reportError(code, message)
+        }
+    }
+
+    /**
+     * Sandbox-side equivalent of `onPluginReady` ‚?" called by the
+     * WebView host once the JS bundle is parsed + the plugin's
+     * `init` hook returned. Transitions [LOADING] -> [READY] and
+     * notifies the host via `onPluginReady(sandboxToken)`.
+     */
+    fun reportReady() {
+        val didTransition = synchronized(stateLock) {
+            if (_state == PluginSandboxState.LOADING) {
+                _state = PluginSandboxState.READY
+                true
+            } else false
+        }
+        if (didTransition) {
+            callback.onPluginReady(sandboxToken)
+        }
+    }
+
+    /** WebView host reports an unrecoverable runtime error. */
+    fun reportError(code: String, message: String) {
+        synchronized(stateLock) {
+            if (_state == PluginSandboxState.LOADING ||
+                _state == PluginSandboxState.READY
+            ) {
+                _state = PluginSandboxState.ERRORED
+            }
+        }
+        callback.onWebViewError(sandboxToken, code, message)
+    }
+
+    /**
+     * Host called `dispatchHook`. Enqueue for the pump unless the
+     * token is past `READY`. Out-of-window calls are warn-logged
+     * and dropped per the state-machine table.
+     */
+    fun submitHook(hook: String, payloadJson: String, callbackId: String) {
+        val accept = synchronized(stateLock) {
+            _state == PluginSandboxState.LOADING || _state == PluginSandboxState.READY
+        }
+        if (!accept) {
+            Timber.tag(TAG).w(
+                "dispatchHook dropped in state %s (token=%d hook=%s)",
+                _state, sandboxToken, hook,
+            )
+            return
+        }
+        val sent = eventChannel.trySend(Event.Hook(hook, payloadJson, callbackId))
+        if (!sent.isSuccess) {
+            Timber.tag(TAG).w(
+                "dispatchHook channel full (token=%d hook=%s) ‚?" dropping",
+                sandboxToken, hook,
+            )
+        }
+    }
+
+    /** Host called `deliverBridgeResult`. Same accept rules as hooks. */
+    fun submitBridgeResult(callbackId: String, resultJson: String) {
+        val accept = synchronized(stateLock) {
+            _state == PluginSandboxState.LOADING || _state == PluginSandboxState.READY
+        }
+        if (!accept) {
+            Timber.tag(TAG).w(
+                "deliverBridgeResult dropped in state %s (token=%d callback=%s)",
+                _state, sandboxToken, callbackId,
+            )
+            return
+        }
+        val sent = eventChannel.trySend(Event.BridgeResult(callbackId, resultJson))
+        if (!sent.isSuccess) {
+            Timber.tag(TAG).w(
+                "deliverBridgeResult channel full (token=%d callback=%s) ‚?" dropping",
+                sandboxToken, callbackId,
+            )
+        }
+    }
+
+    /**
+     * Begin teardown. Transitions to [UNLOADING], cancels the pump,
+     * destroys the WebView, fires `onPluginUnloaded(sandboxToken)`,
+     * transitions to [UNLOADED]. Idempotent.
+     */
+    fun unload() {
+        val shouldRun = synchronized(stateLock) {
+            when (_state) {
+                PluginSandboxState.UNLOADING,
+                PluginSandboxState.UNLOADED -> false
+                else -> {
+                    _state = PluginSandboxState.UNLOADING
+                    true
+                }
+            }
+        }
+        if (!shouldRun) return
+
+        // Stop accepting new events; let the pump drain anything
+        // in-flight before we destroy the WebView.
+        eventChannel.close()
+
+        // Best-effort: wait briefly for the pump to drain. If a
+        // hook is mid-evaluateJavascript, we accept it'll finish
+        // racing the WebView destroy ‚?" webViewHost.destroy is the
+        // canonical "JS is gone" signal.
+        runCatching { webViewHost.destroy() }
+            .onFailure { Timber.tag(TAG).w(it, "webViewHost.destroy threw (token=%d)", sandboxToken) }
+
+        synchronized(stateLock) {
+            _state = PluginSandboxState.UNLOADED
+        }
+        callback.onPluginUnloaded(sandboxToken)
+
+        // Release coroutines.
+        tokenScope.cancel()
+    }
+
+    private sealed interface Event {
+        data class Hook(val hook: String, val payloadJson: String, val callbackId: String) : Event
+        data class BridgeResult(val callbackId: String, val resultJson: String) : Event
+    }
+
+    companion object {
+        private const val TAG = "PluginSandbox"
+    }
+}
+
+/**
+ * Process-wide token registry. Used by [PluginSandboxService] to
+ * look up the right coordinator per AIDL transaction. Concurrent-
+ * map keyed by [Int] token; coordinator lifecycle owns its own
+ * thread-safety.
+ */
+class PluginTokenRegistry {
+    private val coordinators = ConcurrentHashMap<Int, PluginTokenCoordinator>()
+
+    fun put(coordinator: PluginTokenCoordinator) {
+        coordinators[coordinator.sandboxToken] = coordinator
+    }
+
+    operator fun get(sandboxToken: Int): PluginTokenCoordinator? =
+        coordinators[sandboxToken]
+
+    fun remove(sandboxToken: Int): PluginTokenCoordinator? =
+        coordinators.remove(sandboxToken)
+
+    fun activeReadyOrLoadingCount(): Int = coordinators.values.count { c ->
+        c.state == PluginSandboxState.READY || c.state == PluginSandboxState.LOADING
+    }
+
+    fun all(): Collection<PluginTokenCoordinator> = coordinators.values.toList()
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginBridge.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/BridgeDelivery.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginWebViewHost.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginSandboxService.kt' in D:\Projects\syncler\android
+ succeeded in 566ms:
+package app.syncler.feature.pluginsandbox
+
+import app.syncler.core.pluginaidl.PluginLoadParcel
+
+/**
+ * Thin abstraction over the actual `WebView` instance one plugin
+ * runs in. The sandbox routes lifecycle + dispatch through this
+ * interface so unit tests can substitute a recording double
+ * (`FakePluginWebViewHost` in the test source set) without
+ * pulling in `android.webkit.WebView`, which isn't on the JVM
+ * test classpath.
+ *
+ * Phase 10b step 2 ships this interface + a thread-safe state
+ * machine that operates against it. Step 2 lands a no-op
+ * production [PluginWebViewHost] factory whose actual
+ * `WebView`-touching implementation we'll fill in once the
+ * connectedAndroidTest path is wired up (the WebView APIs need
+ * a `Context` + a real main looper, which is awkward for unit
+ * tests).
+ */
+interface PluginWebViewHost {
+
+    /**
+     * Stage the bundle, verify the hash matches
+     * [PluginLoadParcel.bundleHashHex], and start evaluating JS.
+     * Returns when the WebView has loaded enough that subsequent
+     * [dispatchHook] calls are safe to queue. The real readiness
+     * signal is [HostSignals.reportReady], fired once the WebView
+     * finishes loading the bundle.
+     *
+     * Throws an [IllegalStateException] with a
+     * [LoadFailureCodes] code on failure.
+     */
+    fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals)
+
+    /**
+     * Deliver a host-originated hook to the plugin's JS. Caller
+     * has already serialized via the per-token Channel; the
+     * implementation may assume sequential invocation per token.
+     */
+    fun dispatchHook(hook: String, payloadJson: String, callbackId: String)
+
+    /**
+     * Resolve a previously-issued `bridgeCall` callback with a
+     * JSON result (success or `{"error":...}` shape).
+     */
+    fun deliverBridgeResult(callbackId: String, resultJson: String)
+
+    /**
+     * Destroy the WebView + tear down per-token state. Idempotent.
+     * The sandbox fires `onPluginUnloaded` AFTER this returns.
+     */
+    fun destroy()
+}
+
+/**
+ * Sandbox-side signals the [PluginWebViewHost] fires up to its
+ * coordinator: bridge calls (from `JavascriptInterface`), ready,
+ * and error. The interface indirection keeps the AIDL types out
+ * of the WebView implementation and lets unit tests substitute a
+ * recording double.
+ *
+ * Phase 10b step 5d: split from the previous `BridgeBroker` so
+ * the WebView impl can drive `onPluginReady` /
+ * `onWebViewError` lifecycle transitions, not just bridge calls.
+ */
+interface HostSignals {
+    /** JS-bridge `call(method, argsJson, callbackId)` arrived. */
+    fun bridgeCall(method: String, argsJson: String, callbackId: String)
+
+    /** WebView finished loading the bundle; plugin is ready. */
+    fun reportReady()
+
+    /** WebView reported an unrecoverable error. */
+    fun reportError(code: String, message: String)
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 586ms:
+package app.syncler.android.pluginhost
+
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import app.syncler.android.pluginhost.capabilities.CameraBridge
+import app.syncler.android.pluginhost.capabilities.FileBridge
+import app.syncler.android.pluginhost.capabilities.GalleryBridge
+import app.syncler.android.pluginhost.capabilities.LocationBridge
+import app.syncler.android.pluginhost.capabilities.MessageBridge
+import app.syncler.android.pluginhost.capabilities.NetworkBridge
+import app.syncler.android.pluginhost.capabilities.NotificationBridge
+import app.syncler.android.pluginhost.capabilities.StorageBridge
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+
+class PluginBridge(
+    private val plugin: PluginInstance,
+    private val delivery: BridgeDelivery,
+    private val scope: CoroutineScope,
+    private val networkBridge: NetworkBridge,
+    private val storageBridge: StorageBridge,
+    private val notificationBridge: NotificationBridge,
+    private val cameraBridge: CameraBridge,
+    private val galleryBridge: GalleryBridge,
+    private val fileBridge: FileBridge,
+    private val locationBridge: LocationBridge,
+    private val messageBridge: MessageBridge,
+    private val auditLogger: AuditLogger,
+) {
+    @Deprecated(
+        "Pre-Phase-10b WebView-direct delivery. Use the BridgeDelivery " +
+            "constructor + WebViewBridgeDelivery from PluginLoader.",
+        ReplaceWith("PluginBridge(plugin, WebViewBridgeDelivery(webViewProvider), ...)"),
+    )
+    @Suppress("DEPRECATION")
+    constructor(
+        plugin: PluginInstance,
+        webViewProvider: () -> WebView?,
+        scope: CoroutineScope,
+        networkBridge: NetworkBridge,
+        storageBridge: StorageBridge,
+        notificationBridge: NotificationBridge,
+        cameraBridge: CameraBridge,
+        galleryBridge: GalleryBridge,
+        fileBridge: FileBridge,
+        locationBridge: LocationBridge,
+        messageBridge: MessageBridge,
+        auditLogger: AuditLogger,
+    ) : this(
+        plugin = plugin,
+        delivery = WebViewBridgeDelivery(webViewProvider, auditLogger, plugin.manifest.id),
+        scope = scope,
+        networkBridge = networkBridge,
+        storageBridge = storageBridge,
+        notificationBridge = notificationBridge,
+        cameraBridge = cameraBridge,
+        galleryBridge = galleryBridge,
+        fileBridge = fileBridge,
+        locationBridge = locationBridge,
+        messageBridge = messageBridge,
+        auditLogger = auditLogger,
+    )
+
+    @JavascriptInterface
+    fun call(method: String, argsJson: String, callbackId: String) {
+        scope.launch {
+            val resultJson = runCatching {
+                withTimeout(CALL_TIMEOUT_MS) {
+                    bridgeSuccessJson(dispatch(method, argsJson))
+                }
+            }.getOrElse { error ->
+                val reason = when (error) {
+                    is kotlinx.coroutines.TimeoutCancellationException -> "timeout"
+                    is PluginBridgeException -> error.code
+                    else -> "bridge_error"
+                }
+                auditLogger.denied(plugin.manifest.id, reason, method)
+                bridgeErrorJson(reason, error.message ?: reason)
+            }
+            deliver(callbackId, resultJson)
+        }
+    }
+
+    private suspend fun dispatch(method: String, argsJson: String): String {
+        val capability = requiredCapability(method)
+        if (capability != null && capability !in plugin.grantedCapabilities) {
+            auditLogger.denied(plugin.manifest.id, "capability_not_granted", capability)
+            throw PluginBridgeException("capability_not_granted", "Capability not granted: $capability")
+        }
+
+        return when (method) {
+            "platform.network.fetch" -> networkBridge.fetch(plugin, argsJson)
+            "platform.storage.get" -> storageBridge.get(plugin, argsJson)
+            "platform.storage.set" -> storageBridge.set(plugin, argsJson)
+            "platform.storage.delete" -> storageBridge.delete(plugin, argsJson)
+            "platform.showNotification" -> notificationBridge.show(plugin, argsJson)
+            "platform.camera.capture" -> cameraBridge.capture(plugin, argsJson)
+            "platform.gallery.pick" -> galleryBridge.pick(plugin, argsJson)
+            "platform.file.pick" -> fileBridge.pick(plugin, argsJson)
+            "platform.location.current" -> locationBridge.current(plugin, argsJson)
+            "platform.message.respond" -> messageBridge.respond(plugin, argsJson)
+            "platform.message.dismissBehavior" -> messageBridge.dismissBehavior(plugin, argsJson)
+            else -> {
+                auditLogger.denied(plugin.manifest.id, "unknown_method", method)
+                throw PluginBridgeException("unknown_method", "Unknown bridge method: $method")
+            }
+        }
+    }
+
+    private fun deliver(callbackId: String, resultJson: String) {
+        delivery.deliver(callbackId, resultJson)
+    }
+
+    companion object {
+        const val NATIVE_BRIDGE_NAME = "__syncler_native__"
+        const val CALL_TIMEOUT_MS = 30_000L
+    }
+}
+
+internal fun requiredCapability(method: String): String? = when {
+    method.startsWith("platform.network.") -> "network"
+    method.startsWith("platform.storage.") -> "storage"
+    method.startsWith("platform.camera.") -> "camera"
+    method.startsWith("platform.gallery.") -> "gallery"
+    method.startsWith("platform.file.") -> "file"
+    method.startsWith("platform.location.") -> "location"
+    method == "platform.showNotification" -> null
+    method.startsWith("platform.message.") -> null
+    else -> null
+}
+
+internal fun bridgeSuccessJson(valueJson: String): String =
+    """{"success":true,"value":$valueJson}"""
+
+internal fun bridgeErrorJson(error: String, message: String): String =
+    """{"success":false,"error":${JsonEscaping.quote(error)},"message":${JsonEscaping.quote(message)}}"""
+
+internal class PluginBridgeException(
+    val code: String,
+    override val message: String,
+) : RuntimeException(message)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 594ms:
+package app.syncler.android.pluginhost
+
+import android.os.Handler
+import android.os.Looper
+import android.webkit.WebView
+
+/**
+ * Phase 10b: abstraction over "deliver a bridge-call result back
+ * to the plugin's JS callback".
+ *
+ * - In-process plugins (the legacy WebView-direct path that step 6
+ *   will delete) use [WebViewBridgeDelivery], which posts an
+ *   `evaluateJavascript` to the main looper.
+ * - Sandboxed plugins (the new `:plugin` process) use
+ *   `SandboxBridgeDelivery` (in the `sandbox` sub-package),
+ *   which forwards through the `SandboxRouter` AIDL.
+ *
+ * Both implementations are fire-and-forget ‚?" the caller doesn't
+ * await the actual JS callback firing. Failures get logged but
+ * never surfaced (the underlying capability call already
+ * completed; lost callback delivery just means the plugin's
+ * promise hangs until its own timeout).
+ */
+interface BridgeDelivery {
+    fun deliver(callbackId: String, resultJson: String)
+}
+
+/**
+ * Legacy in-process delivery: posts an `evaluateJavascript` on
+ * the main thread that invokes the plugin's
+ * `window.__syncler_internal_callback`. Step 6 will delete this
+ * implementation alongside the in-process loader.
+ */
+class WebViewBridgeDelivery(
+    private val webViewProvider: () -> WebView?,
+    private val auditLogger: AuditLogger,
+    private val pluginId: String,
+) : BridgeDelivery {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    override fun deliver(callbackId: String, resultJson: String) {
+        val script = "window.__syncler_internal_callback(${JsonEscaping.quote(callbackId)}, $resultJson)"
+        mainHandler.post {
+            runCatching { webViewProvider()?.evaluateJavascript(script, null) }
+                .onFailure { auditLogger.denied(pluginId, "callback_delivery_failed", it.message) }
+        }
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 620ms:
+package app.syncler.feature.pluginsandbox
+
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.IPluginSandbox
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import timber.log.Timber
+
+/**
+ * Phase 10 multi-process plugin host: the `:plugin` subprocess
+ * service. Declared in this module's AndroidManifest with
+ * `android:process=":plugin"`.
+ *
+ * The service binds host clients via [IPluginSandbox.Stub], routes
+ * AIDL calls to the right [PluginTokenCoordinator], and owns the
+ * shared [PluginTokenRegistry]. Per-token work happens on
+ * coroutines owned by each coordinator; the service's own scope
+ * is short-lived bookkeeping only.
+ *
+ * Step 2 ships the wiring + state machine. The actual
+ * [PluginWebViewHost] implementation is supplied by
+ * [PluginWebViewHostFactory], which today returns a no-op stub ‚?"
+ * step 5 of Phase 10b will land the real WebView implementation
+ * once connectedAndroidTest is wired up.
+ */
+class PluginSandboxService : Service() {
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val registry = PluginTokenRegistry()
+    // Phase 10b step 5: the production factory builds real
+    // WebView-backed sandbox hosts using this Service as Context.
+    // Tests can override via WebViewHostFactoryOverride (step 5's
+    // connectedAndroidTest harness).
+    private val webViewHostFactory: PluginWebViewHostFactory by lazy {
+        WebViewHostFactoryOverride.get() ?: RealPluginWebViewHostFactory(applicationContext)
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onDestroy() {
+        // Process is going away. Tear down every active token so
+        // the host's onPluginUnloaded fires for each. (The host
+        // also handles ServiceConnection.onServiceDisconnected as
+        // the authoritative crash path; this is a best-effort
+        // graceful cleanup.)
+        registry.all().forEach { coordinator ->
+            runCatching { coordinator.unload() }
+                .onFailure { Timber.tag(TAG).w(it, "graceful unload failed") }
+        }
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    private val binder = object : IPluginSandbox.Stub() {
+
+        override fun loadPlugin(
+            request: PluginLoadParcel,
+            callback: IPluginHostCallback,
+        ): Int {
+            validateParcel(request)
+            // Same-token re-load is a host bug ‚?" we treat it as
+            // CONCURRENT_LOAD_IN_PROGRESS to match the state-machine
+            // table's "loadPlugin while loading" row.
+            registry[request.sandboxToken]?.let { existing ->
+                Timber.tag(TAG).w(
+                    "loadPlugin token=%d already in state %s",
+                    request.sandboxToken, existing.state,
+                )
+                throw IllegalStateException(LoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS)
+            }
+
+            val host = webViewHostFactory.create(request)
+            val coordinator = PluginTokenCoordinator(
+                sandboxToken = request.sandboxToken,
+                pluginId = request.pluginId,
+                callback = adaptCallback(callback),
+                webViewHost = host,
+                parentScope = serviceScope,
+            )
+            registry.put(coordinator)
+            try {
+                coordinator.startLoad(request)
+            } catch (exc: Exception) {
+                // Load threw ‚?" coordinator never reaches READY; we
+                // drop it from the registry and rethrow over Binder.
+                registry.remove(request.sandboxToken)
+                runCatching { coordinator.unload() }
+                throw exc
+            }
+            return request.sandboxToken
+        }
+
+        override fun unloadPlugin(sandboxToken: Int) {
+            val coordinator = registry[sandboxToken]
+            if (coordinator == null) {
+                Timber.tag(TAG).w("unloadPlugin unknown token %d", sandboxToken)
+                return
+            }
+            // Run on the coordinator's own dispatch (well, just
+            // here on the Binder thread ‚?" unload is mostly state
+            // updates + a WebView destroy that the impl can
+            // marshal to main if needed).
+            coordinator.unload()
+            registry.remove(sandboxToken)
+            maybeWipeProcessWebViewState()
+        }
+
+        override fun dispatchHook(
+            sandboxToken: Int,
+            hook: String,
+            payloadJson: String,
+            callbackId: String,
+        ) {
+            val coordinator = registry[sandboxToken] ?: run {
+                Timber.tag(TAG).w("dispatchHook unknown token %d", sandboxToken)
+                return
+            }
+            coordinator.submitHook(hook, payloadJson, callbackId)
+        }
+
+        override fun deliverBridgeResult(
+            sandboxToken: Int,
+            callbackId: String,
+            resultJson: String,
+        ) {
+            val coordinator = registry[sandboxToken] ?: run {
+                Timber.tag(TAG).w("deliverBridgeResult unknown token %d", sandboxToken)
+                return
+            }
+            coordinator.submitBridgeResult(callbackId, resultJson)
+        }
+
+        override fun querySandboxState(sandboxToken: Int): String {
+            val coordinator = registry[sandboxToken]
+            return coordinator?.state?.wire ?: "unknown"
+        }
+    }
+
+    /**
+     * Validate [PluginLoadParcel] shape before instantiating a
+     * coordinator. Per Phase 10a v4 error semantics, throws
+     * [IllegalStateException] with a [LoadFailureCodes] code.
+     *
+     * Bundle hash re-verification + renderer support check happen
+     * inside the [PluginWebViewHost.startLoad] impl (where they
+     * have access to the actual file + the renderer registry).
+     */
+    private fun validateParcel(request: PluginLoadParcel) {
+        if (request.pluginId.isBlank() || request.bundleFilePath.isBlank() ||
+            request.bundleHashHex.isBlank()
+        ) {
+            throw IllegalStateException(LoadFailureCodes.PARCEL_MALFORMED)
+        }
+        if (request.diagnosticManifestJson.length > PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+            throw IllegalStateException(LoadFailureCodes.DIAGNOSTIC_FIELD_OVERSIZE)
+        }
+    }
+
+    /**
+     * Process-global WebView state wipe per Phase 10a v4: ONLY
+     * fired when zero tokens are in `READY`/`LOADING`. We don't
+     * actually call `WebStorage.deleteAllData()` /
+     * `CookieManager.removeAllCookies()` here in step 2 ‚?" those
+     * need the real WebView impl. Stub left as a hook.
+     */
+    private fun maybeWipeProcessWebViewState() {
+        if (registry.activeReadyOrLoadingCount() == 0) {
+            Timber.tag(TAG).i(
+                "no active plugins remain ‚?" WebView state wipe hook fires (step 5 impl)",
+            )
+            // step 5: WebStorage.getInstance().deleteAllData()
+            //         CookieManager.getInstance().removeAllCookies(null)
+        }
+    }
+
+    /**
+     * Adapt an incoming AIDL [IPluginHostCallback] (a binder proxy
+     * to the host process) into the plain Kotlin
+     * [PluginHostCallbackLocal] the coordinator uses. Keeps AIDL
+     * types out of the coordinator's signature so unit tests can
+     * substitute a fake without touching `android.os.Binder`.
+     *
+     * `RemoteException` from any callback method gets swallowed
+     * + logged ‚?" the host process may be dead, in which case our
+     * service's `onDestroy` will fire shortly and clean up.
+     */
+    private fun adaptCallback(callback: IPluginHostCallback): PluginHostCallbackLocal =
+        object : PluginHostCallbackLocal {
+            override fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String) {
+                runCatching { callback.bridgeCall(sandboxToken, method, argsJson, callbackId) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.bridgeCall failed") }
+            }
+            override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+                runCatching { callback.onWebViewError(sandboxToken, code, message) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onWebViewError failed") }
+            }
+            override fun onPluginReady(sandboxToken: Int) {
+                runCatching { callback.onPluginReady(sandboxToken) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginReady failed") }
+            }
+            override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+                runCatching { callback.onPluginCrashed(sandboxToken, reason) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginCrashed failed") }
+            }
+            override fun onPluginUnloaded(sandboxToken: Int) {
+                runCatching { callback.onPluginUnloaded(sandboxToken) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginUnloaded failed") }
+            }
+        }
+
+    companion object {
+        private const val TAG = "PluginSandbox"
+    }
+}
+
+/**
+ * Factory the service uses to mint [PluginWebViewHost] per load.
+ * Step 2 ships a no-op factory; step 5 will swap in the real
+ * `WebView`-touching impl.
+ */
+fun interface PluginWebViewHostFactory {
+    fun create(parcel: PluginLoadParcel): PluginWebViewHost
+}
+
+internal object NoopPluginWebViewHostFactory : PluginWebViewHostFactory {
+    override fun create(parcel: PluginLoadParcel): PluginWebViewHost =
+        NoopPluginWebViewHost
+}
+
+private object NoopPluginWebViewHost : PluginWebViewHost {
+    override fun startLoad(parcel: PluginLoadParcel, hostSignals: HostSignals) {
+        // No-op ‚?" the real impl evaluates JS in a WebView. Tests
+        // substitute a recording double.
+    }
+
+    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        // No-op.
+    }
+
+    override fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        // No-op.
+    }
+
+    override fun destroy() {
+        // No-op.
+    }
+}
+
+/**
+ * Step 5 test hook: connectedAndroidTest sets a recording factory
+ * BEFORE binding the service so the e2e test can assert on
+ * sandbox-side behavior without instantiating a real WebView (the
+ * test harness can't always start a WebView on an emulator).
+ *
+ * Setting the override after the service has been instantiated has
+ * no effect ‚?" the factory is resolved on first use via the
+ * service's `lazy` delegate. Tests that need to swap mid-run
+ * should kill the `:plugin` process between scenarios.
+ */
+object WebViewHostFactoryOverride {
+    @Volatile
+    private var override: PluginWebViewHostFactory? = null
+
+    fun set(factory: PluginWebViewHostFactory?) {
+        override = factory
+    }
+
+    internal fun get(): PluginWebViewHostFactory? = override
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The WebView implementation is straightforward, but one thing stands out: the ready signal currently means “HTML load complete,” not necessarily “plugin async initialization complete.” I’m checking the legacy in-process client now to see whether this is a regression or just preserving current semantics.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginWebViewClient.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"onPluginReady|PluginWebViewClient|__syncler_internal_dispatch|init hook|reportReady|dispatchHook\\(\" feature/plugin-host feature/plugin-sandbox app core -S" in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-sandbox/src/androidTest/kotlin/app/syncler/feature/pluginsandbox/PluginSandboxServiceTest.kt' in D:\Projects\syncler\android
+ succeeded in 350ms:
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:23:        coordinator.reportReady()
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:34:                "dispatchHook(inbox.changed, {\"v\":1}, cb-1)",
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:55:        coordinator.reportReady()
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:64:            webView.calls.none { it.startsWith("dispatchHook(late.hook") },
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:76:        coordinator.reportReady()
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:89:        coordinator.reportReady()
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:104:    fun reportReadyFromWebViewTransitionsToReady() = runBlocking {
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:112:        webView.signals!!.reportReady()
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:169:    override fun onPluginReady(sandboxToken: Int) {
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:189:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:190:        calls.add("dispatchHook($hook, $payloadJson, $callbackId)")
+feature/plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:32: * `onPluginReady` round-trip from JS — the real
+feature/plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:35: * (`coordinator.reportReady()` is unreachable from the
+feature/plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:264:        override fun onPluginReady(sandboxToken: Int) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:99:     * the coordinator's `reportReady` / `reportError` signals.
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:104:     * `__syncler_internal_dispatch` being installed.
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:109:     * no-op rather than a duplicate `onPluginReady`.
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:118:            hostSignalsRef?.reportReady()
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:145:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:147:            append("window.__syncler_internal_dispatch(")
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:28:     * signal is [HostSignals.reportReady], fired once the WebView
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:41:    fun dispatchHook(hook: String, payloadJson: String, callbackId: String)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:64: * the WebView impl can drive `onPluginReady` /
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:72:    fun reportReady()
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:60:                is Event.Hook -> webViewHost.dispatchHook(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:94:        override fun reportReady() {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:95:            this@PluginTokenCoordinator.reportReady()
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:104:     * Sandbox-side equivalent of `onPluginReady` — called by the
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:107:     * notifies the host via `onPluginReady(sandboxToken)`.
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:109:    fun reportReady() {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:117:            callback.onPluginReady(sandboxToken)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxState.kt:14:    /** Plugin reported `onPluginReady`; hooks + bridge calls flow. */
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:114:        override fun dispatchHook(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:203:            override fun onPluginReady(sandboxToken: Int) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:204:                runCatching { callback.onPluginReady(sandboxToken) }
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:205:                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginReady failed") }
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:242:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHtmlShell.kt:21: *   3. A host-hook dispatcher (`__syncler_internal_dispatch`)
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHtmlShell.kt:78:              const sdkDispatch = window.__syncler_internal_dispatch;
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHtmlShell.kt:79:              window.__syncler_internal_dispatch = (hook, args, callbackId) => {
+core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:18:    oneway void onPluginReady(int sandboxToken);
+core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:37:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:19:    fun onPluginReady(sandboxToken: Int)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:12:    fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:13:        val script = "__syncler_internal_dispatch(" +
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:227:        webView.webViewClient = PluginWebViewClient(manifest.id, auditLogger) { pluginId ->
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:232:        webView.loadDataWithBaseURL(PluginWebViewClient.INITIAL_URL, htmlShell, "text/html", "utf-8", null)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:302:              const sdkDispatch = window.__syncler_internal_dispatch;
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:303:              window.__syncler_internal_dispatch = (hook, args, callbackId) => {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:13:class PluginWebViewClient(
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:113:    suspend fun dispatchHook(
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:121:            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:241:        override fun onPluginReady(sandboxToken: Int) {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:244:                    "onPluginReady for stale token=%d — dropping",
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:249:            scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:288:    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:289:        router.dispatchHook(this, hook, payloadJson, callbackId)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:305:    suspend fun onPluginReady(sandboxToken: Int)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:32:     * the sandbox's `onPluginReady` arrives — race-free because
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:81:    override suspend fun onPluginReady(sandboxToken: Int) {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:82:        lifecycleListeners[sandboxToken]?.onPluginReady()
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:96:        fun onPluginReady()
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 409ms:
+package app.syncler.android.pluginhost
+
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Build
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import java.io.ByteArrayInputStream
+
+class PluginWebViewClient(
+    private val pluginId: String,
+    private val auditLogger: AuditLogger,
+    private val onRenderProcessGone: (String) -> Unit,
+) : WebViewClient() {
+    private var initialSelfLoadSeen = false
+
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+
+    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+        val url = request?.url ?: return block("missing_url")
+        return if (isAllowedInitialSelfLoad(url)) {
+            null
+        } else {
+            block(url.toString())
+        }
+    }
+
+    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+        if (url != INITIAL_URL) {
+            auditLogger.denied(pluginId, "webview_navigation_blocked", url)
+            view?.stopLoading()
+        }
+    }
+
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        auditLogger.denied(pluginId, "render_process_gone", if (Build.VERSION.SDK_INT >= 26) "crashed=${detail.didCrash()}" else null)
+        onRenderProcessGone(pluginId)
+        return true
+    }
+
+    private fun isAllowedInitialSelfLoad(url: Uri): Boolean {
+        val allowed = url.toString() == INITIAL_URL && !initialSelfLoadSeen
+        if (allowed) initialSelfLoadSeen = true
+        return allowed
+    }
+
+    private fun block(detail: String): WebResourceResponse {
+        auditLogger.denied(pluginId, "webview_request_blocked", detail)
+        return WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            403,
+            "Forbidden",
+            mapOf("Cache-Control" to "no-store"),
+            ByteArrayInputStream(ByteArray(0)),
+        )
+    }
+
+    companion object {
+        const val INITIAL_URL = "https://syncler-plugin-host/index.html"
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 419ms:
+package app.syncler.feature.pluginsandbox
+
+import android.content.Intent
+import android.os.IBinder
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.rule.ServiceTestRule
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.IPluginSandbox
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.io.File
+import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Phase 10b step 5c ‚?" e2e harness for [PluginSandboxService].
+ *
+ * Binds the real service in the `:plugin` subprocess via
+ * [ServiceTestRule] and exercises the AIDL contract end-to-end:
+ * parcel marshalling, error-code propagation across Binder,
+ * callback round-trip, [IPluginSandbox.querySandboxState].
+ *
+ * Scope deliberately stops short of asserting an
+ * `onPluginReady` round-trip from JS ‚?" the real
+ * [RealPluginWebViewHost] in step 5a doesn't yet wire the
+ * "plugin reported ready" signal back to the coordinator
+ * (`coordinator.reportReady()` is unreachable from the
+ * production WebView path today). Step 5d closes that gap;
+ * once it lands, this test will be extended with a
+ * load ‚+' ready ‚+' dispatchHook ‚+' bridgeCall ‚+' unload assertion.
+ *
+ * Cross-process note: [WebViewHostFactoryOverride] is a
+ * test-process static and is NOT visible inside `:plugin`, so we
+ * cannot swap in a recording host from here. The trade-off is
+ * deliberate ‚?" this test verifies the AIDL boundary against the
+ * production [RealPluginWebViewHostFactory] rather than a fake.
+ */
+@RunWith(AndroidJUnit4::class)
+class PluginSandboxServiceTest {
+
+    @get:Rule
+    val serviceRule = ServiceTestRule()
+
+    private lateinit var sandbox: IPluginSandbox
+    private lateinit var stagingDir: File
+
+    @Before
+    fun bindSandbox() {
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val intent = Intent(ctx, PluginSandboxService::class.java)
+        val binder: IBinder = serviceRule.bindService(intent)
+        sandbox = IPluginSandbox.Stub.asInterface(binder)
+
+        // The bundle file must be readable by the :plugin process.
+        // Same UID + same data dir ‚+' noBackupFilesDir works.
+        stagingDir = File(ctx.noBackupFilesDir, "plugin-sandbox-androidtest").apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    @Test
+    fun querySandboxState_unknownToken_returnsUnknown() {
+        assertEquals("unknown", sandbox.querySandboxState(/* sandboxToken = */ 999_999))
+    }
+
+    @Test
+    fun loadPlugin_blankPluginId_throwsParcelMalformed() {
+        val parcel = sampleParcel(
+            sandboxToken = 1001,
+            pluginId = "",
+            bundlePath = stageBundle("noop-1001.js", "// noop").absolutePath,
+            bundleHash = sha256Hex("// noop".toByteArray()),
+        )
+        val callback = RecordingHostCallback()
+        val exc = assertThrowsIllegalState {
+            sandbox.loadPlugin(parcel, callback)
+        }
+        assertEquals(LoadFailureCodes.PARCEL_MALFORMED, exc.message)
+    }
+
+    @Test
+    fun loadPlugin_oversizeDiagnostic_throwsDiagnosticFieldOversize() {
+        val parcel = sampleParcel(
+            sandboxToken = 1002,
+            pluginId = "plugin-oversize",
+            bundlePath = stageBundle("noop-1002.js", "// noop").absolutePath,
+            bundleHash = sha256Hex("// noop".toByteArray()),
+            diagnosticManifestJson = "x".repeat(PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP + 1),
+        )
+        val callback = RecordingHostCallback()
+        val exc = assertThrowsIllegalState {
+            sandbox.loadPlugin(parcel, callback)
+        }
+        assertEquals(LoadFailureCodes.DIAGNOSTIC_FIELD_OVERSIZE, exc.message)
+    }
+
+    @Test
+    fun loadPlugin_hashMismatch_throwsBundleHashMismatch() {
+        val parcel = sampleParcel(
+            sandboxToken = 1003,
+            pluginId = "plugin-bad-hash",
+            bundlePath = stageBundle("real-1003.js", "// real bundle").absolutePath,
+            bundleHash = sha256Hex("// different bundle".toByteArray()),
+        )
+        val callback = RecordingHostCallback()
+        val exc = assertThrowsIllegalState {
+            sandbox.loadPlugin(parcel, callback)
+        }
+        assertEquals(LoadFailureCodes.BUNDLE_HASH_MISMATCH, exc.message)
+    }
+
+    @Test
+    fun loadPlugin_unsupportedRenderer_throwsUnsupportedRenderer() {
+        val js = "// renderer test"
+        val parcel = sampleParcel(
+            sandboxToken = 1004,
+            pluginId = "plugin-template",
+            bundlePath = stageBundle("renderer-1004.js", js).absolutePath,
+            bundleHash = sha256Hex(js.toByteArray()),
+            renderer = "template",
+        )
+        val callback = RecordingHostCallback()
+        val exc = assertThrowsIllegalState {
+            sandbox.loadPlugin(parcel, callback)
+        }
+        assertEquals(LoadFailureCodes.UNSUPPORTED_RENDERER, exc.message)
+    }
+
+    @Test
+    fun loadPlugin_thenUnload_firesOnPluginUnloadedAcrossProcesses() {
+        val js = "// load/unload e2e"
+        val token = 1005
+        val parcel = sampleParcel(
+            sandboxToken = token,
+            pluginId = "plugin-unload-e2e",
+            bundlePath = stageBundle("e2e-1005.js", js).absolutePath,
+            bundleHash = sha256Hex(js.toByteArray()),
+        )
+        val callback = RecordingHostCallback()
+
+        val returnedToken = sandbox.loadPlugin(parcel, callback)
+        assertEquals(token, returnedToken)
+        // Service is now in LOADING. WebView creation is posted to
+        // :plugin's main looper; we don't wait for it.
+        assertTrue(
+            "expected loading/ready, got ${sandbox.querySandboxState(token)}",
+            sandbox.querySandboxState(token) in setOf("loading", "ready"),
+        )
+
+        sandbox.unloadPlugin(token)
+        // oneway ‚?" wait for the callback to fire across processes.
+        assertTrue(
+            "onPluginUnloaded did not fire within timeout",
+            callback.unloaded.await(5, TimeUnit.SECONDS),
+        )
+        assertEquals(token, callback.unloadedToken)
+        // After unload, the token is removed from the registry.
+        assertEquals("unknown", sandbox.querySandboxState(token))
+    }
+
+    @Test
+    fun loadPlugin_sameTokenTwice_throwsConcurrentLoadInProgress() {
+        val js = "// concurrent load"
+        val token = 1006
+        val first = sampleParcel(
+            sandboxToken = token,
+            pluginId = "plugin-concurrent",
+            bundlePath = stageBundle("concurrent-1006.js", js).absolutePath,
+            bundleHash = sha256Hex(js.toByteArray()),
+        )
+        val firstCallback = RecordingHostCallback()
+        sandbox.loadPlugin(first, firstCallback)
+
+        try {
+            val second = first.copy(pluginId = "plugin-concurrent-2")
+            val secondCallback = RecordingHostCallback()
+            val exc = assertThrowsIllegalState {
+                sandbox.loadPlugin(second, secondCallback)
+            }
+            assertEquals(LoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS, exc.message)
+        } finally {
+            sandbox.unloadPlugin(token)
+            firstCallback.unloaded.await(5, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun stageBundle(name: String, contents: String): File {
+        val file = File(stagingDir, name)
+        file.writeText(contents)
+        return file
+    }
+
+    private fun sampleParcel(
+        sandboxToken: Int,
+        pluginId: String,
+        bundlePath: String,
+        bundleHash: String,
+        renderer: String = "script",
+        diagnosticManifestJson: String = "{}",
+    ): PluginLoadParcel = PluginLoadParcel(
+        sandboxToken = sandboxToken,
+        pluginId = pluginId,
+        pluginIdentifier = "com.example.$pluginId",
+        version = "1.0.0",
+        renderer = renderer,
+        bundleFilePath = bundlePath,
+        bundleHashHex = bundleHash,
+        declaredCapabilities = emptyList(),
+        declaredEndpoints = emptyList(),
+        dismissBehavior = "ack",
+        timeoutMillis = 1_000L,
+        diagnosticManifestJson = diagnosticManifestJson,
+    )
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private inline fun assertThrowsIllegalState(block: () -> Unit): IllegalStateException {
+        try {
+            block()
+            fail("expected IllegalStateException, got no exception")
+            error("unreachable")
+        } catch (e: IllegalStateException) {
+            return e
+        }
+    }
+
+    /**
+     * Host-process binder stub for [IPluginHostCallback]. The
+     * sandbox in `:plugin` invokes these via Binder; we record on
+     * [CountDownLatch]s the test can await.
+     */
+    private class RecordingHostCallback : IPluginHostCallback.Stub() {
+        val ready = CountDownLatch(1)
+        @Volatile var readyToken: Int = -1
+        val unloaded = CountDownLatch(1)
+        @Volatile var unloadedToken: Int = -1
+        val crashed = CountDownLatch(1)
+        @Volatile var crashReason: String = ""
+        val bridgeCalls = mutableListOf<String>()
+
+        override fun bridgeCall(
+            sandboxToken: Int, method: String?, argsJson: String?, callbackId: String?,
+        ) {
+            synchronized(bridgeCalls) {
+                bridgeCalls.add("bridgeCall($sandboxToken, $method, $argsJson, $callbackId)")
+            }
+        }
+
+        override fun onWebViewError(sandboxToken: Int, code: String?, message: String?) {
+            // Recorded but not asserted on in step 5c tests.
+        }
+
+        override fun onPluginReady(sandboxToken: Int) {
+            readyToken = sandboxToken
+            ready.countDown()
+        }
+
+        override fun onPluginCrashed(sandboxToken: Int, reason: String?) {
+            crashReason = reason.orEmpty()
+            crashed.countDown()
+        }
+
+        override fun onPluginUnloaded(sandboxToken: Int) {
+            unloadedToken = sandboxToken
+            unloaded.countDown()
+        }
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+I found a more important gap than the six listed concerns: the sandbox WebView client only blocks navigations. The legacy client also intercepts requests, which matters because plugin JS can still initiate subresource/fetch-style WebView network activity unless the sandbox client blocks it.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "minSdk|compileSdk|targetSdk|shouldInterceptRequest|setBlockNetworkLoads|onRenderProcessGone|SAFE_BROWSING_ENABLE|loadDataWithBaseURL" build.gradle.kts gradle feature/plugin-host feature/plugin-sandbox -S' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt' in D:\Projects\syncler\android
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginInstance.kt' in D:\Projects\syncler\android
+ succeeded in 440ms:
+feature/plugin-host\build.gradle.kts:11:    compileSdk = 35
+feature/plugin-host\build.gradle.kts:14:        minSdk = 26
+feature/plugin-sandbox\build.gradle.kts:8:    compileSdk = 35
+feature/plugin-sandbox\build.gradle.kts:11:        minSdk = 26
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:78:            if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:86:            view.loadDataWithBaseURL(
+feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:101:     * point `loadDataWithBaseURL` has parsed the HTML, the SDK
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:16:    private val onRenderProcessGone: (String) -> Unit,
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:25:    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:41:    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginWebViewClient.kt:43:        onRenderProcessGone(pluginId)
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:224:        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:232:        webView.loadDataWithBaseURL(PluginWebViewClient.INITIAL_URL, htmlShell, "text/html", "utf-8", null)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 472ms:
+package app.syncler.android.pluginhost
+
+import android.webkit.WebView
+
+class PluginInstance(
+    val manifest: PluginManifest,
+    val grantedCapabilities: Set<String>,
+    val bundleFilePath: String,
+    val webView: WebView? = null,
+    var bridge: PluginBridge? = null,
+) {
+    fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        val script = "__syncler_internal_dispatch(" +
+            "${JsonEscaping.quote(hook)},[$payloadJson],${JsonEscaping.quote(callbackId)})"
+        val target = webView ?: return
+        target.post { target.evaluateJavascript(script, null) }
+    }
+
+    fun destroy() {
+        runCatching {
+            webView?.removeJavascriptInterface(PluginBridge.NATIVE_BRIDGE_NAME)
+            webView?.stopLoading()
+            webView?.destroy()
+        }
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 506ms:
+package app.syncler.android.pluginhost.sandbox
+
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Host-side counterpart to the sandbox's `PluginTokenCoordinator`.
+ *
+ * - Allocates `sandboxToken` (process-local monotonic int).
+ * - Receives `IPluginHostCallback` calls from the sandbox and
+ *   routes them to the appropriate per-token handler.
+ * - Owns the host-side pending-callback map for bridge calls so
+ *   capability results land back at the right `callbackId`.
+ * - Provides the high-level entry points
+ *   [loadPlugin] / [unload] / [dispatchHook] /
+ *   [deliverBridgeResult] that the rest of the host calls ‚?" they
+ *   round-trip through [PluginSandboxConnection] to the sandbox
+ *   AIDL.
+ *
+ * Step 4 ships scaffolding only ‚?" step 5 wires it into
+ * `PluginBridge` and the e2e test. The class is thread-safe via
+ * [tokenMutex] + atomic counters; AIDL callbacks land on Binder
+ * threads and dispatch to `bridgeDispatcher` on its own coroutine
+ * scope so the Binder thread doesn't block on capability work.
+ */
+class SandboxRouter(
+    private val connection: PluginSandboxConnection,
+    private val bridgeDispatcher: BridgeDispatcher,
+    private val scope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) {
+
+    private val nextToken = AtomicInteger(1)
+    private val handles = java.util.concurrent.ConcurrentHashMap<Int, SandboxHandle>()
+
+    init {
+        connection.onSandboxDeath = ::handleSandboxDeath
+    }
+
+    /**
+     * Allocate a fresh `sandboxToken`. Use this BEFORE staging the
+     * bundle so the staged path can include it. The token isn't
+     * registered with [PluginSandboxConnection] until [loadPlugin]
+     * succeeds ‚?" caller can throw away the value without leaking
+     * state.
+     */
+    fun allocateToken(): Int = nextToken.getAndIncrement()
+
+    /**
+     * Bind the sandbox (if not bound), invoke `loadPlugin`, and
+     * return a [SandboxHandle] the caller uses for hook dispatch
+     * and unload. Suspends until the sandbox acknowledges
+     * load ‚?" on failure the AIDL `IllegalStateException` (with a
+     * structured failure code) propagates.
+     */
+    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+        val sandbox = connection.acquire()
+        // Triad 117: pre-register the handle BEFORE the AIDL call so
+        // a synchronous-or-oneway callback firing mid-load doesn't
+        // arrive at the stub with no handle visible. On failure we
+        // remove the handle in the catch ‚?" `releaseHandle` is
+        // idempotent so a late `onPluginUnloaded` from the sandbox's
+        // synchronous load-fail teardown won't double-release.
+        val handle = SandboxHandle(
+            sandboxToken = parcel.sandboxToken,
+            pluginId = parcel.pluginId,
+            router = this,
+        )
+        handles[parcel.sandboxToken] = handle
+        try {
+            val callback = PluginHostCallbackStub(parcel.sandboxToken)
+            val returnedToken = sandbox.loadPlugin(parcel, callback)
+            check(returnedToken == parcel.sandboxToken) {
+                "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
+                    "${parcel.sandboxToken} ‚?" fatal sandbox bug"
+            }
+            return handle
+        } catch (exc: Throwable) {
+            // bindService succeeded but loadPlugin failed ‚?" undo
+            // the pre-registration + release the connection ref.
+            // If the sandbox's load-fail teardown fires a oneway
+            // onPluginUnloaded after this, releaseHandle's
+            // remove-returns-null guard skips the spurious release.
+            handles.remove(parcel.sandboxToken)
+            connection.release()
+            throw exc
+        }
+    }
+
+    /**
+     * Begin unload. Sandbox fires `onPluginUnloaded` when the
+     * teardown completes; the host then releases the connection
+     * ref via [releaseHandle].
+     */
+    suspend fun unload(handle: SandboxHandle) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.unloadPlugin(handle.sandboxToken)
+        } finally {
+            // We just paid an extra acquire to do the call; release
+            // it. The release that pairs with loadPlugin's acquire
+            // fires when onPluginUnloaded comes back.
+            connection.release()
+        }
+    }
+
+    suspend fun dispatchHook(
+        handle: SandboxHandle,
+        hook: String,
+        payloadJson: String,
+        callbackId: String,
+    ) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+        } finally {
+            connection.release()
+        }
+    }
+
+    suspend fun deliverBridgeResult(
+        sandboxToken: Int,
+        callbackId: String,
+        resultJson: String,
+    ) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+        } finally {
+            connection.release()
+        }
+    }
+
+    /**
+     * Idempotent release. Triad 117 finding (Codex #3, Gemini #3):
+     * only release when the handle is actually present in the map.
+     * A stray `onPluginUnloaded` for an unknown token (e.g. from
+     * the sandbox's sync load-fail teardown after the host catch
+     * block already cleaned up) must not over-release the
+     * connection ref count.
+     *
+     * Returns `true` if this call won the race for the token ‚?"
+     * lets the caller gate any *additional* per-token work
+     * (lifecycle dispatch, log lines) on the same atomic remove.
+     * Triad 118 finding: the release was idempotent but the
+     * lifecycle dispatch wasn't, so a load-fail teardown could
+     * still emit bogus crash/unload signals to the dispatcher.
+     */
+    private fun releaseHandle(sandboxToken: Int): Boolean {
+        val removed = handles.remove(sandboxToken)
+        return if (removed != null) {
+            scope.launch { connection.release() }
+            true
+        } else {
+            Timber.tag(TAG).w(
+                "releaseHandle for unknown token=%d ‚?" skipping release (idempotent guard)",
+                sandboxToken,
+            )
+            false
+        }
+    }
+
+    /**
+     * Sandbox process died ‚?" `ServiceConnection.onServiceDisconnected`
+     * fired. Triad 117 (Codex #2, Gemini CRITICAL): every active
+     * handle leaked an `acquire()` that will never be balanced by
+     * the (now-impossible) `onPluginUnloaded`. We MUST release each
+     * one explicitly here, otherwise the ref count stays > 0 forever
+     * and the idle-unbind path can never fire on a future
+     * load ‚+' unload cycle.
+     *
+     * Triad 118 finding (Codex #1): the previous snapshot+clear
+     * dance wasn't atomic against in-flight `onPluginUnloaded` /
+     * `onPluginCrashed` from coroutines that had already started.
+     * If both paths called `release()` for the same token, the ref
+     * count over-decremented. Per-token `handles.remove(token) !=
+     * null` gating closes the race ‚?" only whoever wins the remove
+     * does the release + lifecycle dispatch.
+     */
+    private fun handleSandboxDeath() {
+        // Snapshot keys (cheap copy) then iterate. The atomic
+        // remove gates both the release AND the dispatch, so a
+        // racing onPluginUnloaded that lost the remove emits
+        // nothing additional.
+        val tokens = handles.keys.toList()
+        tokens.forEach { token ->
+            val removed = handles.remove(token) ?: return@forEach
+            scope.launch {
+                bridgeDispatcher.onPluginCrashed(removed.sandboxToken, "process_died")
+                connection.release()
+            }
+        }
+    }
+
+    /**
+     * AIDL stub the sandbox calls into. Routes every event to
+     * [bridgeDispatcher] or to the per-handle bookkeeping.
+     */
+    private inner class PluginHostCallbackStub(
+        private val expectedToken: Int,
+    ) : IPluginHostCallback.Stub() {
+
+        override fun bridgeCall(
+            sandboxToken: Int,
+            method: String,
+            argsJson: String,
+            callbackId: String,
+        ) {
+            // Generation-fence ‚?" drop calls whose token doesn't
+            // match an active handle (e.g. stale callbacks from a
+            // sandboxed plugin that we've already unloaded).
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "bridgeCall for stale token=%d (expected=%d) ‚?" dropping",
+                    sandboxToken, expectedToken,
+                )
+                return
+            }
+            scope.launch {
+                bridgeDispatcher.bridgeCall(sandboxToken, method, argsJson, callbackId)
+            }
+        }
+
+        override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onWebViewError for stale token=%d ‚?" dropping",
+                    sandboxToken,
+                )
+                return
+            }
+            scope.launch { bridgeDispatcher.onWebViewError(sandboxToken, code, message) }
+        }
+
+        override fun onPluginReady(sandboxToken: Int) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onPluginReady for stale token=%d ‚?" dropping",
+                    sandboxToken,
+                )
+                return
+            }
+            scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
+        }
+
+        override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+            // Triad 118 (Codex #2): gate dispatch on releaseHandle
+            // winning the atomic remove. A stale crash from a
+            // load-fail teardown (after the host catch already
+            // cleaned up) loses the remove and we emit nothing ‚?"
+            // otherwise the dispatcher would see a bogus crash
+            // signal for a plugin it already cleaned up.
+            if (releaseHandle(sandboxToken)) {
+                scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+            }
+        }
+
+        override fun onPluginUnloaded(sandboxToken: Int) {
+            // Same generation fence as onPluginCrashed.
+            if (releaseHandle(sandboxToken)) {
+                scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "SandboxRouter"
+    }
+}
+
+/**
+ * Handle the host uses to address a loaded plugin in the sandbox.
+ * Opaque from outside the router; the bridge holds one per active
+ * plugin instance.
+ */
+class SandboxHandle internal constructor(
+    val sandboxToken: Int,
+    val pluginId: String,
+    private val router: SandboxRouter,
+) {
+    suspend fun unload() = router.unload(this)
+    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        router.dispatchHook(this, hook, payloadJson, callbackId)
+    }
+    suspend fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        router.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+    }
+}
+
+/**
+ * The dispatcher contract the [SandboxRouter] uses to surface
+ * sandbox events into host code. Step 5 will provide a real
+ * implementation that adapts to the existing `PluginBridge`
+ * capability dispatch + the `PluginInstance` lifecycle hooks.
+ */
+interface BridgeDispatcher {
+    suspend fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String)
+    suspend fun onWebViewError(sandboxToken: Int, code: String, message: String)
+    suspend fun onPluginReady(sandboxToken: Int)
+    suspend fun onPluginCrashed(sandboxToken: Int, reason: String)
+    suspend fun onPluginUnloaded(sandboxToken: Int)
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+**Verdict: RED for starting step 6.**
+
+Step 5 mostly hangs together mechanically, but I would not flip production to `SandboxRouter` yet.
+
+Blocking item: [RealPluginWebViewHost.kt](D:/Projects/syncler/android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt) does not mirror the legacy `PluginWebViewClient` request blocking. It only implements `shouldOverrideUrlLoading`; it does not implement `shouldInterceptRequest`. That means sandboxed plugin JS can still attempt WebView-originated network/subresource loads, bypassing the audited `platform.network.fetch` capability path. The legacy client blocks everything except the initial self-load. Fix before step 6.
+
+I would also fix `onRenderProcessGone` before step 6. The legacy client handles it; the sandbox client currently does not. Depending on default behavior, the `:plugin` process may just die and get reported via service death, but that is coarser than the intended per-token lifecycle/error path.
+
+**Six Concerns**
+
+1. `onPageFinished` as ready: OK for synchronous inline `<script>` execution. With your shell, `__syncler_internal_dispatch` should be installed before `onPageFinished`. The comment overclaims if “init hook returned” means async plugin initialization; this code does not wait for that. Not a blocker unless plugins rely on async init before first hook.
+
+2. `shouldOverrideUrlLoading` initial load: not worried. `loadDataWithBaseURL` should not be blocked by this, and if the request URL is exactly `https://plugin.local/`, your predicate returns `false`, allowing it.
+
+3. JS bridge race with destroy: acceptable. `hostSignalsRef` is volatile, stale calls can pass through, AIDL failures are swallowed, and host-side token generation checks drop stale callbacks.
+
+4. `SandboxBridgeDelivery.deliver` fire-and-forget: acceptable under the existing timeout model. If the host scope is cancelled, the plugin promise hangs until timeout, which matches the documented contract.
+
+5. Bundle path access: same UID/app data dir/noBackup path is fine. I do not see an OEM namespace issue worth blocking on.
+
+6. connectedAndroidTest scope: enough for step 5 scaffolding, not enough for production flip. Before step 6, I want either one real-WebView positive emulator run or a small test-only cross-process override mechanism that can prove `load -> ready -> bridgeCall/result -> dispatchHook -> unload`.
+
+**New Missed Items**
+
+The stale androidTest class comment still says step 5d will later wire ready; step 5d already did. Not functionally harmful, but it will mislead the next reviewer.
+
+`PluginTokenCoordinator.unload()` says it drains the channel, but it closes the channel and immediately destroys the WebView without joining the pump. Probably acceptable for unload semantics, but the comment is inaccurate.
+tokens used
+39,645
+**Verdict: RED for starting step 6.**
+
+Step 5 mostly hangs together mechanically, but I would not flip production to `SandboxRouter` yet.
+
+Blocking item: [RealPluginWebViewHost.kt](D:/Projects/syncler/android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/RealPluginWebViewHost.kt) does not mirror the legacy `PluginWebViewClient` request blocking. It only implements `shouldOverrideUrlLoading`; it does not implement `shouldInterceptRequest`. That means sandboxed plugin JS can still attempt WebView-originated network/subresource loads, bypassing the audited `platform.network.fetch` capability path. The legacy client blocks everything except the initial self-load. Fix before step 6.
+
+I would also fix `onRenderProcessGone` before step 6. The legacy client handles it; the sandbox client currently does not. Depending on default behavior, the `:plugin` process may just die and get reported via service death, but that is coarser than the intended per-token lifecycle/error path.
+
+**Six Concerns**
+
+1. `onPageFinished` as ready: OK for synchronous inline `<script>` execution. With your shell, `__syncler_internal_dispatch` should be installed before `onPageFinished`. The comment overclaims if “init hook returned” means async plugin initialization; this code does not wait for that. Not a blocker unless plugins rely on async init before first hook.
+
+2. `shouldOverrideUrlLoading` initial load: not worried. `loadDataWithBaseURL` should not be blocked by this, and if the request URL is exactly `https://plugin.local/`, your predicate returns `false`, allowing it.
+
+3. JS bridge race with destroy: acceptable. `hostSignalsRef` is volatile, stale calls can pass through, AIDL failures are swallowed, and host-side token generation checks drop stale callbacks.
+
+4. `SandboxBridgeDelivery.deliver` fire-and-forget: acceptable under the existing timeout model. If the host scope is cancelled, the plugin promise hangs until timeout, which matches the documented contract.
+
+5. Bundle path access: same UID/app data dir/noBackup path is fine. I do not see an OEM namespace issue worth blocking on.
+
+6. connectedAndroidTest scope: enough for step 5 scaffolding, not enough for production flip. Before step 6, I want either one real-WebView positive emulator run or a small test-only cross-process override mechanism that can prove `load -> ready -> bridgeCall/result -> dispatchHook -> unload`.
+
+**New Missed Items**
+
+The stale androidTest class comment still says step 5d will later wire ready; step 5d already did. Not functionally harmful, but it will mislead the next reviewer.
+
+`PluginTokenCoordinator.unload()` says it drains the channel, but it closes the channel and immediately destroys the WebView without joining the pump. Probably acceptable for unload semantics, but the comment is inaccurate.

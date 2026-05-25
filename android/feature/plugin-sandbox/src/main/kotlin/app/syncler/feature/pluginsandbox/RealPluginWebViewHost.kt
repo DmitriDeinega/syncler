@@ -1,16 +1,21 @@
 package app.syncler.feature.pluginsandbox
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.webkit.WebViewFeature
 import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.security.MessageDigest
 import timber.log.Timber
@@ -95,22 +100,41 @@ class RealPluginWebViewHost(
     }
 
     /**
-     * Phase 10b step 5d: bridge WebView page-load lifecycle into
-     * the coordinator's `reportReady` / `reportError` signals.
-     * `onPageFinished` is the implicit ready marker — at that
-     * point `loadDataWithBaseURL` has parsed the HTML, the SDK
-     * shell + bundle script tags have both executed, and
-     * subsequent `dispatchHook` calls can rely on
-     * `__syncler_internal_dispatch` being installed.
+     * Phase 10b step 5d/5e: bridge WebView lifecycle into the
+     * coordinator and mirror the legacy `PluginWebViewClient`
+     * isolation guarantees byte-for-byte.
      *
-     * Fires once per load via the [reported] guard. A second
-     * `onPageFinished` (e.g., from in-bundle SPA navigation —
-     * blocked by [shouldOverrideUrlLoading] anyway) would be a
-     * no-op rather than a duplicate `onPluginReady`.
+     * - [onPageFinished] is the implicit ready marker. By the
+     *   time it fires, `loadDataWithBaseURL` has parsed the HTML
+     *   and executed the SDK shell + bundle inline `<script>`
+     *   tags, so `__syncler_internal_dispatch` is installed and
+     *   the next `dispatchHook` is safe to queue.
+     * - [shouldInterceptRequest] blocks every WebView-originated
+     *   network request other than the synthetic initial self-
+     *   load at [PluginHtmlShell.INITIAL_URL]. Without this,
+     *   plugin JS can issue arbitrary `<img>` / `<script>` /
+     *   `fetch()` loads that bypass the audited
+     *   `platform.network.fetch` capability. Codex triad 119
+     *   blocker.
+     * - [onPageStarted] short-circuits any non-initial main-frame
+     *   navigation attempt before the WebView starts the load.
+     *   Belt-and-suspenders with [shouldOverrideUrlLoading] which
+     *   intercepts user-driven nav.
+     * - [onRenderProcessGone] surfaces a WebView renderer crash
+     *   as a per-token `reportError` so the host gets the
+     *   structured `onWebViewError` callback instead of waiting
+     *   for service death.
      */
     private inner class ReadinessWebViewClient : WebViewClient() {
         @Volatile
         private var reported: Boolean = false
+
+        // Tracks whether `https://plugin.local/` has already been
+        // served as the initial self-load. Any subsequent attempt
+        // (even to the same URL) is blocked — a plugin can't
+        // reload itself.
+        @Volatile
+        private var initialSelfLoadSeen: Boolean = false
 
         override fun onPageFinished(view: WebView, url: String?) {
             if (reported) return
@@ -132,13 +156,73 @@ class RealPluginWebViewHost(
             hostSignalsRef?.reportError(code, message)
         }
 
+        override fun shouldInterceptRequest(
+            view: WebView?,
+            request: WebResourceRequest?,
+        ): WebResourceResponse? {
+            val url = request?.url ?: return blocked("missing_url")
+            return if (isAllowedInitialSelfLoad(url)) {
+                // `null` = "I don't want to intercept; let the
+                // WebView's own loader handle it" — which for the
+                // synthetic `loadDataWithBaseURL` base URL is just
+                // the HTML shell we already supplied.
+                null
+            } else {
+                blocked(url.toString())
+            }
+        }
+
+        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+            if (url != PluginHtmlShell.INITIAL_URL) {
+                view?.stopLoading()
+                hostSignalsRef?.reportError(
+                    "webview_navigation_blocked",
+                    url.orEmpty(),
+                )
+            }
+        }
+
         override fun shouldOverrideUrlLoading(
             view: WebView,
             request: WebResourceRequest?,
+        ): Boolean = true
+
+        @Suppress("OVERRIDE_DEPRECATION")
+        override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+
+        override fun onRenderProcessGone(
+            view: WebView,
+            detail: RenderProcessGoneDetail,
         ): Boolean {
-            // Plugin pages are not allowed to navigate. Block
-            // everything except the initial `plugin.local/`.
-            return request?.url?.toString() != PluginHtmlShell.INITIAL_URL
+            // `didCrash() == true` means the renderer crashed
+            // (sandbox killed it / native crash). `false` means
+            // Android reclaimed it under memory pressure. Both
+            // shapes destroy the WebView, so the host needs a
+            // per-token error regardless.
+            val reason = if (detail.didCrash()) "renderer_crash" else "renderer_killed"
+            hostSignalsRef?.reportError(reason, "")
+            // Returning `true` tells WebView we've handled the
+            // crash; without this the host process gets killed
+            // too. The legacy in-process client does the same.
+            return true
+        }
+
+        private fun isAllowedInitialSelfLoad(url: Uri): Boolean {
+            val allowed = url.toString() == PluginHtmlShell.INITIAL_URL && !initialSelfLoadSeen
+            if (allowed) initialSelfLoadSeen = true
+            return allowed
+        }
+
+        private fun blocked(detail: String): WebResourceResponse {
+            Timber.tag(TAG).w("webview_request_blocked %s", detail)
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                403,
+                "Forbidden",
+                mapOf("Cache-Control" to "no-store"),
+                ByteArrayInputStream(ByteArray(0)),
+            )
         }
     }
 
