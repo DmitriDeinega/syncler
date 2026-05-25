@@ -9,6 +9,7 @@ android {
 
     defaultConfig {
         minSdk = 26
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
@@ -42,4 +43,11 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // Phase 10b step 5c: connectedAndroidTest exercises the real
+    // PluginSandboxService + Binder transport end-to-end. The
+    // WebViewHostFactoryOverride lets us swap in a recording host
+    // so the test doesn't need a usable WebView on the emulator.
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

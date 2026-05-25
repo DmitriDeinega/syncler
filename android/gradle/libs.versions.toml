@@ -17,6 +17,9 @@ moshi = "1.15.2"
 room = "2.7.2"
 sqlcipher = "4.16.0"
 androidx-sqlite = "2.6.2"
+# Phase 10b step 5c: connectedAndroidTest for the sandbox e2e.
+androidx-test-rules = "1.6.1"
+androidx-test-ext-junit = "1.2.1"
 argon2kt = "1.6.0"
 bouncycastle = "1.80"
 timber = "5.0.1"
@@ -62,6 +65,8 @@ retrofit-moshi = { module = "com.squareup.retrofit2:converter-moshi", version.re
 sqlcipher = { module = "net.zetetic:sqlcipher-android", version.ref = "sqlcipher" }
 timber = { module = "com.jakewharton.timber:timber", version.ref = "timber" }
 junit = { module = "junit:junit", version.ref = "junit" }
+androidx-test-rules = { module = "androidx.test:rules", version.ref = "androidx-test-rules" }
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidx-test-ext-junit" }
 turbine = { module = "app.cash.turbine:turbine", version.ref = "turbine" }
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebase-bom" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging-ktx" }
