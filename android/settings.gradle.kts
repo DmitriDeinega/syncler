@@ -34,5 +34,6 @@ include(
     ":feature:inbox",
     ":feature:pairing",
     ":feature:plugin-host",
+    ":feature:plugin-sandbox",
     ":feature:settings",
 )

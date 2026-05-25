@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+            Phase 10 multi-process plugin host.
+
+            android:process=":plugin" puts this service in a private
+            subprocess owned by the host app — same UID + signature,
+            different ProcessRecord. A plugin crash kills only
+            :plugin; the host inbox UI survives.
+
+            android:exported="false" so only the host (same UID) can
+            bind. No other app can talk to the sandbox.
+
+            See docs/plugin-host-multi-process.md.
+        -->
+        <service
+            android:name="app.syncler.feature.pluginsandbox.PluginSandboxService"
+            android:process=":plugin"
+            android:exported="false" />
+    </application>
+
+</manifest>
