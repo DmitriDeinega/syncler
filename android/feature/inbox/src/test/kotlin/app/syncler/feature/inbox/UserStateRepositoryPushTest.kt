@@ -173,6 +173,9 @@ private class StubApi : SynclerApi {
     override suspend fun enrollDevice(authHeader: String, body: DeviceEnrollRequest): DeviceEnrollResponse = stub()
     override suspend fun listDevices(): List<DeviceItem> = stub()
     override suspend fun revokeDevice(id: String): Response<Unit> = stub()
+    override suspend fun rotateDeviceEncryptionKey(
+        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+    ): Response<Unit> = stub()
     override suspend fun deleteAccount(): Response<Unit> = stub()
     override suspend fun getMessage(id: String): MessageInboxItemDto = stub()
     override suspend fun inbox(since: String?): InboxFeedResponseDto = stub()

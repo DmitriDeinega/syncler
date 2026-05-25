@@ -135,6 +135,114 @@ object RotationAad {
         )
 }
 
+/**
+ * Phase 9b V2 canonical bytes (docs/crypto-spec.md §11.3, §11.7).
+ * `aad` and `info` builders for the per-device envelope path.
+ * Cross-platform invariant: byte-identical to the server's
+ * `app/services/envelopes_v2.py` + SDK's `crypto.py`.
+ */
+object V2Aad {
+    /** Event payload AAD (AES-GCM) per spec §11.7. */
+    fun eventPayloadAad(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        expiresAt: String,
+        minPluginVersion: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "envelope_kind" to "event",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Live-card upsert payload AAD per spec §11.7. */
+    fun liveCardPayloadAad(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardKey: String,
+        cardType: String,
+        sequenceNumber: Long,
+        expiresAt: String,
+        minPluginVersion: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to cardType,
+            "envelope_kind" to "live_card_upsert",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "sequence_number" to sequenceNumber,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Per-recipient HPKE info for event publish per spec §11.3. */
+    fun eventHpkeInfo(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        expiresAt: String,
+        minPluginVersion: String,
+        payloadNonceB64: String,
+        payloadCiphertextSha256Hex: String,
+        deviceId: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "device_id" to deviceId,
+            "envelope_kind" to "event",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "payload_ciphertext_sha256" to payloadCiphertextSha256Hex,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /** Per-recipient HPKE info for live_card_upsert per spec §11.3. */
+    fun liveCardHpkeInfo(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardKey: String,
+        cardType: String,
+        sequenceNumber: Long,
+        expiresAt: String,
+        minPluginVersion: String,
+        payloadNonceB64: String,
+        payloadCiphertextSha256Hex: String,
+        deviceId: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "card_key" to cardKey,
+            "card_type" to cardType,
+            "device_id" to deviceId,
+            "envelope_kind" to "live_card_upsert",
+            "expires_at" to expiresAt,
+            "min_plugin_version" to minPluginVersion,
+            "payload_ciphertext_sha256" to payloadCiphertextSha256Hex,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "sequence_number" to sequenceNumber,
+            "user_id" to userId,
+        ),
+    )
+}
+
 internal fun canonicalJsonBytes(fields: Map<String, Any>): ByteArray =
     fields.entries.sortedBy { it.key }.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
         val encodedValue = when (value) {

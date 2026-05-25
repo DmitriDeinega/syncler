@@ -10,80 +10,49 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Phase 9b §11.1: per-device X25519 keypair storage for the
- * HPKE recipient role.
+ * Phase 9b §11.1: per-device X25519 keypair store for the HPKE
+ * recipient role.
  *
- * The X25519 private key is the SOLE secret on the device that
- * lets a sender's message decrypt; losing it (uninstall, factory
- * reset) means messages encrypted to the old key become
- * undecryptable on this device (spec §11.14). That's documented
- * as expected V0.1 behavior; future cross-device backfill would
- * re-encrypt at the sender.
+ * The X25519 private key is the SOLE secret on the device that lets
+ * a sender's message decrypt; losing it (uninstall, factory reset)
+ * means messages encrypted to the old key become undecryptable on
+ * this device (spec §11.14). Documented as expected V0.1 behavior.
  *
  * Storage lives in the existing [SecurePrefs] (androidx.security
- * EncryptedSharedPreferences) alongside session tokens etc. —
- * the master key wrapping that prefs file is what protects the
- * X25519 private key on disk.
+ * EncryptedSharedPreferences) alongside session tokens etc. — the
+ * master key wrapping that prefs file is what protects the X25519
+ * private key on disk.
+ *
+ * Interface-based so tests can substitute a fake without having to
+ * provide a real [SecurePrefs] (which needs a Context).
  */
-@Singleton
-class DeviceEncryptionKeyStore @Inject constructor(
-    private val securePrefs: SecurePrefs,
-) {
+interface DeviceEncryptionKeyStore {
 
     /**
-     * Get the existing keypair OR generate + persist a fresh one
-     * on first call. Returns (privateRaw32, publicRaw32).
-     *
-     * Called at device-enrollment time (the enroll request body
-     * needs the X25519 public key) AND at decrypt time (the
-     * inbox repository needs the private key to HPKE-open each
-     * incoming envelope).
+     * Get the existing keypair OR generate + persist a fresh one on
+     * first call. Used at enrollment time (the new POST
+     * /v1/auth/devices/enroll body sends the X25519 public key)
+     * AND at inbox-decrypt time (private key opens incoming HPKE
+     * envelopes).
      */
-    fun getOrCreateKeypair(): Keypair {
-        val storedPrivate = securePrefs.getString(KEY_PRIVATE)
-        val storedPublic = securePrefs.getString(KEY_PUBLIC)
-        if (storedPrivate != null && storedPublic != null) {
-            val sk = Base64.decode(storedPrivate, Base64.NO_WRAP)
-            val pk = Base64.decode(storedPublic, Base64.NO_WRAP)
-            if (sk.size == Hpke.X25519_PRIVATE_KEY_BYTES && pk.size == Hpke.X25519_PUBLIC_KEY_BYTES) {
-                return Keypair(sk, pk)
-            }
-            // Corrupted entry — fall through to regenerate.
-        }
-        val (sk, pk) = Hpke.generateX25519Keypair()
-        securePrefs.putString(KEY_PRIVATE, Base64.encodeToString(sk, Base64.NO_WRAP))
-        securePrefs.putString(KEY_PUBLIC, Base64.encodeToString(pk, Base64.NO_WRAP))
-        return Keypair(sk, pk)
-    }
+    fun getOrCreateKeypair(): Keypair
 
     /**
      * Rotate the keypair. Discards the existing one and creates a
-     * fresh pair. Returns the new (privateRaw32, publicRaw32).
-     *
-     * Caller's responsibility to also send the new public key to
-     * the server via `PUT /v1/auth/devices/me/encryption_key`
-     * (spec §11.12). Old messages encrypted to the previous key
-     * become undecryptable on this device after rotation.
+     * fresh pair. Caller MUST also send the new public key to the
+     * server via PUT /v1/auth/devices/me/encryption_key. Old
+     * messages encrypted to the previous key become undecryptable
+     * on this device after rotation.
      */
-    fun rotate(): Keypair {
-        val (sk, pk) = Hpke.generateX25519Keypair()
-        securePrefs.putString(KEY_PRIVATE, Base64.encodeToString(sk, Base64.NO_WRAP))
-        securePrefs.putString(KEY_PUBLIC, Base64.encodeToString(pk, Base64.NO_WRAP))
-        return Keypair(sk, pk)
-    }
+    fun rotate(): Keypair
 
-    /** Wipe — used by `clear local state` / logout paths. */
-    fun clear() {
-        securePrefs.remove(KEY_PRIVATE)
-        securePrefs.remove(KEY_PUBLIC)
-    }
+    /** Wipe — used by logout / clear local state. */
+    fun clear()
 
     data class Keypair(
-        val privateKey: ByteArray,  // 32 bytes
-        val publicKey: ByteArray,   // 32 bytes
+        val privateKey: ByteArray,
+        val publicKey: ByteArray,
     ) {
-        // Hand-rolled equals/hashCode because data class default uses
-        // ByteArray.equals (reference equality, not byte equality).
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Keypair) return false
@@ -93,6 +62,42 @@ class DeviceEncryptionKeyStore @Inject constructor(
 
         override fun hashCode(): Int =
             31 * privateKey.contentHashCode() + publicKey.contentHashCode()
+    }
+}
+
+
+@Singleton
+class SecurePrefsDeviceEncryptionKeyStore @Inject constructor(
+    private val securePrefs: SecurePrefs,
+) : DeviceEncryptionKeyStore {
+
+    override fun getOrCreateKeypair(): DeviceEncryptionKeyStore.Keypair {
+        val storedPrivate = securePrefs.getString(KEY_PRIVATE)
+        val storedPublic = securePrefs.getString(KEY_PUBLIC)
+        if (storedPrivate != null && storedPublic != null) {
+            val sk = Base64.decode(storedPrivate, Base64.NO_WRAP)
+            val pk = Base64.decode(storedPublic, Base64.NO_WRAP)
+            if (sk.size == Hpke.X25519_PRIVATE_KEY_BYTES && pk.size == Hpke.X25519_PUBLIC_KEY_BYTES) {
+                return DeviceEncryptionKeyStore.Keypair(sk, pk)
+            }
+            // Corrupted entry — fall through to regenerate.
+        }
+        val (sk, pk) = Hpke.generateX25519Keypair()
+        securePrefs.putString(KEY_PRIVATE, Base64.encodeToString(sk, Base64.NO_WRAP))
+        securePrefs.putString(KEY_PUBLIC, Base64.encodeToString(pk, Base64.NO_WRAP))
+        return DeviceEncryptionKeyStore.Keypair(sk, pk)
+    }
+
+    override fun rotate(): DeviceEncryptionKeyStore.Keypair {
+        val (sk, pk) = Hpke.generateX25519Keypair()
+        securePrefs.putString(KEY_PRIVATE, Base64.encodeToString(sk, Base64.NO_WRAP))
+        securePrefs.putString(KEY_PUBLIC, Base64.encodeToString(pk, Base64.NO_WRAP))
+        return DeviceEncryptionKeyStore.Keypair(sk, pk)
+    }
+
+    override fun clear() {
+        securePrefs.remove(KEY_PRIVATE)
+        securePrefs.remove(KEY_PUBLIC)
     }
 
     private companion object {
@@ -104,10 +109,11 @@ class DeviceEncryptionKeyStore @Inject constructor(
 
 @Module
 @InstallIn(SingletonComponent::class)
-object DeviceEncryptionKeyStoreModule {
-    @Provides
+abstract class DeviceEncryptionKeyStoreModule {
+
+    @dagger.Binds
     @Singleton
-    fun provideDeviceEncryptionKeyStore(
-        securePrefs: SecurePrefs,
-    ): DeviceEncryptionKeyStore = DeviceEncryptionKeyStore(securePrefs)
+    abstract fun bindDeviceEncryptionKeyStore(
+        impl: SecurePrefsDeviceEncryptionKeyStore,
+    ): DeviceEncryptionKeyStore
 }

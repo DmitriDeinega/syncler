@@ -40,6 +40,16 @@ interface SynclerApi {
     @POST("/v1/auth/devices/{id}/revoke")
     suspend fun revokeDevice(@Path("id") id: String): Response<Unit>
 
+    /**
+     * Phase 9b §11.12: rotate THIS device's X25519 encryption pubkey.
+     * The endpoint is hard-wired server-side to mutate the calling
+     * device's row only; the JWT's `did` claim is the authority.
+     */
+    @retrofit2.http.PUT("/v1/auth/devices/me/encryption_key")
+    suspend fun rotateDeviceEncryptionKey(
+        @Body body: DeviceEncryptionKeyRotateRequest,
+    ): Response<Unit>
+
     @DELETE("/v1/account")
     suspend fun deleteAccount(): Response<Unit>
 
@@ -301,6 +311,17 @@ data class PairingStateResponseDto(
     @Json(name = "key_generation") val keyGeneration: Int,
 )
 
+/** Phase 9b V2 per-device HPKE envelope (spec §11.4). */
+@JsonClass(generateAdapter = true)
+data class RecipientEnvelopeDto(
+    @Json(name = "device_id") val deviceId: String,
+    /** Base64 32-byte X25519 KEM output (sender's ephemeral pubkey). */
+    @Json(name = "hpke_kem_output") val hpkeKemOutput: String,
+    /** Base64 48-byte HPKE wrap (32-byte CEK + 16-byte AEAD tag). */
+    @Json(name = "hpke_ciphertext") val hpkeCiphertext: String,
+)
+
+/** Phase 9b V2 inbox event message (spec §11.4). */
 @JsonClass(generateAdapter = true)
 data class MessageInboxItemDto(
     val id: String,
@@ -308,53 +329,68 @@ data class MessageInboxItemDto(
     @Json(name = "plugin_id") val pluginId: String,
     @Json(name = "plugin_identifier") val pluginIdentifier: String,
     @Json(name = "min_plugin_version") val minPluginVersion: String?,
-    @Json(name = "encrypted_body") val encryptedBody: String,
-    val nonce: String,
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "envelope_kind") val envelopeKind: String = "event",
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
     @Json(name = "envelope_signature") val envelopeSignature: String,
     @Json(name = "sent_at") val sentAt: String,
     @Json(name = "expires_at") val expiresAt: String,
 )
 
-@JsonClass(generateAdapter = true)
-data class MessageInboxResponseDto(
-    val messages: List<MessageInboxItemDto>,
-    @Json(name = "next_since") val nextSince: String?,
-)
-
+/** Phase 9b V2 live-card inbox item (spec §11.5). */
 @JsonClass(generateAdapter = true)
 data class LiveCardItemDto(
     val id: String,
     @Json(name = "sender_id") val senderId: String,
     @Json(name = "plugin_id") val pluginId: String,
     @Json(name = "plugin_identifier") val pluginIdentifier: String,
+    @Json(name = "min_plugin_version") val minPluginVersion: String?,
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "envelope_kind") val envelopeKind: String = "live_card_upsert",
     @Json(name = "card_key") val cardKey: String,
-    @Json(name = "encrypted_payload") val encryptedPayload: String,
-    val nonce: String,
+    @Json(name = "card_type") val cardType: String,
     @Json(name = "sequence_number") val sequenceNumber: Long,
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
     @Json(name = "updated_at") val updatedAt: String,
     @Json(name = "expires_at") val expiresAt: String,
 )
 
+/**
+ * Phase 9b V2 unified inbox item discriminated by `envelope_kind`
+ * ("event" | "live_card_upsert"). Nullable fields are present in
+ * one shape or the other.
+ */
 @JsonClass(generateAdapter = true)
 data class InboxFeedItemDto(
-    val type: String, // "event" or "live"
-    // Message fields
+    @Json(name = "envelope_kind") val envelopeKind: String,
     val id: String,
     @Json(name = "sender_id") val senderId: String,
     @Json(name = "plugin_id") val pluginId: String,
     @Json(name = "plugin_identifier") val pluginIdentifier: String,
     @Json(name = "min_plugin_version") val minPluginVersion: String? = null,
-    @Json(name = "encrypted_body") val encryptedBody: String? = null,
-    @Json(name = "envelope_signature") val envelopeSignature: String? = null,
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
+    @Json(name = "expires_at") val expiresAt: String,
+
+    // Event-only:
     @Json(name = "sent_at") val sentAt: String? = null,
-    // Live card fields
+
+    // Live-card-only:
     @Json(name = "card_key") val cardKey: String? = null,
-    @Json(name = "encrypted_payload") val encryptedPayload: String? = null,
+    @Json(name = "card_type") val cardType: String? = null,
     @Json(name = "sequence_number") val sequenceNumber: Long? = null,
     @Json(name = "updated_at") val updatedAt: String? = null,
-    // Shared
-    val nonce: String,
-    @Json(name = "expires_at") val expiresAt: String,
 )
 
 @JsonClass(generateAdapter = true)
@@ -419,8 +455,20 @@ data class LoginResponse(
 
 @JsonClass(generateAdapter = true)
 data class DeviceEnrollRequest(
+    /** Ed25519 device-bound JWT pubkey (base64, 32 bytes). */
     @Json(name = "public_key") val publicKey: String,
+    /**
+     * Phase 9b §11.12: X25519 encryption pubkey (base64, 32 bytes)
+     * for receiving HPKE-sealed per-device envelopes.
+     */
+    @Json(name = "encryption_public_key") val encryptionPublicKey: String,
     @Json(name = "fcm_token") val fcmToken: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeviceEncryptionKeyRotateRequest(
+    /** Spec §11.12. New X25519 pubkey (base64, 32 bytes). */
+    @Json(name = "encryption_public_key") val encryptionPublicKey: String,
 )
 
 @JsonClass(generateAdapter = true)

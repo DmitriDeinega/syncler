@@ -39,6 +39,7 @@ class AuthRepository @Inject constructor(
     private val deviceIdentityStore: DeviceIdentityStore,
     private val pairedSenderStore: PairedSenderStore,
     private val keyGenerationStore: KeyGenerationStore,
+    private val deviceEncryptionKeyStore: app.syncler.core.storage.DeviceEncryptionKeyStore,
 ) : AuthFailureHandler {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -167,9 +168,17 @@ class AuthRepository @Inject constructor(
             // Pass the bootstrap token via @Header on enrollDevice; the
             // auth interceptor honors a pre-set Authorization header
             // instead of overwriting it.
+            // Phase 9b §11.12: enroll sends BOTH the Ed25519 device-bound
+            // JWT pubkey AND the X25519 HPKE encryption pubkey. The
+            // X25519 keypair is generated + persisted on first call to
+            // DeviceEncryptionKeyStore.getOrCreateKeypair().
+            val encryptionKeypair = deviceEncryptionKeyStore.getOrCreateKeypair()
             val enrollResponse = api.enrollDevice(
                 authHeader = "Bearer ${response.sessionToken}",
-                body = DeviceEnrollRequest(publicKey = deviceKeyProvider.publicKey().toBase64()),
+                body = DeviceEnrollRequest(
+                    publicKey = deviceKeyProvider.publicKey().toBase64(),
+                    encryptionPublicKey = encryptionKeypair.publicKey.toBase64(),
+                ),
             )
             deviceIdentityStore.write(enrollResponse.deviceId)
             // Single atomic transition: locked → unlocked WITH the

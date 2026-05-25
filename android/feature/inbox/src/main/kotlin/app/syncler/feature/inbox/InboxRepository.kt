@@ -1,15 +1,18 @@
 package app.syncler.feature.inbox
 
+import app.syncler.core.auth.DeviceIdentityStore
 import app.syncler.core.auth.Session
 import app.syncler.core.crypto.Aead
-import app.syncler.core.crypto.MessageAad
+import app.syncler.core.crypto.Hpke
+import app.syncler.core.crypto.V2Aad
 import app.syncler.core.crypto.base64ToBytes
-import app.syncler.core.crypto.toCanonicalJsonBytes
 import app.syncler.core.network.InboxFeedItemDto
 import app.syncler.core.network.InboxFeedResponseDto
 import app.syncler.core.network.MessageInboxItemDto
+import app.syncler.core.network.RecipientEnvelopeDto
 import app.syncler.core.network.SynclerApi
 import app.syncler.core.network.TemplateBlockDto
+import app.syncler.core.storage.DeviceEncryptionKeyStore
 import app.syncler.core.storage.PairedSender
 import app.syncler.core.storage.PairedSenderStore
 import app.syncler.core.storage.compareIsoTimestamps
@@ -44,6 +47,8 @@ class InboxRepository @Inject constructor(
     private val api: SynclerApi,
     private val session: Session,
     private val pairedSenderStore: PairedSenderStore,
+    private val deviceIdentityStore: DeviceIdentityStore,
+    private val deviceEncryptionKeyStore: DeviceEncryptionKeyStore,
 ) {
     private val _items = MutableStateFlow<List<InboxItem>>(emptyList())
     val items: StateFlow<List<InboxItem>> = _items.asStateFlow()
@@ -93,7 +98,7 @@ class InboxRepository @Inject constructor(
                     return@mapNotNull null
                 }
 
-                val decrypted = if (dto.type == "live") {
+                val decrypted = if (dto.envelopeKind == "live_card_upsert") {
                     decryptLiveCard(dto, userId, candidates)
                 } else {
                     decryptEventMessage(dto, userId, candidates)
@@ -101,8 +106,8 @@ class InboxRepository @Inject constructor(
 
                 if (decrypted == null) {
                     Timber.tag(TAG).w(
-                        "no candidate pairing key decrypted %s %s from sender %s",
-                        dto.type, dto.id, dto.senderId,
+                        "could not decrypt %s %s from sender %s",
+                        dto.envelopeKind, dto.id, dto.senderId,
                     )
                     return@mapNotNull null
                 }
@@ -356,105 +361,182 @@ class InboxRepository @Inject constructor(
     )
 
     /**
-     * Try every candidate pairing key in turn until one decrypts successfully.
-     * Returns the first matching [InboxItem]; null if none of the keys work.
+     * Phase 9b V2 event-message decrypt (spec §11.4). Looks up THIS
+     * device's recipient_envelope in `dto.recipientEnvelopes`,
+     * HPKE-opens the wrapped CEK, then AES-GCM-decrypts the payload.
+     * The candidates list is consulted only for the sender display
+     * name — V1's pairing_key candidate loop is gone.
      */
     private fun decryptEventMessage(
         dto: InboxFeedItemDto,
         userId: String,
         candidates: List<PairedSender>,
     ): InboxItem? {
-        val ordered = candidates.sortedWith { a, b ->
-            compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt)
-        }
-        for (candidate in ordered) {
-            val decrypted = runCatching {
-                val aad = MessageAad(
+        val senderName = candidates
+            .sortedWith { a, b -> compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt) }
+            .firstOrNull()?.senderName.orEmpty()
+
+        val plaintextString = openV2EnvelopeOrNull(
+            dto = dto,
+            hpkeInfoFactory = { deviceId ->
+                V2Aad.eventHpkeInfo(
                     senderId = dto.senderId,
                     userId = userId,
                     pluginId = dto.pluginId,
+                    expiresAt = dto.expiresAt,
                     minPluginVersion = dto.minPluginVersion ?: "",
-                    expiresAt = dto.expiresAt,
-                ).toCanonicalJsonBytes()
-
-                val nonce = dto.nonce.base64ToBytes()
-                val ciphertext = (dto.encryptedBody ?: "").base64ToBytes()
-                val plaintext = Aead.decrypt(candidate.pairingKey, nonce + ciphertext, aad)
-                val plaintextString = plaintext.toString(Charsets.UTF_8)
-
-                InboxItem(
-                    id = dto.id,
-                    senderId = dto.senderId,
-                    senderName = candidate.senderName,
-                    pluginId = dto.pluginId,
-                    pluginIdentifier = dto.pluginIdentifier,
-                    payloadJson = plaintextString,
-                    sentAt = dto.sentAt ?: "",
-                    expiresAt = dto.expiresAt,
-                    type = "event",
-                    bundleJs = null,
-                    declaredEndpoints = emptyList(),
-                    bundleHash = null,
-                    revocationReason = null,
-                    renderer = "script",
-                    template = null,
-                    hostPreview = HostPreviewParser.parse(plaintextString),
+                    payloadNonceB64 = dto.payloadNonce,
+                    payloadCiphertextSha256Hex = Hpke.sha256Hex(
+                        dto.payloadCiphertext.base64ToBytes()
+                    ),
+                    deviceId = deviceId,
                 )
-            }.getOrNull()
-            if (decrypted != null) return decrypted
-        }
-        return null
+            },
+            payloadAad = V2Aad.eventPayloadAad(
+                senderId = dto.senderId,
+                userId = userId,
+                pluginId = dto.pluginId,
+                expiresAt = dto.expiresAt,
+                minPluginVersion = dto.minPluginVersion ?: "",
+            ),
+        ) ?: return null
+
+        return InboxItem(
+            id = dto.id,
+            senderId = dto.senderId,
+            senderName = senderName,
+            pluginId = dto.pluginId,
+            pluginIdentifier = dto.pluginIdentifier,
+            payloadJson = plaintextString,
+            sentAt = dto.sentAt ?: "",
+            expiresAt = dto.expiresAt,
+            type = "event",
+            bundleJs = null,
+            declaredEndpoints = emptyList(),
+            bundleHash = null,
+            revocationReason = null,
+            renderer = "script",
+            template = null,
+            hostPreview = HostPreviewParser.parse(plaintextString),
+        )
     }
 
+    /** Phase 9b V2 live-card decrypt (spec §11.5). Same flow as event. */
     private fun decryptLiveCard(
         dto: InboxFeedItemDto,
         userId: String,
         candidates: List<PairedSender>,
     ): InboxItem? {
-        val ordered = candidates.sortedWith { a, b ->
-            compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt)
-        }
-        for (candidate in ordered) {
-            val decrypted = runCatching {
-                val aad = app.syncler.core.crypto.LiveCardAad(
+        val senderName = candidates
+            .sortedWith { a, b -> compareIsoTimestamps(b.firstPairedAt, a.firstPairedAt) }
+            .firstOrNull()?.senderName.orEmpty()
+        val cardKey = dto.cardKey ?: return null
+        val cardType = dto.cardType ?: return null
+        val sequenceNumber = dto.sequenceNumber ?: return null
+
+        val plaintextString = openV2EnvelopeOrNull(
+            dto = dto,
+            hpkeInfoFactory = { deviceId ->
+                V2Aad.liveCardHpkeInfo(
                     senderId = dto.senderId,
                     userId = userId,
                     pluginId = dto.pluginId,
-                    cardKey = dto.cardKey ?: "",
-                    sequenceNumber = dto.sequenceNumber ?: 0L,
+                    cardKey = cardKey,
+                    cardType = cardType,
+                    sequenceNumber = sequenceNumber,
                     expiresAt = dto.expiresAt,
-                ).toCanonicalJsonBytes()
-
-                val nonce = dto.nonce.base64ToBytes()
-                val ciphertext = (dto.encryptedPayload ?: "").base64ToBytes()
-                val plaintext = Aead.decrypt(candidate.pairingKey, nonce + ciphertext, aad)
-                val plaintextString = plaintext.toString(Charsets.UTF_8)
-
-                InboxItem(
-                    id = dto.id,
-                    senderId = dto.senderId,
-                    senderName = candidate.senderName,
-                    pluginId = dto.pluginId,
-                    pluginIdentifier = dto.pluginIdentifier,
-                    payloadJson = plaintextString,
-                    sentAt = dto.updatedAt ?: dto.expiresAt, // live cards use updatedAt for list ordering
-                    expiresAt = dto.expiresAt,
-                    type = "live",
-                    cardKey = dto.cardKey,
-                    sequenceNumber = dto.sequenceNumber,
-                    updatedAt = dto.updatedAt,
-                    bundleJs = null,
-                    declaredEndpoints = emptyList(),
-                    bundleHash = null,
-                    revocationReason = null,
-                    renderer = "script",
-                    template = null,
-                    hostPreview = HostPreviewParser.parse(plaintextString),
+                    minPluginVersion = dto.minPluginVersion ?: "",
+                    payloadNonceB64 = dto.payloadNonce,
+                    payloadCiphertextSha256Hex = Hpke.sha256Hex(
+                        dto.payloadCiphertext.base64ToBytes()
+                    ),
+                    deviceId = deviceId,
                 )
-            }.getOrNull()
-            if (decrypted != null) return decrypted
+            },
+            payloadAad = V2Aad.liveCardPayloadAad(
+                senderId = dto.senderId,
+                userId = userId,
+                pluginId = dto.pluginId,
+                cardKey = cardKey,
+                cardType = cardType,
+                sequenceNumber = sequenceNumber,
+                expiresAt = dto.expiresAt,
+                minPluginVersion = dto.minPluginVersion ?: "",
+            ),
+        ) ?: return null
+
+        return InboxItem(
+            id = dto.id,
+            senderId = dto.senderId,
+            senderName = senderName,
+            pluginId = dto.pluginId,
+            pluginIdentifier = dto.pluginIdentifier,
+            payloadJson = plaintextString,
+            sentAt = dto.updatedAt ?: dto.expiresAt,
+            expiresAt = dto.expiresAt,
+            type = "live",
+            cardKey = dto.cardKey,
+            sequenceNumber = dto.sequenceNumber,
+            updatedAt = dto.updatedAt,
+            bundleJs = null,
+            declaredEndpoints = emptyList(),
+            bundleHash = null,
+            revocationReason = null,
+            renderer = "script",
+            template = null,
+            hostPreview = HostPreviewParser.parse(plaintextString),
+        )
+    }
+
+    /**
+     * Phase 9b V2 shared open path. Looks up THIS device's recipient
+     * envelope by device_id, HPKE-opens the wrapped CEK, then
+     * AES-256-GCM-decrypts the payload. Returns the plaintext JSON
+     * string, or null if the device has no envelope on this item OR
+     * the open / AEAD fails (logged, treated as undecryptable).
+     */
+    private fun openV2EnvelopeOrNull(
+        dto: InboxFeedItemDto,
+        hpkeInfoFactory: (deviceId: String) -> ByteArray,
+        payloadAad: ByteArray,
+    ): String? {
+        val deviceId = deviceIdentityStore.read() ?: run {
+            Timber.tag(TAG).w("no device_id on this device; cannot decrypt V2 envelope")
+            return null
         }
-        return null
+        val ownEnvelope = dto.recipientEnvelopes.firstOrNull {
+            it.deviceId.equals(deviceId, ignoreCase = true)
+        }
+        if (ownEnvelope == null) {
+            Timber.tag(TAG).d(
+                "no recipient_envelope for device %s on item %s",
+                deviceId, dto.id,
+            )
+            return null
+        }
+
+        val keypair = deviceEncryptionKeyStore.getOrCreateKeypair()
+        val cek = runCatching {
+            Hpke.openCekForDevice(
+                privateKeyRaw = keypair.privateKey,
+                hpkeKemOutput = ownEnvelope.hpkeKemOutput.base64ToBytes(),
+                hpkeCiphertext = ownEnvelope.hpkeCiphertext.base64ToBytes(),
+                info = hpkeInfoFactory(deviceId),
+            )
+        }.getOrElse {
+            Timber.tag(TAG).w(it, "HPKE open failed for item %s", dto.id)
+            return null
+        }
+
+        return runCatching {
+            val nonce = dto.payloadNonce.base64ToBytes()
+            val ciphertext = dto.payloadCiphertext.base64ToBytes()
+            val plaintext = Aead.decrypt(cek, nonce + ciphertext, payloadAad)
+            plaintext.toString(Charsets.UTF_8)
+        }.getOrElse {
+            Timber.tag(TAG).w(it, "AES-GCM decrypt failed for item %s", dto.id)
+            null
+        }
     }
 
     private fun parseInstantOrNull(s: String): Instant? =

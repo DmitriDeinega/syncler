@@ -26,7 +26,7 @@ class AuthRepositoryTest {
         val tokenStore = InMemoryTokenStore()
         val session = Session(tokenStore)
         val identityStore = FakeDeviceIdentityStore()
-        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore(), FakeKeyGenerationStore())
+        val repository = AuthRepository(api, session, FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore(), FakeKeyGenerationStore(), FakeDeviceEncryptionKeyStore())
 
         val result = repository.signup("User@Example.com", "correct horse battery staple".toCharArray())
 
@@ -55,6 +55,7 @@ class AuthRepositoryTest {
             FakeDeviceIdentityStore(),
             FakePairedSenderStore(),
             FakeKeyGenerationStore(),
+            FakeDeviceEncryptionKeyStore(),
         )
 
         // Run signup to set up a user and pairing-key material the login
@@ -81,6 +82,7 @@ class AuthRepositoryTest {
             FakeDeviceIdentityStore(),
             FakePairedSenderStore(),
             FakeKeyGenerationStore(),
+            FakeDeviceEncryptionKeyStore(),
         )
 
         repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
@@ -98,7 +100,7 @@ class AuthRepositoryTest {
     fun logoutClearsStoredDeviceId() = runTest {
         val api = FakeApi()
         val identityStore = FakeDeviceIdentityStore()
-        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore(), FakeKeyGenerationStore())
+        val repository = AuthRepository(api, Session(InMemoryTokenStore()), FixedDevicePublicKeyProvider(), identityStore, FakePairedSenderStore(), FakeKeyGenerationStore(), FakeDeviceEncryptionKeyStore())
         repository.signup("u@example.com", "correct horse battery staple".toCharArray())
         assertEquals("device-1", identityStore.value)
 
@@ -137,6 +139,7 @@ class AuthRepositoryTest {
             FakeDeviceIdentityStore(),
             store,
             FakeKeyGenerationStore(),
+            FakeDeviceEncryptionKeyStore(),
         )
 
         repository.signup("u@example.com", "correct horse battery staple".toCharArray()).getOrThrow()
@@ -158,6 +161,7 @@ class AuthRepositoryTest {
             FakeDeviceIdentityStore(),
             FakePairedSenderStore(),
             FakeKeyGenerationStore(),
+            FakeDeviceEncryptionKeyStore(),
         )
 
         val result = repository.revokeDevice("missing")
@@ -220,6 +224,22 @@ internal class FixedDevicePublicKeyProvider : DevicePublicKeyProvider {
     override fun publicKey(): ByteArray = ByteArray(KEY_SIZE_BYTES) { 4 }
 }
 
+/**
+ * Phase 9b: deterministic 32-byte keypair from a constant seed. The
+ * real SecurePrefsDeviceEncryptionKeyStore persists via SecurePrefs
+ * (which needs a Context); tests don't need the persistence layer.
+ */
+internal class FakeDeviceEncryptionKeyStore : app.syncler.core.storage.DeviceEncryptionKeyStore {
+    private val sk = ByteArray(32) { 0x42 }
+    private val pk = ByteArray(32) { 0x84.toByte() }
+
+    override fun getOrCreateKeypair(): app.syncler.core.storage.DeviceEncryptionKeyStore.Keypair =
+        app.syncler.core.storage.DeviceEncryptionKeyStore.Keypair(privateKey = sk, publicKey = pk)
+
+    override fun rotate(): app.syncler.core.storage.DeviceEncryptionKeyStore.Keypair = getOrCreateKeypair()
+    override fun clear() {}
+}
+
 private class FakeApi(
     private val revokeSucceeds: Boolean = true,
 ) : SynclerApi {
@@ -279,6 +299,10 @@ private class FakeApi(
 
     override suspend fun revokeDevice(id: String): Response<Unit> =
         if (revokeSucceeds) Response.success(Unit) else Response.error(404, ByteArray(0).toResponseBody())
+
+    override suspend fun rotateDeviceEncryptionKey(
+        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+    ): Response<Unit> = Response.success(Unit)
 
     override suspend fun deleteAccount(): Response<Unit> = Response.success(Unit)
 

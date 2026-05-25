@@ -310,6 +310,7 @@ class RotationRepositoryTest {
             deviceIdentityStore = identityStore,
             pairedSenderStore = FakePairedSenderStore(),
             keyGenerationStore = keyGenStore,
+            deviceEncryptionKeyStore = FakeDeviceEncryptionKeyStore(),
         )
         val rotation = RotationRepository(api, session, keyGenStore)
         return Fixture(api, session, keyGenStore, auth, rotation)
@@ -423,6 +424,9 @@ private class RotationFakeApi(
     // Unused stubs.
     override suspend fun listDevices(): List<DeviceItem> = emptyList()
     override suspend fun revokeDevice(id: String): Response<Unit> = Response.success(Unit)
+    override suspend fun rotateDeviceEncryptionKey(
+        body: app.syncler.core.network.DeviceEncryptionKeyRotateRequest,
+    ): Response<Unit> = Response.success(Unit)
     override suspend fun deleteAccount(): Response<Unit> = Response.success(Unit)
     override suspend fun getMessage(id: String) = stub()
     override suspend fun inbox(since: String?) = stub()
