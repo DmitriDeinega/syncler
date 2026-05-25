@@ -1,0 +1,17 @@
+**Verdict**
+
+Codex 104 RED fix: **GREEN**. `POST /v1/pairing/complete` now locks/gates first and stamps `Pairing.key_generation` from the locked user row.
+
+Gemini 104 YELLOW fix: **GREEN** for the reported failure. Revoke now uses `require_observed=False`, so Phase-8 clients can revoke without `key_generation_observed`.
+
+Audit DESC minor: **GREEN**.
+
+**Still Missing**
+
+**RED new finding:** `PUT /v1/state` still appears to have the same stamping class of bug for initial state creation after rotation. The route returns `locked_user.key_generation` at `server/app/routers/state.py:100`, but `upsert_state_cas()` inserts/updates only `state_version` and `encrypted_blob` at `server/app/services/state.py:69` and `server/app/services/state.py:104`; it never writes `EncryptedUserState.key_generation`.
+
+Scenario: user rotates to generation 2 with no existing state row, then Phase-8 `PUT /v1/state` with `key_generation_observed=2`. Gate passes, response says generation 2, but inserted row keeps server default `key_generation=1`.
+
+**Anything New**
+
+Revoke’s optional observed-value comparison exists in the helper, but the route always passes `None`, so there is no current route surface to 409 if a revoke caller “does pass” a stale observed generation. That is only YELLOW unless the revoke API is supposed to accept that field.

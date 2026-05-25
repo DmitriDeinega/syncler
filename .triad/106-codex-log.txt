@@ -1,0 +1,1686 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e5d12-bb2d-7900-b780-ad9d08e95cba
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 106 — Phase 8b impl v3 (post-105 fix-ups)
+
+Consultation 105:
+- **Codex** marked all three 104 fixes GREEN but found a new
+  **RED**: `PUT /v1/state` echoes `locked_user.key_generation` in
+  the response while `upsert_state_cas()` never writes
+  `EncryptedUserState.key_generation` on insert or update. The row
+  could carry the server default `1` even though the user is on
+  generation `2`.
+- **Gemini** marked everything GREEN, only nitpicked the v2 audit
+  index using `sa.text("user_id")` instead of `"user_id"` (would
+  confuse alembic autogenerate).
+
+## v3 deltas
+
+### Codex 105 RED fix — stamp encrypted_user_state.key_generation
+
+- `app/services/state.py:upsert_state_cas()` now accepts
+  `key_generation: int = 1`. Both the INSERT-new-row branch and
+  the UPDATE branch write that value.
+- `app/routers/state.py:put_user_state()` forwards
+  `key_generation=locked_user.key_generation` (the value read
+  inside the user-row FOR UPDATE lock via `lock_user_and_gate`,
+  race-free against concurrent rotation).
+- New test `test_put_state_stamps_row_with_locked_key_generation`:
+  1) seed state at gen 1, assert row.key_generation == 1,
+  2) root_hygiene rotation to gen 2,
+  3) Phase-8 PUT with key_generation_observed=2,
+  4) SELECT — assert row.key_generation == 2,
+  5) assert response JSON also says key_generation == 2.
+
+### Gemini 105 nit — alembic column-vs-text consistency
+
+- `alembic/versions/0010_master_key_rotation.py` index switched to
+  `["user_id", sa.text("occurred_at DESC")]` — `user_id` is a
+  plain column reference now, so `alembic revision
+  --autogenerate` will see it as a column index, not an expression
+  index, and won't flag a phantom diff on future migrations.
+
+## Files touched in v3
+
+- `server/app/services/state.py` (key_generation kwarg + writes on
+  insert/update)
+- `server/app/routers/state.py` (forward locked generation)
+- `server/alembic/versions/0010_master_key_rotation.py` (alembic
+  autogen consistency)
+- `server/tests/test_master_key_rotation.py` (new test)
+
+## Test status
+
+`tests/test_master_key_rotation.py`: **23 passed** (was 22).
+
+`tests/test_master_key_rotation.py + test_state.py + test_events.py
++ test_pairing.py`: 39 passed, 1 failed. The single failure is the
+pre-existing `test_pairing_complete_rejects_expired_token`
+(`_b64(b"opaque-state")` = 12 bytes vs schema's `minimum=16`),
+unrelated to Phase 8 (confirmed via `git stash`).
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on the v3 fix: GREEN / YELLOW / RED.
+2. Anything still missing.
+3. Anything new.
+
+If dual-GREEN this round, I commit Phase 8b + transcripts and
+move to Phase 8c (Android UX).
+
+**Reply text only. Do NOT call any write/mutation tool. Do not
+commit, edit, or stage anything.**
+
+codex
+I’ll review the touched code and tests in read-only mode, focusing on the generation stamping path and the migration index change. No edits or staging.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff -- server/app/services/state.py server/app/routers/state.py server/alembic/versions/0010_master_key_rotation.py server/tests/test_master_key_rotation.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+ succeeded in 288ms:
+ M server/app/jobs/retention.py
+ M server/app/main.py
+ M server/app/models.py
+ M server/app/routers/auth.py
+ M server/app/routers/pairing.py
+ M server/app/routers/state.py
+ M server/app/schemas.py
+ M server/app/services/pairing.py
+ M server/app/services/state.py
+ M server/tests/conftest.py
+?? .triad/104-codex-log.txt
+?? .triad/104-codex.txt
+?? .triad/104-gemini-log.txt
+?? .triad/104-phase8b-impl-prompt.md
+?? .triad/105-codex-log.txt
+?? .triad/105-codex.txt
+?? .triad/105-gemini-log.txt
+?? .triad/105-phase8b-impl-v2-prompt.md
+?? .triad/106-codex-log.txt
+?? .triad/106-phase8b-impl-v3-prompt.md
+?? server/alembic/versions/0010_master_key_rotation.py
+?? server/app/routers/rotation.py
+?? server/app/services/key_generation.py
+?? server/app/services/rotation.py
+?? server/tests/test_master_key_rotation.py
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 296ms:
+diff --git a/server/app/routers/state.py b/server/app/routers/state.py
+index aecf5ac..f945bc4 100644
+--- a/server/app/routers/state.py
++++ b/server/app/routers/state.py
+@@ -4,7 +4,7 @@ from __future__ import annotations
+ 
+ import base64
+ 
+-from fastapi import APIRouter, Depends, HTTPException, status
++from fastapi import APIRouter, Depends, HTTPException, Request, status
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.auth import AuthContext, current_auth_context
+@@ -17,6 +17,7 @@ from app.schemas import (
+     decode_base64,
+ )
+ from app.services.events import get_event_bus
++from app.services.key_generation import lock_user_and_gate
+ from app.services.state import (
+     StateConflictError,
+     get_state,
+@@ -37,20 +38,36 @@ async def get_user_state(
+ ) -> StateGetResponse:
+     state = await get_state(db, ctx.user.id)
+     if state is None:
+-        return StateGetResponse(state_version=0, encrypted_blob="", updated_at=None)
++        return StateGetResponse(
++            state_version=0,
++            encrypted_blob="",
++            updated_at=None,
++            key_generation=ctx.user.key_generation,
++        )
+     return StateGetResponse(
+         state_version=state.state_version,
+         encrypted_blob=_b64(state.encrypted_blob),
+         updated_at=state.updated_at,
++        key_generation=state.key_generation,
+     )
+ 
+ 
+ @router.put("", response_model=StatePutResponse)
+ async def put_user_state(
+     payload: StatePutRequest,
++    request: Request,
+     ctx: AuthContext = Depends(current_auth_context),
+     db: AsyncSession = Depends(get_db),
+ ) -> StatePutResponse:
++    # Phase 8 §10.5 — first DB op MUST be the user-row lock; mixed-client
++    # 426 and key_generation 409 are enforced before any blob write.
++    locked_user = await lock_user_and_gate(
++        db,
++        request=request,
++        user_id=ctx.user.id,
++        key_generation_observed=payload.key_generation_observed,
++    )
++
+     new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
+     try:
+         updated = await upsert_state_cas(
+@@ -58,6 +75,10 @@ async def put_user_state(
+             user_id=ctx.user.id,
+             expected_state_version=payload.expected_state_version,
+             new_encrypted_blob=new_blob,
++            # Phase 8 §10.4: stamp the row with the locked-user
++            # generation so AAD lockstep holds. The read is race-free
++            # against rotation via lock_user_and_gate above.
++            key_generation=locked_user.key_generation,
+         )
+     except StateConflictError as exc:
+         # 409 with the current state so client can merge and retry.
+@@ -78,4 +99,7 @@ async def put_user_state(
+         event_type="state.changed",
+         data={"version": updated.state_version},
+     )
+-    return StatePutResponse(new_state_version=updated.state_version)
++    return StatePutResponse(
++        new_state_version=updated.state_version,
++        key_generation=locked_user.key_generation,
++    )
+diff --git a/server/app/services/state.py b/server/app/services/state.py
+index eb86f22..8cfa62c 100644
+--- a/server/app/services/state.py
++++ b/server/app/services/state.py
+@@ -40,6 +40,7 @@ async def upsert_state_cas(
+     user_id: uuid.UUID,
+     expected_state_version: int,
+     new_encrypted_blob: bytes,
++    key_generation: int = 1,
+ ) -> EncryptedUserState:
+     """Compare-and-swap update of the user's encrypted state.
+ 
+@@ -70,6 +71,10 @@ async def upsert_state_cas(
+             user_id=user_id,
+             state_version=1,
+             encrypted_blob=new_encrypted_blob,
++            # Phase 8 §10.4: stamp the row with the locked user generation
++            # so AAD lockstep holds. Caller passes the value read inside
++            # the user-row FOR UPDATE lock.
++            key_generation=key_generation,
+         )
+         db.add(row)
+         try:
+@@ -104,6 +109,12 @@ async def upsert_state_cas(
+         .values(
+             state_version=new_version,
+             encrypted_blob=new_encrypted_blob,
++            # Phase 8 §10.4: restate the row's key_generation on every
++            # CAS write. Rotation step 9 sets it; PUT /v1/state keeps it
++            # in sync with the locked users.key_generation. Same value
++            # on the steady path; defense-in-depth if anything ever
++            # drifted.
++            key_generation=key_generation,
+             updated_at=datetime.now(UTC),
+         )
+         .returning(
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: in the working copy of 'server/app/services/state.py', LF will be replaced by CRLF the next time Git touches it
+
+codex
+The diff shows the intended state write is present in both insert and update branches. I’m checking the surrounding models/schemas and lock helper now to make sure the response field and lock semantics line up with that change.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "class State|StateGetResponse|StatePutResponse|key_generation_observed|lock_user_and_gate" server/app server/tests/test_master_key_rotation.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/alembic/versions/0010_master_key_rotation.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/services/state.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/services/key_generation.py' in D:\Projects\syncler
+ succeeded in 323ms:
+server/tests/test_master_key_rotation.py:183:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:228:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:271:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:328:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:374:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:409:                "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:441:                "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:459:# §10.8 step 6 — key_generation_observed mismatch
+server/tests/test_master_key_rotation.py:464:async def test_wrong_key_generation_observed_409(
+server/tests/test_master_key_rotation.py:475:            "key_generation_observed": 99,  # WRONG
+server/tests/test_master_key_rotation.py:508:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:548:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:581:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:626:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:660:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:692:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:719:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:749:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:775:async def test_put_state_phase8_requires_key_generation_observed(
+server/tests/test_master_key_rotation.py:779:    # Phase-8 header but no key_generation_observed → 400.
+server/tests/test_master_key_rotation.py:786:    assert r.json()["detail"]["error"] == "key_generation_observed_required"
+server/tests/test_master_key_rotation.py:802:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:822:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:851:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:866:    # key_generation_observed=2. The row MUST be stamped with
+server/tests/test_master_key_rotation.py:891:            "key_generation_observed": 2,
+server/tests/test_master_key_rotation.py:908:# Gemini 104 YELLOW — revoke must NOT require key_generation_observed.
+server/tests/test_master_key_rotation.py:913:async def test_phase8_revoke_works_without_key_generation_observed(
+server/tests/test_master_key_rotation.py:927:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:946:    # Phase-8 client revokes without passing key_generation_observed.
+server/tests/test_master_key_rotation.py:979:            "key_generation_observed": 1,
+server/tests/test_master_key_rotation.py:992:    # Now Phase-8 PUT a new state with key_generation_observed=2.
+server/tests/test_master_key_rotation.py:999:            "key_generation_observed": 2,
+server/app\schemas.py:389:    key_generation_observed: int | None = None
+server/app\schemas.py:432:class StateGetResponse(BaseModel):
+server/app\schemas.py:441:class StatePutRequest(BaseModel):
+server/app\schemas.py:448:    key_generation_observed: int | None = None
+server/app\schemas.py:457:class StatePutResponse(BaseModel):
+server/app\schemas.py:464:class StateConflictBody(BaseModel):
+server/app\schemas.py:897:    key_generation_observed: int
+server/app\routers\rotation.py:157:        key_generation_observed=payload.key_generation_observed,
+server/app\routers\pairing.py:29:from app.services.key_generation import lock_user_and_gate
+server/app\routers\pairing.py:282:    locked_user = await lock_user_and_gate(
+server/app\routers\pairing.py:286:        key_generation_observed=payload.key_generation_observed,
+server/app\routers\pairing.py:346:    # NOT require key_generation_observed (no new blob is written), so
+server/app\routers\pairing.py:348:    await lock_user_and_gate(
+server/app\routers\pairing.py:352:        key_generation_observed=None,
+server/app\services\state.py:18:class StateError(Exception):
+server/app\services\state.py:22:class StateConflictError(StateError):
+server/app\routers\state.py:14:    StateGetResponse,
+server/app\routers\state.py:16:    StatePutResponse,
+server/app\routers\state.py:20:from app.services.key_generation import lock_user_and_gate
+server/app\routers\state.py:34:@router.get("", response_model=StateGetResponse)
+server/app\routers\state.py:38:) -> StateGetResponse:
+server/app\routers\state.py:41:        return StateGetResponse(
+server/app\routers\state.py:47:    return StateGetResponse(
+server/app\routers\state.py:55:@router.put("", response_model=StatePutResponse)
+server/app\routers\state.py:61:) -> StatePutResponse:
+server/app\routers\state.py:64:    locked_user = await lock_user_and_gate(
+server/app\routers\state.py:68:        key_generation_observed=payload.key_generation_observed,
+server/app\routers\state.py:80:            # against rotation via lock_user_and_gate above.
+server/app\routers\state.py:102:    return StatePutResponse(
+server/app\services\rotation.py:77:    """``key_generation_observed`` does not match ``users.key_generation``."""
+server/app\services\rotation.py:81:        super().__init__("key_generation_observed mismatch")
+server/app\services\rotation.py:116:    key_generation_observed: int
+server/app\services\rotation.py:384:    # Step 6 — verify key_generation_observed.
+server/app\services\rotation.py:385:    if ctx.key_generation_observed != user.key_generation:
+server/app\services\key_generation.py:11:3. CAS check on ``key_generation_observed`` (when the client is Phase 8+).
+server/app\services\key_generation.py:44:async def lock_user_and_gate(
+server/app\services\key_generation.py:49:    key_generation_observed: int | None,
+server/app\services\key_generation.py:59:    ``key_generation_observed``:
+server/app\services\key_generation.py:77:      - 400 if a Phase-8+ client omits ``key_generation_observed`` AND
+server/app\services\key_generation.py:108:        if key_generation_observed is None:
+server/app\services\key_generation.py:113:                        "error": "key_generation_observed_required",
+server/app\services\key_generation.py:119:        elif key_generation_observed != user.key_generation:
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 345ms:
+"""Phase 8b ‚?" master-key rotation schema
+
+Implements docs/crypto-spec.md ?10.3:
+
+  - users.key_generation INTEGER NOT NULL DEFAULT 1
+  - encrypted_user_state.key_generation INTEGER NOT NULL DEFAULT 1
+  - pairings.state_version INTEGER NOT NULL DEFAULT 1
+  - pairings.key_generation INTEGER NOT NULL DEFAULT 1
+  - rotation_challenges (PK = bytea challenge, expires_at index)
+  - master_key_rotation_audit (BIGSERIAL PK)
+
+`encrypted_user_state.state_version` already exists (M7 CAS); not
+re-added.
+
+Plan: docs/crypto-spec.md ?10. Triad consult 103.
+"""
+
+from __future__ import annotations
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "0010_master_key_rotation"
+down_revision = "0009_nonce_replay"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.add_column(
+        "users",
+        sa.Column(
+            "key_generation",
+            sa.Integer(),
+            nullable=False,
+            server_default="1",
+        ),
+    )
+    op.add_column(
+        "encrypted_user_state",
+        sa.Column(
+            "key_generation",
+            sa.Integer(),
+            nullable=False,
+            server_default="1",
+        ),
+    )
+    op.add_column(
+        "pairings",
+        sa.Column(
+            "state_version",
+            sa.Integer(),
+            nullable=False,
+            server_default="1",
+        ),
+    )
+    op.add_column(
+        "pairings",
+        sa.Column(
+            "key_generation",
+            sa.Integer(),
+            nullable=False,
+            server_default="1",
+        ),
+    )
+
+    op.create_table(
+        "rotation_challenges",
+        sa.Column("challenge", sa.LargeBinary(), primary_key=True),
+        sa.Column(
+            "user_id",
+            sa.Uuid(),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("session_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "expires_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "octet_length(challenge) = 32",
+            name="ck_rotation_challenges_challenge_length",
+        ),
+    )
+    op.create_index(
+        "ix_rotation_challenges_expiry",
+        "rotation_challenges",
+        ["expires_at"],
+    )
+
+    op.create_table(
+        "master_key_rotation_audit",
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(
+                sa.dialects.postgresql.BIGINT(), "postgresql"
+            ),
+            primary_key=True,
+            autoincrement=True,
+        ),
+        sa.Column(
+            "user_id",
+            sa.Uuid(),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("old_generation", sa.Integer(), nullable=False),
+        sa.Column("new_generation", sa.Integer(), nullable=False),
+        sa.Column("initiating_session_id", sa.Uuid(), nullable=True),
+        sa.Column("initiating_device_id", sa.Uuid(), nullable=True),
+        sa.Column("ip", sa.Text(), nullable=True),
+        sa.Column("user_agent", sa.Text(), nullable=True),
+        sa.Column("paired_count", sa.Integer(), nullable=False),
+        sa.Column(
+            "occurred_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.CheckConstraint(
+            "reason IN ('password_rewrap','root_hygiene_rotation','root_compromise_rotation')",
+            name="ck_mkr_audit_reason",
+        ),
+    )
+    # Spec ?10.3 uses (user_id, occurred_at DESC) so the most-recent-
+    # rotations queries (step 5 success rate-limit; admin/incident
+    # forensics) are an index seek + reverse scan. ``user_id`` uses
+    # the plain column reference so ``alembic revision --autogenerate``
+    # sees it as a column-index, not an expression-index, and won't
+    # flag a phantom diff on future migrations (Gemini 105 nit).
+    op.create_index(
+        "ix_mkr_audit_user_time",
+        "master_key_rotation_audit",
+        ["user_id", sa.text("occurred_at DESC")],
+        postgresql_using="btree",
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_mkr_audit_user_time", table_name="master_key_rotation_audit")
+    op.drop_table("master_key_rotation_audit")
+    op.drop_index("ix_rotation_challenges_expiry", table_name="rotation_challenges")
+    op.drop_table("rotation_challenges")
+    op.drop_column("pairings", "key_generation")
+    op.drop_column("pairings", "state_version")
+    op.drop_column("encrypted_user_state", "key_generation")
+    op.drop_column("users", "key_generation")
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 345ms:
+"""Shared helpers for the Phase 8 ``key_generation`` gate.
+
+Every endpoint that writes a ``key_generation``-tagged blob (docs/crypto-spec.md ?10.5)
+goes through:
+
+1. ``SELECT users.* FROM users WHERE id = :u FOR UPDATE`` ‚?" serializes
+   against any concurrent rotation.
+2. Mixed-client gate ‚?" if the request claims Phase < 8 (or omits the
+   ``X-Syncler-Client-Min-Phase`` header) and ``users.key_generation > 1``,
+   return **426 Upgrade Required**.
+3. CAS check on ``key_generation_observed`` (when the client is Phase 8+).
+   Mismatch ‚+' **409 key_generation_mismatch**.
+
+This module keeps that boilerplate out of every route handler.
+"""
+
+from __future__ import annotations
+
+from fastapi import HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import User
+
+PHASE_8 = 8
+CLIENT_MIN_PHASE_HEADER = "X-Syncler-Client-Min-Phase"
+
+
+def parse_client_min_phase(request: Request) -> int:
+    """Return the int phase the client claims, or 0 if missing / unparseable.
+
+    Phase-8-aware clients send the literal ``8``. Older clients omit the
+    header ‚?" we treat that as phase 0 for gating.
+    """
+    raw = request.headers.get(CLIENT_MIN_PHASE_HEADER)
+    if raw is None:
+        return 0
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return 0
+
+
+async def lock_user_and_gate(
+    db: AsyncSession,
+    *,
+    request: Request,
+    user_id,
+    key_generation_observed: int | None,
+    require_observed: bool = True,
+) -> User:
+    """Take the user-row FOR UPDATE lock then apply the ?10.5 gates.
+
+    Returns the locked, fresh ``User`` row so the caller can use the
+    just-read ``key_generation`` value (and other locked fields) for
+    follow-up writes inside the same transaction.
+
+    ``require_observed`` controls whether a Phase-8+ client MUST send
+    ``key_generation_observed``:
+
+      - ``True`` (default) ‚?" for endpoints that write a
+        ``key_generation``-tagged blob (PUT /v1/state, POST /v1/pairing
+        /complete). A Phase-8+ client without the field is a protocol
+        bug ‚+' 400.
+      - ``False`` ‚?" for endpoints that don't write a new blob but still
+        take the lock per ?10.5 (POST /v1/pairing/{id}/revoke).
+        Phase-8+ clients MAY pass the field (we then compare it to the
+        locked row); if they omit it we still serve. This is the fix
+        for the Gemini 104 YELLOW: revoke shouldn't 400 just because
+        the client doesn't have an AAD to bind.
+
+    Raises ``HTTPException`` with the spec-mandated status codes:
+
+      - 426 if the client claims Phase < 8 and ``key_generation > 1``.
+      - 409 ``key_generation_mismatch`` if a Phase-8+ client passes an
+        observed value that doesn't match the locked row.
+      - 400 if a Phase-8+ client omits ``key_generation_observed`` AND
+        ``require_observed=True``.
+    """
+    # Use the ORM ``with_for_update()`` clause so SQLAlchemy emits the
+    # right dialect-specific lock hint and applies the model's UUID type
+    # converter (raw ``text("... :user_id")`` won't bind a UUID on SQLite).
+    bind = db.get_bind()
+    dialect = bind.dialect.name
+    stmt = select(User).where(User.id == user_id)
+    if dialect != "sqlite":
+        stmt = stmt.with_for_update()
+    row = await db.execute(stmt)
+    user = row.scalar_one_or_none()
+    if user is None:
+        # Auth dependency should have caught this; degrade to 401.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid token",
+        )
+
+    client_phase = parse_client_min_phase(request)
+    if client_phase < PHASE_8 and user.key_generation > 1:
+        raise HTTPException(
+            status_code=status.HTTP_426_UPGRADE_REQUIRED,
+            detail={
+                "error": "account_upgraded_requires_newer_client",
+                "minimum_supported_phase": PHASE_8,
+            },
+        )
+
+    if client_phase >= PHASE_8:
+        if key_generation_observed is None:
+            if require_observed:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": "key_generation_observed_required",
+                        "minimum_supported_phase": PHASE_8,
+                    },
+                )
+            # require_observed=False ‚?" revoke and similar non-blob-writing
+            # endpoints don't need the AAD binding; serve.
+        elif key_generation_observed != user.key_generation:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "key_generation_mismatch",
+                    "current_key_generation": user.key_generation,
+                    "client_action": "refetch_master_key_and_state",
+                },
+            )
+
+    return user
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 349ms:
+"""Encrypted user state ‚?" opaque blob, optimistic concurrency control.
+
+The server is content-blind to the blob. Clients decrypt locally with
+their master key and apply structural merging on conflict.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import EncryptedUserState
+
+
+class StateError(Exception):
+    """Base."""
+
+
+class StateConflictError(StateError):
+    """Optimistic concurrency check failed; client must merge + retry."""
+
+    def __init__(self, current: EncryptedUserState) -> None:
+        self.current = current
+        super().__init__("state_version conflict")
+
+
+async def get_state(db: AsyncSession, user_id: uuid.UUID) -> EncryptedUserState | None:
+    result = await db.execute(
+        select(EncryptedUserState).where(EncryptedUserState.user_id == user_id),
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_state_cas(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    expected_state_version: int,
+    new_encrypted_blob: bytes,
+    key_generation: int = 1,
+) -> EncryptedUserState:
+    """Compare-and-swap update of the user's encrypted state.
+
+    - If the row doesn't exist and expected_state_version == 0: insert new.
+    - If exists and current.state_version == expected_state_version: update.
+    - Otherwise: raise StateConflictError with the current row so the client
+      can pull, merge locally, and retry.
+
+    CAS uses ``UPDATE ... WHERE state_version = expected RETURNING`` for
+    atomic check-and-set; loser receives no row (rowcount=0) and we raise
+    StateConflictError without ever returning success.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    current = await get_state(db, user_id)
+
+    if current is None:
+        if expected_state_version != 0:
+            raise StateConflictError(
+                current=EncryptedUserState(
+                    user_id=user_id,
+                    state_version=0,
+                    encrypted_blob=b"",
+                    updated_at=datetime.now(UTC),
+                ),
+            )
+        row = EncryptedUserState(
+            user_id=user_id,
+            state_version=1,
+            encrypted_blob=new_encrypted_blob,
+            # Phase 8 ?10.4: stamp the row with the locked user generation
+            # so AAD lockstep holds. Caller passes the value read inside
+            # the user-row FOR UPDATE lock.
+            key_generation=key_generation,
+        )
+        db.add(row)
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Initial-create race: another writer beat us. Convert the DB
+            # error into a clean 409 with the current state.
+            await db.rollback()
+            current_now = await get_state(db, user_id)
+            raise StateConflictError(
+                current=current_now
+                or EncryptedUserState(
+                    user_id=user_id,
+                    state_version=0,
+                    encrypted_blob=b"",
+                    updated_at=datetime.now(UTC),
+                ),
+            ) from None
+        await db.refresh(row)
+        return row
+
+    if current.state_version != expected_state_version:
+        raise StateConflictError(current=current)
+
+    new_version = current.state_version + 1
+    # RETURNING the row makes "did this UPDATE actually hit?" unambiguous ‚?"
+    # no row returned = lost the race, not a silent success.
+    stmt = (
+        update(EncryptedUserState)
+        .where(EncryptedUserState.user_id == user_id)
+        .where(EncryptedUserState.state_version == expected_state_version)
+        .values(
+            state_version=new_version,
+            encrypted_blob=new_encrypted_blob,
+            # Phase 8 ?10.4: restate the row's key_generation on every
+            # CAS write. Rotation step 9 sets it; PUT /v1/state keeps it
+            # in sync with the locked users.key_generation. Same value
+            # on the steady path; defense-in-depth if anything ever
+            # drifted.
+            key_generation=key_generation,
+            updated_at=datetime.now(UTC),
+        )
+        .returning(
+            EncryptedUserState.user_id,
+            EncryptedUserState.state_version,
+        )
+    )
+    result = await db.execute(stmt)
+    row_data = result.first()
+    if row_data is None:
+        # Lost the race. Pull fresh and surface conflict.
+        await db.rollback()
+        fresh = await get_state(db, user_id)
+        raise StateConflictError(current=fresh or current)
+
+    await db.commit()
+    refreshed = await get_state(db, user_id)
+    # Sanity: refreshed must report the version we wrote (else somehow yet
+    # another concurrent writer flipped past us).
+    if refreshed is None or refreshed.state_version != new_version:
+        raise StateConflictError(current=refreshed or current)
+    return refreshed
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/schemas.py | Select-Object -Skip 420 -First 55' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/routers/state.py' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/models.py | Select-Object -Skip 80 -First 90' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/tests/test_master_key_rotation.py | Select-Object -Skip 840 -First 180' in D:\Projects\syncler
+ succeeded in 397ms:
+"""Encrypted user state sync endpoints (GET/PUT with CAS)."""
+
+from __future__ import annotations
+
+import base64
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import AuthContext, current_auth_context
+from app.db import get_db
+from app.schemas import (
+    StateConflictBody,
+    StateGetResponse,
+    StatePutRequest,
+    StatePutResponse,
+    decode_base64,
+)
+from app.services.events import get_event_bus
+from app.services.key_generation import lock_user_and_gate
+from app.services.state import (
+    StateConflictError,
+    get_state,
+    upsert_state_cas,
+)
+
+router = APIRouter(tags=["state"])
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+@router.get("", response_model=StateGetResponse)
+async def get_user_state(
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> StateGetResponse:
+    state = await get_state(db, ctx.user.id)
+    if state is None:
+        return StateGetResponse(
+            state_version=0,
+            encrypted_blob="",
+            updated_at=None,
+            key_generation=ctx.user.key_generation,
+        )
+    return StateGetResponse(
+        state_version=state.state_version,
+        encrypted_blob=_b64(state.encrypted_blob),
+        updated_at=state.updated_at,
+        key_generation=state.key_generation,
+    )
+
+
+@router.put("", response_model=StatePutResponse)
+async def put_user_state(
+    payload: StatePutRequest,
+    request: Request,
+    ctx: AuthContext = Depends(current_auth_context),
+    db: AsyncSession = Depends(get_db),
+) -> StatePutResponse:
+    # Phase 8 ?10.5 ‚?" first DB op MUST be the user-row lock; mixed-client
+    # 426 and key_generation 409 are enforced before any blob write.
+    locked_user = await lock_user_and_gate(
+        db,
+        request=request,
+        user_id=ctx.user.id,
+        key_generation_observed=payload.key_generation_observed,
+    )
+
+    new_blob = decode_base64(payload.new_encrypted_blob, field_name="new_encrypted_blob", minimum=1)
+    try:
+        updated = await upsert_state_cas(
+            db,
+            user_id=ctx.user.id,
+            expected_state_version=payload.expected_state_version,
+            new_encrypted_blob=new_blob,
+            # Phase 8 ?10.4: stamp the row with the locked-user
+            # generation so AAD lockstep holds. The read is race-free
+            # against rotation via lock_user_and_gate above.
+            key_generation=locked_user.key_generation,
+        )
+    except StateConflictError as exc:
+        # 409 with the current state so client can merge and retry.
+        current_blob = _b64(exc.current.encrypted_blob)
+        body = StateConflictBody(
+            current_state_version=exc.current.state_version,
+            current_encrypted_blob=current_blob,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=body.model_dump(),
+        ) from exc
+    # SSE hint: notify other foreground devices that the encrypted state
+    # blob just changed so they pull the new version instead of waiting
+    # for the next refresh tick.
+    await get_event_bus().publish_to_user(
+        user_id=ctx.user.id,
+        event_type="state.changed",
+        data={"version": updated.state_version},
+    )
+    return StatePutResponse(
+        new_state_version=updated.state_version,
+        key_generation=locked_user.key_generation,
+    )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 469ms:
+
+
+class PairingItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    sender_id: UUID
+    created_at: datetime | None
+    revoked_at: datetime | None
+
+
+class StateGetResponse(BaseModel):
+    state_version: int
+    encrypted_blob: str  # base64
+    updated_at: datetime | None
+    # Phase 8: the generation the row is encrypted under. Defaults to 1
+    # for rows that pre-date the migration's server_default.
+    key_generation: int = 1
+
+
+class StatePutRequest(BaseModel):
+    expected_state_version: Annotated[int, Field(ge=0)]
+    new_encrypted_blob: str  # base64
+    # Phase 8 (docs/crypto-spec.md ?10.5): Phase-8-aware clients pass the
+    # generation they encrypted under; the server 409s if it has rotated
+    # since. Optional in the wire format for legacy compatibility ‚?" the
+    # mixed-client gate enforces presence when the client claims Phase 8+.
+    key_generation_observed: int | None = None
+
+    @field_validator("new_encrypted_blob")
+    @classmethod
+    def validate_blob(cls, value: str) -> str:
+        decode_base64(value, field_name="new_encrypted_blob", minimum=1)
+        return value
+
+
+class StatePutResponse(BaseModel):
+    new_state_version: int
+    # Phase 8: echo the row's current generation so the client can refresh
+    # its high-water mark.
+    key_generation: int = 1
+
+
+class StateConflictBody(BaseModel):
+    current_state_version: int
+    current_encrypted_blob: str
+
+
+# Phase 3a ‚?" template renderer.
+#
+# Layouts and per-layout required fields. Senders publish a `template` object
+# alongside `renderer: "template"` to declare a native Compose rendering
+# instead of a WebView bundle. The publish-time validator enforces the
+# schema constraints below so the client never has to render a malformed
+# template at message time (Phase 3a in `.triad/50-agreement-and-plan.md`).
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 470ms:
+            "uq_pairings_active_user_sender",
+            "user_id",
+            "sender_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    encrypted_state: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Phase 8 CAS counters for the encrypted_state blob and the rotation
+    # generation it was last encrypted under. See docs/crypto-spec.md ?10.
+    state_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
+    key_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Plugin(Base):
+    __tablename__ = "plugins"
+    __table_args__ = (
+        UniqueConstraint(
+            "sender_id",
+            "plugin_identifier",
+            "version",
+            name="uq_plugins_sender_identifier_version",
+        ),
+        Index("ix_plugins_sender_identifier", "sender_id", "plugin_identifier"),
+    )
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id"),
+        nullable=False,
+    )
+    # Sender-chosen stable identity (e.g. "com.lottery.app"). Decouples
+    # the logical plugin from per-version row UUIDs.
+    plugin_identifier: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    bundle_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    signature: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    signed_bundle_url: Mapped[str] = mapped_column(Text, nullable=False)
+    capabilities: Mapped[dict] = mapped_column(JSONB_TYPE, nullable=False)
+    endpoints: Mapped[dict] = mapped_column(JSONB_TYPE, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # M11.4: optional classification of why this plugin row was revoked.
+    # See revoke endpoint for the accepted enum and per-reason UX contract.
+    revocation_reason: Mapped[str | None] = mapped_column(Text)
+    # Phase 3a: "script" (legacy WebView bundle) or "template" (native
+    # Compose renderer). Backfilled to "script" for pre-existing rows so
+    # the latest endpoint can safely return a non-null value.
+    renderer: Mapped[str] = mapped_column(Text, nullable=False, server_default="script")
+    # Phase 3a: the template manifest block when renderer == "template".
+    # Null otherwise. The publish-time validator in routers/plugins.py
+    # rejects mismatched (renderer, template) pairs before insert.
+    template: Mapped[dict | None] = mapped_column(JSONB_TYPE, nullable=True)
+    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+    # for live cards to extract their stable identity from the payload.
+    card_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="event")
+    card_key_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    __table_args__ = (Index("ix_messages_user_id_sent_at_desc", "user_id", text("sent_at DESC")),)
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id"),
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 474ms:
+    session, auth_key = await _signup_login_enroll(app_client)
+    await _seed_initial_state(app_client, session)
+    challenge = await _get_challenge(app_client, session)
+
+    # Rotate: 1 ‚+' 2.
+    rot = await app_client.post(
+        "/v1/account/rotate-master-key",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+        json={
+            "reason": "root_hygiene_rotation",
+            "key_generation_observed": 1,
+            "rotation_challenge": challenge,
+            "current_password_proof": _b64(auth_key),
+            "new_encrypted_master_key": _b64(b"n" * 64),
+            "new_encrypted_user_state": {
+                "encrypted_blob": _b64(b"s" * 32),
+                "state_version_observed": 1,
+            },
+            "pairings": [],
+        },
+    )
+    assert rot.status_code == 200, rot.text
+    assert rot.json()["key_generation"] == 2
+
+    # Now /pairing/complete a fresh sender as a Phase-8 client with
+    # key_generation_observed=2. The row MUST be stamped with
+    # key_generation=2, not the server_default 1.
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes_raw()
+    register = await app_client.post(
+        "/v1/senders/register",
+        json={"public_key": _b64(public_key), "name": "Sndr", "contact": "x@y.z"},
+    )
+    sender_id = uuid.UUID(register.json()["sender_id"])
+    body = {"sender_id": str(sender_id), "ttl_seconds": 300, "metadata": {}}
+    sig = _b64(
+        private_key.sign(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode(),
+        ),
+    )
+    initiate = await app_client.post(
+        "/v1/pairing/initiate",
+        json={**body, "signature": sig},
+    )
+    complete = await app_client.post(
+        "/v1/pairing/complete",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+        json={
+            "pairing_token": initiate.json()["pairing_token"],
+            "encrypted_initial_state": _b64(b"opaque-blob-after-rotation-aad!"),
+            "key_generation_observed": 2,
+        },
+    )
+    assert complete.status_code == 201, complete.text
+
+    pairing_id = uuid.UUID(complete.json()["pairing_id"])
+    row = (
+        await db_session.execute(
+            select(Pairing).where(Pairing.id == pairing_id),
+        )
+    ).scalar_one()
+    assert row.key_generation == 2, (
+        f"new pairing must be stamped with key_generation 2, got {row.key_generation}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gemini 104 YELLOW ‚?" revoke must NOT require key_generation_observed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_phase8_revoke_works_without_key_generation_observed(
+    app_client: AsyncClient,
+) -> None:
+    session, auth_key = await _signup_login_enroll(app_client)
+    await _seed_initial_state(app_client, session)
+    pid = await _pair_with_sender(app_client, session, sender_name="A")
+    challenge = await _get_challenge(app_client, session)
+
+    # Rotate so users.key_generation > 1.
+    rot = await app_client.post(
+        "/v1/account/rotate-master-key",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+        json={
+            "reason": "root_hygiene_rotation",
+            "key_generation_observed": 1,
+            "rotation_challenge": challenge,
+            "current_password_proof": _b64(auth_key),
+            "new_encrypted_master_key": _b64(b"n" * 64),
+            "new_encrypted_user_state": {
+                "encrypted_blob": _b64(b"s" * 32),
+                "state_version_observed": 1,
+            },
+            "pairings": [
+                {
+                    "pairing_id": str(pid),
+                    "state_version_observed": 1,
+                    "new_encrypted_state": _b64(b"re-encrypted" + b"\x00" * 20),
+                },
+            ],
+        },
+    )
+    assert rot.status_code == 200, rot.text
+
+    # Phase-8 client revokes without passing key_generation_observed.
+    # Must succeed ‚?" revoke doesn't write a key_generation-tagged blob.
+    r = await app_client.post(
+        f"/v1/pairing/{pid}/revoke",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+    )
+    assert r.status_code == 204, r.text
+
+
+# ---------------------------------------------------------------------------
+# Codex 105 RED ‚?" PUT /v1/state must stamp encrypted_user_state.key_generation
+# with the locked user.key_generation on every CAS write (?10.4).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_put_state_stamps_row_with_locked_key_generation(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    session, auth_key = await _signup_login_enroll(app_client)
+    await _seed_initial_state(app_client, session)
+
+    # Sanity: pre-rotation, row carries key_generation=1.
+    pre = (await db_session.execute(select(EncryptedUserState))).scalar_one()
+    assert pre.key_generation == 1
+
+    # Rotate 1 ‚+' 2 (root_hygiene); rotation step 9 stamps the row to 2.
+    challenge = await _get_challenge(app_client, session)
+    rot = await app_client.post(
+        "/v1/account/rotate-master-key",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+        json={
+            "reason": "root_hygiene_rotation",
+            "key_generation_observed": 1,
+            "rotation_challenge": challenge,
+            "current_password_proof": _b64(auth_key),
+            "new_encrypted_master_key": _b64(b"n" * 64),
+            "new_encrypted_user_state": {
+                "encrypted_blob": _b64(b"s" * 32),
+                "state_version_observed": 1,
+            },
+            "pairings": [],
+        },
+    )
+    assert rot.status_code == 200, rot.text
+
+    # Now Phase-8 PUT a new state with key_generation_observed=2.
+    put = await app_client.put(
+        "/v1/state",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+        json={
+            "expected_state_version": 2,
+            "new_encrypted_blob": _b64(b"post-rotation-state-blob" + b"\x00" * 8),
+            "key_generation_observed": 2,
+        },
+    )
+    assert put.status_code == 200, put.text
+
+    # Row must report key_generation=2 (rotation set it; PUT must keep
+    # it stamped ‚?" restating-on-write is the ?10.4 lockstep guarantee).
+    post = (await db_session.execute(select(EncryptedUserState))).scalar_one()
+    assert post.key_generation == 2, (
+        f"PUT /v1/state must stamp the row's key_generation with the "
+        f"locked users.key_generation; got {post.key_generation}"
+    )
+    # And the response surfaces the same value.
+    assert put.json()["key_generation"] == 2
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "class User|class EncryptedUserState|key_generation" server/app/models.py server/app/services/rotation.py server/app/routers/rotation.py' in D:\Projects\syncler
+ succeeded in 283ms:
+server/app/services/rotation.py:6:    blob re-encryption, no ``key_generation`` bump, no session revocation.
+server/app/services/rotation.py:8:    re-encrypted under new MK with ``key_generation = old + 1``. Sessions
+server/app/services/rotation.py:77:    """``key_generation_observed`` does not match ``users.key_generation``."""
+server/app/services/rotation.py:79:    def __init__(self, current_key_generation: int) -> None:
+server/app/services/rotation.py:80:        self.current_key_generation = current_key_generation
+server/app/services/rotation.py:81:        super().__init__("key_generation_observed mismatch")
+server/app/services/rotation.py:116:    key_generation_observed: int
+server/app/services/rotation.py:134:    new_key_generation: int
+server/app/services/rotation.py:138:class UserStateResult:
+server/app/services/rotation.py:140:    new_key_generation: int
+server/app/services/rotation.py:145:    new_key_generation: int
+server/app/services/rotation.py:384:    # Step 6 — verify key_generation_observed.
+server/app/services/rotation.py:385:    if ctx.key_generation_observed != user.key_generation:
+server/app/services/rotation.py:387:            current_key_generation=user.key_generation,
+server/app/services/rotation.py:395:    old_generation = user.key_generation
+server/app/services/rotation.py:432:                    key_generation=new_generation,
+server/app/services/rotation.py:454:                        new_key_generation=new_generation,
+server/app/services/rotation.py:472:                    key_generation=new_generation,
+server/app/services/rotation.py:491:                new_key_generation=new_generation,
+server/app/services/rotation.py:502:        user.key_generation = new_generation
+server/app/services/rotation.py:539:        new_key_generation=new_generation,
+server/app/routers/rotation.py:157:        key_generation_observed=payload.key_generation_observed,
+server/app/routers/rotation.py:199:                "error": "key_generation_mismatch",
+server/app/routers/rotation.py:200:                "current_key_generation": exc.current_key_generation,
+server/app/routers/rotation.py:233:        key_generation=result.new_key_generation,
+server/app/routers/rotation.py:237:                key_generation=result.user_state.new_key_generation,
+server/app/routers/rotation.py:246:                key_generation=p.new_key_generation,
+server/app/models.py:18:class User(Base):
+server/app/models.py:31:    key_generation: Mapped[int] = mapped_column(
+server/app/models.py:109:    key_generation: Mapped[int] = mapped_column(
+server/app/models.py:246:class EncryptedUserState(Base):
+server/app/models.py:258:    key_generation: Mapped[int] = mapped_column(
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/models.py | Select-Object -First 45' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/models.py | Select-Object -Skip 236 -First 40' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content server/app/services/rotation.py | Select-Object -Skip 400 -First 125' in D:\Projects\syncler
+ succeeded in 377ms:
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer
+from sqlalchemy import JSON, LargeBinary, Text, UniqueConstraint, Uuid, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
+
+JSONB_TYPE = JSONB().with_variant(JSON(), "sqlite")
+UUID_TYPE = Uuid(as_uuid=True)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encrypted_master_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    auth_salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    argon2_params_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Phase 8: master-key rotation generation counter. Bumps on root_*
+    # rotations; stays at the same value on password_rewrap.
+    # See docs/crypto-spec.md ?10.
+    key_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Device(Base):
+    __tablename__ = "devices"
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 378ms:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class EncryptedUserState(Base):
+    __tablename__ = "encrypted_user_state"
+
+    user_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    encrypted_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Phase 8: master-key generation the blob is encrypted under. See
+    # docs/crypto-spec.md ?10. Mismatch on read = wrong key.
+    key_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PendingPairing(Base):
+    """Sender-initiated pending pairing waiting for user-side completion."""
+
+    __tablename__ = "pending_pairings"
+    __table_args__ = (UniqueConstraint("pairing_token", name="uq_pending_pairings_token"),)
+
+    id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 376ms:
+                Pairing.user_id == ctx.user_id,
+                Pairing.revoked_at.is_(None),
+            ),
+        )
+        canonical_active_ids: set[UUID] = set(active_rows.scalars().all())
+        raw = ctx.raw_pairing_ids
+        deduped = set(raw)
+        # Duplicate-detection MUST run BEFORE set-equality (Codex consult 103).
+        if len(raw) != len(deduped):
+            raise RotationPairingSetChangedError(
+                current_pairing_ids=sorted(canonical_active_ids, key=str),
+            )
+        if deduped != canonical_active_ids:
+            raise RotationPairingSetChangedError(
+                current_pairing_ids=sorted(canonical_active_ids, key=str),
+            )
+
+        # Step 8 ‚?" CAS each pairing.
+        mismatches: list[tuple[UUID, int]] = []
+        for pairing_id, observed, new_blob in ctx.pairings:
+            stmt = (
+                update(Pairing)
+                .where(
+                    Pairing.id == pairing_id,
+                    Pairing.user_id == ctx.user_id,
+                    Pairing.revoked_at.is_(None),
+                    Pairing.state_version == observed,
+                )
+                .values(
+                    encrypted_state=new_blob,
+                    state_version=observed + 1,
+                    key_generation=new_generation,
+                )
+                .returning(Pairing.state_version)
+            )
+            result = await db.execute(stmt)
+            row = result.first()
+            if row is None:
+                current_row = await db.execute(
+                    select(Pairing.state_version).where(
+                        Pairing.id == pairing_id,
+                        Pairing.user_id == ctx.user_id,
+                    ),
+                )
+                current_version = current_row.scalar_one_or_none()
+                mismatches.append(
+                    (pairing_id, current_version if current_version is not None else -1),
+                )
+            else:
+                pairing_results.append(
+                    PairingResult(
+                        pairing_id=pairing_id,
+                        new_state_version=int(row[0]),
+                        new_key_generation=new_generation,
+                    ),
+                )
+        if mismatches:
+            raise RotationPairingStateChangedError(mismatches=mismatches)
+
+        # Step 9 ‚?" CAS encrypted_user_state.
+        if ctx.new_encrypted_user_state is not None:
+            state_observed, state_blob = ctx.new_encrypted_user_state
+            stmt = (
+                update(EncryptedUserState)
+                .where(
+                    EncryptedUserState.user_id == ctx.user_id,
+                    EncryptedUserState.state_version == state_observed,
+                )
+                .values(
+                    encrypted_blob=state_blob,
+                    state_version=state_observed + 1,
+                    key_generation=new_generation,
+                    updated_at=now,
+                )
+                .returning(EncryptedUserState.state_version)
+            )
+            result = await db.execute(stmt)
+            row = result.first()
+            if row is None:
+                current_row = await db.execute(
+                    select(EncryptedUserState.state_version).where(
+                        EncryptedUserState.user_id == ctx.user_id,
+                    ),
+                )
+                current_version = current_row.scalar_one_or_none() or 0
+                raise RotationUserStateChangedError(
+                    current_state_version=current_version,
+                )
+            user_state_result = UserStateResult(
+                new_state_version=int(row[0]),
+                new_key_generation=new_generation,
+            )
+
+    # Step 10 ‚?" user-row writes.
+    user.encrypted_master_key = ctx.new_encrypted_master_key
+    if ctx.reason in {"password_rewrap", "root_compromise_rotation"}:
+        assert ctx.new_auth_salt is not None
+        assert ctx.new_auth_key_proof is not None
+        user.auth_salt = ctx.new_auth_salt
+        user.auth_key_hash = _digest_proof(ctx.new_auth_key_proof)
+    if is_root:
+        user.key_generation = new_generation
+
+    # Step 11 ‚?" audit row.
+    audit = MasterKeyRotationAudit(
+        user_id=ctx.user_id,
+        reason=ctx.reason,
+        old_generation=old_generation,
+        new_generation=new_generation,
+        initiating_session_id=ctx.session_id,
+        initiating_device_id=ctx.initiating_device_id,
+        ip=ctx.ip,
+        user_agent=ctx.user_agent,
+        paired_count=len(ctx.pairings) if is_root else 0,
+        occurred_at=now,
+    )
+    db.add(audit)
+
+    # Step 12 ‚?" root_compromise: revoke ALL devices (the next request from
+    # any of them returns 401).
+    if ctx.reason == "root_compromise_rotation":
+        await db.execute(
+            update(Device)
+            .where(Device.user_id == ctx.user_id, Device.revoked_at.is_(None))
+            .values(revoked_at=now),
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The lock helper returns the fresh user row under the same session/transaction, and the router passes that exact generation into `upsert_state_cas()`. I don’t see a remaining mismatch between the echoed PUT generation and the stored `encrypted_user_state.key_generation`.
+codex
+1. Verdict on v3 fix: **GREEN**.
+
+2. Anything still missing: Nothing blocking. The PUT path now stamps `encrypted_user_state.key_generation` on insert and update from the locked `users.key_generation`, and the response echoes the same locked value.
+
+3. Anything new: Nothing new. Migration index change looks fine: `["user_id", sa.text("occurred_at DESC")]` preserves the DESC expression only where needed. I did not rerun tests due the review-only/no-mutation instruction.
+tokens used
+31,047
+1. Verdict on v3 fix: **GREEN**.
+
+2. Anything still missing: Nothing blocking. The PUT path now stamps `encrypted_user_state.key_generation` on insert and update from the locked `users.key_generation`, and the response echoes the same locked value.
+
+3. Anything new: Nothing new. Migration index change looks fine: `["user_id", sa.text("occurred_at DESC")]` preserves the DESC expression only where needed. I did not rerun tests due the review-only/no-mutation instruction.

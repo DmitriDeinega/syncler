@@ -1,0 +1,5 @@
+1. Verdict on v3 fix: **GREEN**.
+
+2. Anything still missing: Nothing blocking. The PUT path now stamps `encrypted_user_state.key_generation` on insert and update from the locked `users.key_generation`, and the response echoes the same locked value.
+
+3. Anything new: Nothing new. Migration index change looks fine: `["user_id", sa.text("occurred_at DESC")]` preserves the DESC expression only where needed. I did not rerun tests due the review-only/no-mutation instruction.

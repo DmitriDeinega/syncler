@@ -1,0 +1,7 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+(node:24668) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+1. **Verdict**: GREEN. Both fixes are implemented correctly. `complete_pairing` safely stamps the locked generation, and `revoke` successfully bypasses the AAD check via `require_observed=False`. 
+2. **Missing**: Nothing.
+3. **New**: Minor Alembic autogenerate mismatch. In `0010_master_key_rotation.py`, the index is defined as `[sa.text("user_id"), sa.text("occurred_at DESC")]`. `models.py` uses the simple column string `"user_id"`. Using `sa.text("user_id")` in Alembic defines an expression index, which may cause `alembic revision --autogenerate` to erroneously detect a diff on future migrations. Consider changing `sa.text("user_id")` to `"user_id"`.

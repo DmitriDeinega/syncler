@@ -1,0 +1,7 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+(node:24388) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+1. Verdict on the v3 fix: GREEN. The `key_generation` is now correctly piped from the `locked_user` into the `upsert_state_cas` function and stamped onto both the INSERT and UPDATE branches for `EncryptedUserState`. The alembic syntax nit was resolved properly.
+2. Missing: Nothing.
+3. New: Nothing. Clean build and tests. Ready for Phase 8c (Android UX).

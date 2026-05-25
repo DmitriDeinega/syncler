@@ -1,0 +1,18 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+1. Implementation matches spec: YELLOW
+- `lock_user_and_gate` unconditionally raises `400` for Phase 8 clients if `key_generation_observed` is `None`. If `POST /v1/pairing/{id}/revoke` passes `None` (since the field isn't required there), Phase 8 clients will be broken by a 400 Bad Request. Add a `require_observed=True` flag to the helper to safely bypass the null-check for `revoke`. 
+- Other than that, everything perfectly aligns with §10. The atomic CAS logic, duplicate ID detection order, and separate transaction for the failed-proof counter are exceptionally well done.
+
+2. Anything missing for V0.1 server-side scope:
+- None. All Phase 8b API surfaces, database constraints, rate-limiting rules, downgrade defense mechanisms, and cleanup tasks are fully implemented.
+
+3. Anything new (races, ordering bugs, secret leaks, schema drift, test holes):
+- **Failed-proof counter:** Fully thread-safe in Postgres. The `ON CONFLICT DO UPDATE` inside an independent `async_sessionmaker` session guarantees rate-limit persistence despite main-transaction rollbacks without leaking locks.
+- **Audit capture:** `old_generation` is cleanly captured before the user-row mutation. 
+- **Challenge consumption:** Step 3 happens safely inside the Step 2 user-row `with_for_update` lock, completely mitigating replay races.
+- **Device revocation:** `UPDATE devices SET revoked_at = NOW()` cleanly integrates with your existing session layer and correctly kills the caller's session.
+- **Secret leaks:** None. Exceptions return UUIDs and integers only; Audit log stores metadata only.
+- **Schema drift:** Schema constraints match the application models cleanly.
+
+Fix the `lock_user_and_gate` 400 trap for `revoke` and it's a solid GREEN to proceed to Phase 8c.
