@@ -49,7 +49,9 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.sqlite)
-    implementation(libs.androidx.webkit)
+    // Phase 10b step 6: in-process WebView gone. The sandbox
+    // module owns androidx.webkit now; :feature:plugin-host
+    // only routes through AIDL.
     implementation(libs.bouncycastle)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.core)

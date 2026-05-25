@@ -1,7 +1,5 @@
 package app.syncler.android.pluginhost
 
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
 import app.syncler.android.pluginhost.capabilities.CameraBridge
 import app.syncler.android.pluginhost.capabilities.FileBridge
 import app.syncler.android.pluginhost.capabilities.GalleryBridge
@@ -14,6 +12,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 
+/**
+ * Phase 10b step 6: in-process WebView path deleted. `PluginBridge`
+ * is no longer a `@JavascriptInterface` — it's a plain capability
+ * dispatcher. The sandbox subprocess's WebView holds the bridge,
+ * which routes bridge calls back to the host via AIDL; the host's
+ * `SandboxBridgeDispatcher` then invokes [call] on the appropriate
+ * `PluginBridge` instance keyed by `sandboxToken`. The result is
+ * delivered back to the JS via [BridgeDelivery] — which is a
+ * `SandboxBridgeDelivery` in production.
+ */
 class PluginBridge(
     private val plugin: PluginInstance,
     private val delivery: BridgeDelivery,
@@ -28,41 +36,6 @@ class PluginBridge(
     private val messageBridge: MessageBridge,
     private val auditLogger: AuditLogger,
 ) {
-    @Deprecated(
-        "Pre-Phase-10b WebView-direct delivery. Use the BridgeDelivery " +
-            "constructor + WebViewBridgeDelivery from PluginLoader.",
-        ReplaceWith("PluginBridge(plugin, WebViewBridgeDelivery(webViewProvider), ...)"),
-    )
-    @Suppress("DEPRECATION")
-    constructor(
-        plugin: PluginInstance,
-        webViewProvider: () -> WebView?,
-        scope: CoroutineScope,
-        networkBridge: NetworkBridge,
-        storageBridge: StorageBridge,
-        notificationBridge: NotificationBridge,
-        cameraBridge: CameraBridge,
-        galleryBridge: GalleryBridge,
-        fileBridge: FileBridge,
-        locationBridge: LocationBridge,
-        messageBridge: MessageBridge,
-        auditLogger: AuditLogger,
-    ) : this(
-        plugin = plugin,
-        delivery = WebViewBridgeDelivery(webViewProvider, auditLogger, plugin.manifest.id),
-        scope = scope,
-        networkBridge = networkBridge,
-        storageBridge = storageBridge,
-        notificationBridge = notificationBridge,
-        cameraBridge = cameraBridge,
-        galleryBridge = galleryBridge,
-        fileBridge = fileBridge,
-        locationBridge = locationBridge,
-        messageBridge = messageBridge,
-        auditLogger = auditLogger,
-    )
-
-    @JavascriptInterface
     fun call(method: String, argsJson: String, callbackId: String) {
         scope.launch {
             val resultJson = runCatching {
@@ -78,7 +51,7 @@ class PluginBridge(
                 auditLogger.denied(plugin.manifest.id, reason, method)
                 bridgeErrorJson(reason, error.message ?: reason)
             }
-            deliver(callbackId, resultJson)
+            delivery.deliver(callbackId, resultJson)
         }
     }
 
@@ -108,12 +81,7 @@ class PluginBridge(
         }
     }
 
-    private fun deliver(callbackId: String, resultJson: String) {
-        delivery.deliver(callbackId, resultJson)
-    }
-
     companion object {
-        const val NATIVE_BRIDGE_NAME = "__syncler_native__"
         const val CALL_TIMEOUT_MS = 30_000L
     }
 }

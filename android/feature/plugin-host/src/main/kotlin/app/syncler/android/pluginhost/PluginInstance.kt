@@ -1,26 +1,61 @@
 package app.syncler.android.pluginhost
 
-import android.webkit.WebView
+import app.syncler.android.pluginhost.sandbox.SandboxHandle
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import timber.log.Timber
 
+/**
+ * Phase 10b step 6: in-process WebView gone. A [PluginInstance]
+ * now refers to its loaded plugin only through a [SandboxHandle]
+ * — the actual JS runs in the `:plugin` subprocess and is
+ * addressed via [app.syncler.android.pluginhost.sandbox.SandboxRouter].
+ *
+ * Both [sandboxHandle] and [bridge] are nullable so unit tests can
+ * construct a bare instance for fields-only assertions
+ * ([PluginLoaderTest]) without standing up the full sandbox
+ * machinery. Production loaders always pass both.
+ */
 class PluginInstance(
     val manifest: PluginManifest,
     val grantedCapabilities: Set<String>,
     val bundleFilePath: String,
-    val webView: WebView? = null,
+    val sandboxHandle: SandboxHandle? = null,
     var bridge: PluginBridge? = null,
 ) {
+    /**
+     * Fire-and-forget hook dispatch. Matches the legacy in-process
+     * shape (callers don't `await`). Failures are swallowed +
+     * logged; the sandbox-side coordinator's per-token serial
+     * queue handles ordering / state-gating.
+     */
     fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
-        val script = "__syncler_internal_dispatch(" +
-            "${JsonEscaping.quote(hook)},[$payloadJson],${JsonEscaping.quote(callbackId)})"
-        val target = webView ?: return
-        target.post { target.evaluateJavascript(script, null) }
+        val handle = sandboxHandle ?: return
+        instanceScope.launch {
+            runCatching { handle.dispatchHook(hook, payloadJson, callbackId) }
+                .onFailure { Timber.tag(TAG).w(it, "dispatchHook threw (token=%d)", handle.sandboxToken) }
+        }
     }
 
+    /**
+     * Fire-and-forget unload. Sandbox confirms via
+     * `onPluginUnloaded`; the registry's lifecycle listener
+     * removes this instance once that arrives.
+     */
     fun destroy() {
-        runCatching {
-            webView?.removeJavascriptInterface(PluginBridge.NATIVE_BRIDGE_NAME)
-            webView?.stopLoading()
-            webView?.destroy()
+        val handle = sandboxHandle ?: return
+        instanceScope.launch {
+            runCatching { handle.unload() }
+                .onFailure { Timber.tag(TAG).w(it, "unload threw (token=%d)", handle.sandboxToken) }
         }
+    }
+
+    private val instanceScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    companion object {
+        private const val TAG = "PluginInstance"
     }
 }

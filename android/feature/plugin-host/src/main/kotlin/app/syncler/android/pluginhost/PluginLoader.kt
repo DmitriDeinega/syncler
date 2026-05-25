@@ -1,11 +1,8 @@
 package app.syncler.android.pluginhost
 
 import android.content.Context
-import android.webkit.WebSettings
-import android.webkit.WebView
 import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.MasterKey
-import androidx.webkit.WebViewFeature
 import app.syncler.android.pluginhost.capabilities.CameraBridge
 import app.syncler.android.pluginhost.capabilities.FileBridge
 import app.syncler.android.pluginhost.capabilities.GalleryBridge
@@ -14,7 +11,12 @@ import app.syncler.android.pluginhost.capabilities.MessageBridge
 import app.syncler.android.pluginhost.capabilities.NetworkBridge
 import app.syncler.android.pluginhost.capabilities.NotificationBridge
 import app.syncler.android.pluginhost.capabilities.StorageBridge
+import app.syncler.android.pluginhost.sandbox.PluginSandboxConnection
+import app.syncler.android.pluginhost.sandbox.SandboxBridgeDelivery
+import app.syncler.android.pluginhost.sandbox.SandboxBridgeDispatcher
+import app.syncler.android.pluginhost.sandbox.SandboxRouter
 import app.syncler.core.crypto.toHex
+import app.syncler.core.pluginaidl.PluginLoadParcel
 import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
@@ -116,29 +118,34 @@ class PluginLoader(
             .build()
 
         fun android(context: Context, scope: CoroutineScope): PluginLoader {
-            val auditLogger = AuditLogger(context)
+            val appContext = context.applicationContext
+            val auditLogger = AuditLogger(appContext)
             // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
             // — neither permits cleartext, so http:// URLs fail at the
             // connection layer even when requireHttps() lets them through
             // for debug builds. Mirror NetworkBridge / InboxRepository:
             // release stays HTTPS-only; debug allows LAN HTTP for dev boxes.
             val networkBridge = NetworkBridge(buildPluginHttpClient(), auditLogger)
+            val sandboxConnection = PluginSandboxConnection(appContext)
+            val bridgeDispatcher = SandboxBridgeDispatcher()
+            val sandboxRouter = SandboxRouter(sandboxConnection, bridgeDispatcher)
             return PluginLoader(
                 httpClient = buildPluginHttpClient(),
                 verifier = PluginSignatureVerifier(auditLogger),
-                permissionReader = PluginPermissionStore(context)::grantedCapabilities,
-                bundleStore = AndroidEncryptedBundleStore(context),
-                instanceFactory = AndroidPluginInstanceFactory(
-                    context = context,
+                permissionReader = PluginPermissionStore(appContext)::grantedCapabilities,
+                bundleStore = AndroidEncryptedBundleStore(appContext),
+                instanceFactory = SandboxedPluginInstanceFactory(
                     scope = scope,
                     auditLogger = auditLogger,
+                    sandboxRouter = sandboxRouter,
+                    bridgeDispatcher = bridgeDispatcher,
                     networkBridge = networkBridge,
-                    storageBridge = StorageBridge(context, auditLogger),
-                    notificationBridge = NotificationBridge(context),
+                    storageBridge = StorageBridge(appContext, auditLogger),
+                    notificationBridge = NotificationBridge(appContext),
                     cameraBridge = CameraBridge(),
                     galleryBridge = GalleryBridge(),
                     fileBridge = FileBridge(),
-                    locationBridge = LocationBridge(context),
+                    locationBridge = LocationBridge(appContext),
                     messageBridge = MessageBridge(auditLogger),
                 ),
                 auditLogger = auditLogger,
@@ -185,10 +192,19 @@ interface PluginInstanceFactory {
     ): PluginInstance
 }
 
-class AndroidPluginInstanceFactory(
-    private val context: Context,
+/**
+ * Phase 10b step 6 production factory: stages the bundle, mints a
+ * `sandboxToken`, registers the per-token [PluginBridge] +
+ * lifecycle listener with [SandboxBridgeDispatcher], then asks
+ * [SandboxRouter] to fire the AIDL `loadPlugin`. The returned
+ * [PluginInstance] holds the resulting [SandboxHandle] for
+ * dispatch / teardown — the actual JS lives in `:plugin`.
+ */
+class SandboxedPluginInstanceFactory(
     private val scope: CoroutineScope,
     private val auditLogger: AuditLogger,
+    private val sandboxRouter: SandboxRouter,
+    private val bridgeDispatcher: SandboxBridgeDispatcher,
     private val networkBridge: NetworkBridge,
     private val storageBridge: StorageBridge,
     private val notificationBridge: NotificationBridge,
@@ -198,17 +214,27 @@ class AndroidPluginInstanceFactory(
     private val locationBridge: LocationBridge,
     private val messageBridge: MessageBridge,
 ) : PluginInstanceFactory {
+
     override suspend fun create(
         manifest: PluginManifest,
         grantedCapabilities: Set<String>,
         bundleFilePath: String,
         bundleBytes: ByteArray,
-    ): PluginInstance = withContext(Dispatchers.Main) {
-        val webView = WebView(context.applicationContext)
-        val instance = PluginInstance(manifest, grantedCapabilities, bundleFilePath, webView)
+    ): PluginInstance {
+        val sandboxToken = sandboxRouter.allocateToken()
+        val instance = PluginInstance(
+            manifest = manifest,
+            grantedCapabilities = grantedCapabilities,
+            bundleFilePath = bundleFilePath,
+        )
+        val delivery = SandboxBridgeDelivery(
+            sandboxToken = sandboxToken,
+            routerProvider = { sandboxRouter },
+            scope = scope,
+        )
         val bridge = PluginBridge(
             plugin = instance,
-            webViewProvider = { webView },
+            delivery = delivery,
             scope = scope,
             networkBridge = networkBridge,
             storageBridge = storageBridge,
@@ -220,100 +246,74 @@ class AndroidPluginInstanceFactory(
             messageBridge = messageBridge,
             auditLogger = auditLogger,
         )
-        harden(webView.settings)
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
-            androidx.webkit.WebSettingsCompat.setSafeBrowsingEnabled(webView.settings, true)
+        bridgeDispatcher.registerBridge(sandboxToken, bridge)
+        bridgeDispatcher.registerLifecycleListener(
+            sandboxToken,
+            RegistryUnloadListener(manifest.id),
+        )
+
+        val bundleHashHex = MessageDigest.getInstance("SHA-256")
+            .digest(bundleBytes)
+            .toHex()
+        val parcel = PluginLoadParcel(
+            sandboxToken = sandboxToken,
+            pluginId = manifest.id,
+            pluginIdentifier = manifest.id,
+            version = manifest.version,
+            renderer = "script",
+            bundleFilePath = bundleFilePath,
+            bundleHashHex = bundleHashHex,
+            declaredCapabilities = manifest.declaredCapabilities,
+            declaredEndpoints = manifest.declaredEndpoints,
+            dismissBehavior = manifest.dismissBehavior.orEmpty(),
+            timeoutMillis = DEFAULT_TIMEOUT_MS,
+            diagnosticManifestJson = "",
+        )
+
+        val handle = try {
+            sandboxRouter.loadPlugin(parcel)
+        } catch (exc: Throwable) {
+            // Sandbox refused the load. Tear down the bridge
+            // registration so the next attempt with the same
+            // pluginId gets a clean slot.
+            bridgeDispatcher.unregisterBridge(sandboxToken)
+            throw exc
         }
-        webView.webViewClient = PluginWebViewClient(manifest.id, auditLogger) { pluginId ->
+        // Reflect the handle into the instance + bridge. Public
+        // dispatchHook / destroy on the instance now have a target.
+        return PluginInstance(
+            manifest = manifest,
+            grantedCapabilities = grantedCapabilities,
+            bundleFilePath = bundleFilePath,
+            sandboxHandle = handle,
+            bridge = bridge,
+        )
+    }
+
+    /**
+     * Lifecycle listener that removes the plugin from
+     * [PluginRegistry] when the sandbox reports crashed or
+     * unloaded. Without this the host registry would hold a
+     * dangling instance whose sandbox-side coordinator has
+     * already gone away.
+     */
+    private inner class RegistryUnloadListener(
+        private val pluginId: String,
+    ) : SandboxBridgeDispatcher.LifecycleListener {
+        override fun onPluginReady() = Unit
+        override fun onWebViewError(code: String, message: String) {
+            auditLogger.denied(pluginId, "webview_error_$code", message)
+        }
+        override fun onPluginCrashed(reason: String) {
+            auditLogger.denied(pluginId, "plugin_crashed", reason)
             PluginRegistry.unload(pluginId)
         }
-        webView.addJavascriptInterface(bridge, PluginBridge.NATIVE_BRIDGE_NAME)
-        val htmlShell = PluginHtmlShell.render(bundleBytes.toString(Charsets.UTF_8))
-        webView.loadDataWithBaseURL(PluginWebViewClient.INITIAL_URL, htmlShell, "text/html", "utf-8", null)
-        instance.bridge = bridge
-        instance
+        override fun onPluginUnloaded() {
+            PluginRegistry.unload(pluginId)
+        }
     }
 
-    private fun harden(settings: WebSettings) {
-        settings.javaScriptEnabled = true
-        settings.allowFileAccess = false
-        settings.allowFileAccessFromFileURLs = false
-        settings.allowUniversalAccessFromFileURLs = false
-        settings.allowContentAccess = false
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        settings.domStorageEnabled = false
-        settings.databaseEnabled = false
-    }
-}
-
-private object PluginHtmlShell {
-    fun render(bundleJs: String): String {
-        val escapedBundle = bundleJs.replace("</script", "<\\/script", ignoreCase = true)
-        return """
-            <!doctype html>
-            <html>
-            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-            <body>
-            <script>
-            (() => {
-              const callbacks = new Map();
-              let nextCallbackId = 1;
-              window.__syncler_internal_callback = (callbackId, result) => {
-                const callback = callbacks.get(callbackId);
-                if (!callback) return;
-                callbacks.delete(callbackId);
-                if (result && result.success) callback.resolve(result.value);
-                else callback.reject({ error: result?.error || "unknown_error", message: result?.message });
-              };
-              const nativeCall = (method, args) => new Promise((resolve, reject) => {
-                const callbackId = String(nextCallbackId++);
-                callbacks.set(callbackId, { resolve, reject });
-                window.__syncler_native__.call(method, JSON.stringify(args || {}), callbackId);
-              });
-              const asResponse = async (payload) => new Response(payload.body || "", {
-                status: payload.status || 200,
-                headers: payload.headers || {}
-              });
-              window.platform = {
-                __version__: "1.0.0",
-                showNotification: (opts) => nativeCall("platform.showNotification", opts),
-                storage: {
-                  get: (key, opts) => nativeCall("platform.storage.get", { key, opts }).then((r) => r.value ?? null),
-                  set: (key, value, opts) => nativeCall("platform.storage.set", { key, value, opts }),
-                  delete: (key, opts) => nativeCall("platform.storage.delete", { key, opts })
-                },
-                network: {
-                  fetch: (url, init) => nativeCall("platform.network.fetch", { url, init }).then(asResponse)
-                },
-                camera: { capture: (opts) => nativeCall("platform.camera.capture", opts) },
-                gallery: { pick: (opts) => nativeCall("platform.gallery.pick", opts) },
-                file: { pick: (opts) => nativeCall("platform.file.pick", opts) },
-                location: { current: (opts) => nativeCall("platform.location.current", opts) },
-                message: {
-                  respond: (actionId, payload) => nativeCall("platform.message.respond", { actionId, payload }),
-                  dismissBehavior: (behavior) => nativeCall("platform.message.dismissBehavior", { behavior })
-                }
-              };
-            })();
-            </script>
-            <script>$escapedBundle</script>
-            <script>
-            (() => {
-              const sdkDispatch = window.__syncler_internal_dispatch;
-              window.__syncler_internal_dispatch = (hook, args, callbackId) => {
-                const promise = sdkDispatch ? Promise.resolve(sdkDispatch(hook, args || [])) : Promise.reject(new Error("plugin dispatcher unavailable"));
-                if (callbackId) {
-                  promise.then(
-                    (value) => window.__syncler_internal_callback(callbackId, { success: true, value }),
-                    (error) => window.__syncler_internal_callback(callbackId, { success: false, error: "plugin_dispatch_failed", message: String(error && error.message || error) })
-                  );
-                }
-                return promise;
-              };
-            })();
-            </script>
-            </body>
-            </html>
-        """.trimIndent()
+    companion object {
+        private const val DEFAULT_TIMEOUT_MS: Long = 30_000L
     }
 }
