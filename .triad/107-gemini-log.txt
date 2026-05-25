@@ -1,0 +1,19 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+**Verdict: GREEN**
+
+**1. Items & Risk Evaluation:**
+*   **§10.10 Scoping:** Scoping the high-water mark per-user ID in `SecurePrefs` is the correct approach. It prevents cross-account downgrade false-positives on shared devices. The fact that it sits in encrypted storage rather than unencrypted is fine; it provides the necessary integrity, and the minor encryption overhead is negligible.
+*   **Session Caching:** Keeping the `authSalt` and `encryptedMasterKey` in memory is perfectly acceptable. The footprint is tiny, and skipping the pre-login round-trip on "Change password" is a significant UX optimization.
+*   **Local unwrap test:** Strongly agree with this approach. An attacker with read access to local memory/storage could already extract the wrapped MK and brute-force it offline without touching the server's rate limits. Failing locally for typos protects the user's UX and the server's rate-limiting bucket.
+*   **Regex `sub` extraction:** This is the only minor yellow flag. While perfectly safe against the current flat PyJWT output, regex parsing of JSON is inherently brittle if nested claims are ever introduced. It's acceptable for this phase given the unit test constraints, but consider replacing it with a lightweight, test-friendly JSON parser or strict string splitting in a future cleanup phase.
+*   **Copy-then-zero ordering:** Excellent catch on the byte array reference overlap. Having `rewrapHappyPathUpdatesSessionAndKeyGenerationStore` enforce this prevents future regressions.
+*   **Revoke-pairing:** Correctly follows the Phase 8b spec decision (no blob write, no generation observed required).
+
+**2. Missing for Phase 8c scope:**
+None. You have correctly scoped out §10.9 AAD-binding (deferred to 8d) and root rotation modes (deferred to 8e). The wire format, downgrade defenses, and `password_rewrap` flow satisfy the 8c objectives.
+
+**3. Anything new (races, leaks, footguns):**
+No new races or leaks identified. The zeroing of `currentKeys` and `newKeys` throughout the `rewrapPassword` flow looks structurally sound. The regex `sub` extraction is the only localized footgun, but it is acceptable to proceed with.
+
+Ready to ship Phase 8c.

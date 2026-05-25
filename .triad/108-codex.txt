@@ -1,0 +1,7 @@
+GREEN.
+
+1. Verdict on v2 fixes: **GREEN**. The §10.10 helper is wired through login, rotation response, `GET /v1/state`, initial `PUT /v1/state`, conflict re-pull, and retry `PUT`. The NUL-byte source issue is fixed; `rg` sees `SettingsViewModel.kt` as text and the zeroing calls are ASCII escapes.
+
+2. Anything still missing: no blocking gaps found. One test-coverage gap remains: `UserStateRepositoryPushTest` uses a no-op key-generation fake, so the new GET/PUT downgrade hard-fail paths are not directly asserted there. I would add focused tests eventually, but I would not hold Phase 8c on it given the implementation shape and green assemble.
+
+3. Anything new: no new correctness issues found. The deferred JWT `sub` parser nit remains acceptable under the stated flat-claim assumption.

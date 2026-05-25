@@ -1,0 +1,14 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+(node:16732) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+VERDICT: GREEN
+
+1. **Codex 107 fix #1 (§10.10 enforcement):** Correctly implemented. `verifyAndBump` ensures no silent downgrades, `KeyGenerationDowngradeError` clearly tracks the source, and it's comprehensively wired across `/login`, `state.get`, `state.put`, and `rotate-master-key` responses.
+2. **Codex 107 fix #2 (NUL bytes):** Correctly implemented. The raw NUL bytes in `SettingsViewModel.kt` are now properly escaped as `\u0000`.
+3. **Gemini 107 nit (regex `sub` extraction):** Deferral accepted; it's perfectly fine for the current flat claims and can be updated later if nesting is introduced.
+
+**Missing:** None.
+**New:** Nothing to report.
+
+Ready to commit Phase 8c and proceed.
