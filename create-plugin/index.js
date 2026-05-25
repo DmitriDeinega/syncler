@@ -26,11 +26,20 @@ const __dirname = path.dirname(__filename);
 
 // Matches the server + SDK regex (PluginManifest.id):
 const ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*)+$/;
-const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const UUID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 // Mirrors sdk-plugin/src/enums.ts Capability. `showNotification` isn't
 // a capability — it's an always-available platform method.
-const CAPABILITIES = ['network', 'storage', 'camera', 'gallery', 'file', 'location', 'background-exec'];
+const CAPABILITIES = [
+  'network',
+  'storage',
+  'camera',
+  'gallery',
+  'file',
+  'location',
+  'background-exec',
+];
 const RENDERERS = ['script', 'template'];
 const CARD_TYPES = ['event', 'live'];
 
@@ -56,13 +65,20 @@ async function ensureValidDirName(ask, positional) {
     return positional;
   }
   if (positional) {
-    err(`"${positional}" is not a valid project directory name — must start with a letter, then [a-z0-9_-] only`);
+    err(
+      `"${positional}" is not a valid project directory name — must start with a letter, then [a-z0-9_-] only`
+    );
   }
-  return await prompt(ask, 'Project directory name (lowercase, starts with letter)', {
-    validate: (v) => DIR_NAME_PATTERN.test(v)
-      ? null
-      : 'must start with a letter and contain only [a-z0-9_-]',
-  });
+  return await prompt(
+    ask,
+    'Project directory name (lowercase, starts with letter)',
+    {
+      validate: (v) =>
+        DIR_NAME_PATTERN.test(v)
+          ? null
+          : 'must start with a letter and contain only [a-z0-9_-]',
+    }
+  );
 }
 
 // Node's readline.question() callback only fires once when stdin is a
@@ -126,10 +142,15 @@ async function prompt(ask, question, { defaultValue, validate } = {}) {
 }
 
 async function promptMultiSelect(ask, question, options) {
-  process.stdout.write(`${question} (comma-separated; available: ${options.join(', ')}):\n`);
+  process.stdout.write(
+    `${question} (comma-separated; available: ${options.join(', ')}):\n`
+  );
   for (;;) {
     const answer = await ask('> ');
-    const tokens = answer.split(',').map((s) => s.trim()).filter(Boolean);
+    const tokens = answer
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
     const invalid = tokens.filter((t) => !options.includes(t));
     if (invalid.length > 0) {
       err(`unknown: ${invalid.join(', ')}`);
@@ -140,7 +161,10 @@ async function promptMultiSelect(ask, question, options) {
 }
 
 async function main() {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   const ask = makeAsker(rl);
   try {
     const dirName = await ensureValidDirName(ask, readPositionalName());
@@ -151,45 +175,86 @@ async function main() {
       process.exit(1);
     }
 
-    const id = await prompt(ask, 'Plugin id (reverse-DNS, e.g. com.example.weather)', {
-      validate: (v) => ID_PATTERN.test(v) ? null : 'must be reverse-DNS (e.g. com.example.weather)',
-    });
+    const id = await prompt(
+      ask,
+      'Plugin id (reverse-DNS, e.g. com.example.weather)',
+      {
+        validate: (v) =>
+          ID_PATTERN.test(v)
+            ? null
+            : 'must be reverse-DNS (e.g. com.example.weather)',
+      }
+    );
     const name = await prompt(ask, 'Display name', { defaultValue: dirName });
-    const senderId = await prompt(ask, 'Sender id (UUID from `client.register_if_needed()`)', {
-      validate: (v) => UUID_PATTERN.test(v) ? null : 'must be a UUID (lowercase, hyphenated)',
-    });
+    const senderId = await prompt(
+      ask,
+      'Sender id (UUID from `client.register_if_needed()`)',
+      {
+        validate: (v) =>
+          UUID_PATTERN.test(v)
+            ? null
+            : 'must be a UUID (lowercase, hyphenated)',
+      }
+    );
     const renderer = await prompt(ask, `Renderer (${RENDERERS.join('|')})`, {
       defaultValue: 'script',
-      validate: (v) => RENDERERS.includes(v) ? null : `must be one of ${RENDERERS.join(', ')}`,
+      validate: (v) =>
+        RENDERERS.includes(v) ? null : `must be one of ${RENDERERS.join(', ')}`,
     });
     const cardType = await prompt(ask, `Card type (${CARD_TYPES.join('|')})`, {
       defaultValue: 'event',
-      validate: (v) => CARD_TYPES.includes(v) ? null : `must be one of ${CARD_TYPES.join(', ')}`,
+      validate: (v) =>
+        CARD_TYPES.includes(v)
+          ? null
+          : `must be one of ${CARD_TYPES.join(', ')}`,
     });
-    const capabilities = await promptMultiSelect(ask, 'Capabilities', CAPABILITIES);
+    const capabilities = await promptMultiSelect(
+      ask,
+      'Capabilities',
+      CAPABILITIES
+    );
 
     let cardKeyPath = null;
     if (cardType === 'live') {
-      cardKeyPath = await prompt(ask, 'card_key_path (JSONPath into payload, e.g. $.order_id)', {
-        defaultValue: '$.id',
-        validate: (v) => v.startsWith('$') ? null : 'must start with $',
-      });
+      cardKeyPath = await prompt(
+        ask,
+        'card_key_path (JSONPath into payload, e.g. $.order_id)',
+        {
+          defaultValue: '$.id',
+          validate: (v) => (v.startsWith('$') ? null : 'must start with $'),
+        }
+      );
     }
 
     rl.close();
 
-    const ctx = { dirName, id, name, senderId, renderer, cardType, capabilities, cardKeyPath };
+    const ctx = {
+      dirName,
+      id,
+      name,
+      senderId,
+      renderer,
+      cardType,
+      capabilities,
+      cardKeyPath,
+    };
     writeScaffold(targetDir, ctx);
 
     console.log(`\nScaffolded ${dirName}/\n`);
     console.log('Next steps:');
     console.log(`  cd ${dirName}`);
-    console.log('  npm install               # installs esbuild + tsx + typescript');
-    console.log('  ./build.sh                # builds dist/plugin.bundle.js (prints the sign command)');
-    console.log('  # then sign + publish (see README.md and examples/trading-bot/).');
+    console.log(
+      '  npm install               # installs esbuild + tsx + typescript'
+    );
+    console.log(
+      '  ./build.sh                # builds dist/plugin.bundle.js (prints the sign command)'
+    );
+    console.log(
+      '  # then sign + publish (see README.md and examples/trading-bot/).'
+    );
     console.log('');
   } catch (e) {
-    err(String(e && e.message || e));
+    err(String((e && e.message) || e));
     process.exit(1);
   } finally {
     rl.close();
@@ -200,11 +265,25 @@ function writeScaffold(targetDir, ctx) {
   fs.mkdirSync(targetDir, { recursive: true });
   fs.mkdirSync(path.join(targetDir, 'src'), { recursive: true });
 
-  fs.writeFileSync(path.join(targetDir, 'manifest.json'), renderManifestJson(ctx) + '\n');
-  fs.writeFileSync(path.join(targetDir, 'src', 'plugin.ts'), renderPluginTs(ctx));
-  fs.writeFileSync(path.join(targetDir, 'build.sh'), renderBuildSh(), { mode: 0o755 });
-  fs.writeFileSync(path.join(targetDir, 'package.json'), renderPackageJson(ctx) + '\n');
-  fs.writeFileSync(path.join(targetDir, '.gitignore'), 'dist/\nmanifest.signed.json\nnode_modules/\n*.pem\n');
+  fs.writeFileSync(
+    path.join(targetDir, 'manifest.json'),
+    renderManifestJson(ctx) + '\n'
+  );
+  fs.writeFileSync(
+    path.join(targetDir, 'src', 'plugin.ts'),
+    renderPluginTs(ctx)
+  );
+  fs.writeFileSync(path.join(targetDir, 'build.sh'), renderBuildSh(), {
+    mode: 0o755,
+  });
+  fs.writeFileSync(
+    path.join(targetDir, 'package.json'),
+    renderPackageJson(ctx) + '\n'
+  );
+  fs.writeFileSync(
+    path.join(targetDir, '.gitignore'),
+    'dist/\nmanifest.signed.json\nnode_modules/\n*.pem\n'
+  );
   fs.writeFileSync(path.join(targetDir, 'README.md'), renderReadme(ctx));
 }
 
@@ -249,9 +328,15 @@ function renderPluginTs(ctx) {
   // backslash characters in name/id/senderId/cardKeyPath end up as
   // valid TS string literals.
   const jsonStr = (v) => JSON.stringify(v);
-  const rendererLine = ctx.renderer !== 'script' ? `    renderer: ${jsonStr(ctx.renderer)},\n` : '';
-  const cardTypeLine = ctx.cardType !== 'event' ? `    cardType: ${jsonStr(ctx.cardType)},\n` : '';
-  const cardKeyPathLine = ctx.cardKeyPath ? `    cardKeyPath: ${jsonStr(ctx.cardKeyPath)},\n` : '';
+  const rendererLine =
+    ctx.renderer !== 'script'
+      ? `    renderer: ${jsonStr(ctx.renderer)},\n`
+      : '';
+  const cardTypeLine =
+    ctx.cardType !== 'event' ? `    cardType: ${jsonStr(ctx.cardType)},\n` : '';
+  const cardKeyPathLine = ctx.cardKeyPath
+    ? `    cardKeyPath: ${jsonStr(ctx.cardKeyPath)},\n`
+    : '';
 
   if (ctx.renderer === 'template') {
     // Template renderer ships no UI JS; the host renders a native
@@ -341,14 +426,24 @@ function escapeHtml(value: string): string {
 `;
 }
 
-function manifestStaticLines(ctx, jsonStr, capArr, rendererLine, cardTypeLine, cardKeyPathLine, includeTemplate) {
-  const templateLine = includeTemplate ? `    template: {\n` +
-    `      layout: 'standard_card',\n` +
-    `      fields: {\n` +
-    `        title: { path: '$.title' },\n` +
-    `        body: { path: '$.body' },\n` +
-    `      },\n` +
-    `    },\n` : '';
+function manifestStaticLines(
+  ctx,
+  jsonStr,
+  capArr,
+  rendererLine,
+  cardTypeLine,
+  cardKeyPathLine,
+  includeTemplate
+) {
+  const templateLine = includeTemplate
+    ? `    template: {\n` +
+      `      layout: 'standard_card',\n` +
+      `      fields: {\n` +
+      `        title: { path: '$.title' },\n` +
+      `        body: { path: '$.body' },\n` +
+      `      },\n` +
+      `    },\n`
+    : '';
   return `{
     id: ${jsonStr(ctx.id)},
     name: ${jsonStr(ctx.name)},
@@ -418,20 +513,24 @@ function renderPackageJson(ctx) {
   // — it's not on npm yet). build.sh uses esbuild --alias to resolve
   // imports from the SDK source inside the syncler monorepo. Add the
   // dependency line once @syncler/plugin-sdk is published.
-  return JSON.stringify({
-    name: ctx.dirName,
-    version: '1.0.0',
-    private: true,
-    type: 'module',
-    scripts: {
-      build: './build.sh',
+  return JSON.stringify(
+    {
+      name: ctx.dirName,
+      version: '1.0.0',
+      private: true,
+      type: 'module',
+      scripts: {
+        build: './build.sh',
+      },
+      devDependencies: {
+        esbuild: '^0.25.0',
+        tsx: '^4.7.0',
+        typescript: '^5.4.0',
+      },
     },
-    devDependencies: {
-      esbuild: '^0.25.0',
-      tsx: '^4.7.0',
-      typescript: '^5.4.0',
-    },
-  }, null, 2);
+    null,
+    2
+  );
 }
 
 function renderReadme(ctx) {
@@ -465,9 +564,11 @@ npm install                                  # installs esbuild + tsx + typescri
 ## Edit checklist
 
 - [ ] Replace \`declaredEndpoints\` placeholders with your real backend URLs.
-${ctx.renderer === 'template'
+${
+  ctx.renderer === 'template'
     ? `- [ ] Edit \`manifest.template.fields\` to match your payload shape (the host renders a native Compose card from these JSONPaths; \`render()\` is unused).`
-    : `- [ ] Replace the \`render()\` body with your domain UI.`}
+    : `- [ ] Replace the \`render()\` body with your domain UI.`
+}
 - [ ] If \`cardType: 'live'\`, make sure \`card_key_path\` resolves to a stable identifier in your payload (see \`docs/integration-guide.md §5.2\`).
 - [ ] Wire up an action callback endpoint on your backend. \`docs/integration-guide.md §7\`.
 
@@ -480,7 +581,9 @@ ${ctx.renderer === 'template'
 }
 
 function pascalCase(s) {
-  return s.replace(/(^|[^a-zA-Z0-9])([a-z])/g, (_, _sep, ch) => ch.toUpperCase());
+  return s.replace(/(^|[^a-zA-Z0-9])([a-z])/g, (_, _sep, ch) =>
+    ch.toUpperCase()
+  );
 }
 
 main();

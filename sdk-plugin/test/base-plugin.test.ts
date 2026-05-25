@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BasePlugin, type DismissAction } from '../src/base-plugin';
-import { clearRegisteredPlugin, dispatchPluginHook, registerPlugin } from '../src/bridge';
+import {
+  clearRegisteredPlugin,
+  dispatchPluginHook,
+  registerPlugin,
+} from '../src/bridge';
 import { Capability, DismissBehavior } from '../src/enums';
 
 class DefaultsPlugin extends BasePlugin {
@@ -27,7 +31,10 @@ class OverridesPlugin extends BasePlugin {
   }
 
   async onDismiss(deviceId: string): Promise<DismissAction> {
-    return { behavior: DismissBehavior.DISMISS_LOCAL_ONLY, payload: { deviceId } };
+    return {
+      behavior: DismissBehavior.DISMISS_LOCAL_ONLY,
+      payload: { deviceId },
+    };
   }
 }
 
@@ -65,7 +72,10 @@ describe('BasePlugin', () => {
 
   it('subclass overrides are called', async () => {
     const plugin = new OverridesPlugin();
-    await expect(plugin.onMessage({ text: 'hello' })).resolves.toEqual({ title: 'Title', body: 'hello' });
+    await expect(plugin.onMessage({ text: 'hello' })).resolves.toEqual({
+      title: 'Title',
+      body: 'hello',
+    });
     await expect(plugin.onAction('open', { id: '1' })).resolves.toBeUndefined();
     await expect(plugin.onDismiss('device-1')).resolves.toEqual({
       behavior: DismissBehavior.DISMISS_LOCAL_ONLY,
@@ -76,9 +86,15 @@ describe('BasePlugin', () => {
   it('dispatcher routes to registered hooks', async () => {
     registerPlugin(new OverridesPlugin());
 
-    await expect(dispatchPluginHook('onMessage', [{ text: 'hello' }])).resolves.toEqual({ title: 'Title', body: 'hello' });
-    await expect(dispatchPluginHook('onAction', ['open', { id: '1' }])).resolves.toBeUndefined();
-    await expect(dispatchPluginHook('onDismiss', ['device-1'])).resolves.toEqual({
+    await expect(
+      dispatchPluginHook('onMessage', [{ text: 'hello' }])
+    ).resolves.toEqual({ title: 'Title', body: 'hello' });
+    await expect(
+      dispatchPluginHook('onAction', ['open', { id: '1' }])
+    ).resolves.toBeUndefined();
+    await expect(
+      dispatchPluginHook('onDismiss', ['device-1'])
+    ).resolves.toEqual({
       behavior: DismissBehavior.DISMISS_LOCAL_ONLY,
       payload: { deviceId: 'device-1' },
     });
@@ -88,8 +104,12 @@ describe('BasePlugin', () => {
     registerPlugin(new ThrowingPlugin());
 
     await expect(dispatchPluginHook('onMessage', [{}])).rejects.toThrow('boom');
-    await expect(dispatchPluginHook('onAction', ['open', {}])).rejects.toThrow('action boom');
-    await expect(dispatchPluginHook('onDismiss', ['device-1'])).rejects.toThrow('dismiss boom');
+    await expect(dispatchPluginHook('onAction', ['open', {}])).rejects.toThrow(
+      'action boom'
+    );
+    await expect(dispatchPluginHook('onDismiss', ['device-1'])).rejects.toThrow(
+      'dismiss boom'
+    );
   });
 
   it('registerPlugin accepts the unsigned placeholder hash/signature (Phase 5b)', () => {

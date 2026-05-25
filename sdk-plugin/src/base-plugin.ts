@@ -40,7 +40,9 @@ export abstract class BasePlugin {
   /**
    * Handles an inbound decrypted message. Defaults to no notification.
    */
-  async onMessage(_decryptedPayload: unknown): Promise<NotificationDescriptor | void> {
+  async onMessage(
+    _decryptedPayload: unknown
+  ): Promise<NotificationDescriptor | void> {
     return undefined;
   }
 

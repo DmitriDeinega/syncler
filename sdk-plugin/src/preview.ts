@@ -76,21 +76,29 @@ export function validateHostPreview(value: unknown): void {
 
   if (typeof record.title !== 'string' || record.title.trim().length === 0) {
     throw new HostPreviewValidationError(
-      'hostPreview.title is required and must be a non-empty string',
+      'hostPreview.title is required and must be a non-empty string'
     );
   }
   checkBytes('title', record.title, HOST_PREVIEW_LIMITS.titleMaxBytes);
 
   if ('subtitle' in record) {
     if (typeof record.subtitle !== 'string') {
-      throw new HostPreviewValidationError('hostPreview.subtitle must be a string');
+      throw new HostPreviewValidationError(
+        'hostPreview.subtitle must be a string'
+      );
     }
-    checkBytes('subtitle', record.subtitle, HOST_PREVIEW_LIMITS.subtitleMaxBytes);
+    checkBytes(
+      'subtitle',
+      record.subtitle,
+      HOST_PREVIEW_LIMITS.subtitleMaxBytes
+    );
   }
 
   if ('summary' in record) {
     if (typeof record.summary !== 'string') {
-      throw new HostPreviewValidationError('hostPreview.summary must be a string');
+      throw new HostPreviewValidationError(
+        'hostPreview.summary must be a string'
+      );
     }
     checkBytes('summary', record.summary, HOST_PREVIEW_LIMITS.summaryMaxBytes);
   }
@@ -99,28 +107,32 @@ export function validateHostPreview(value: unknown): void {
     const tokens = record.searchText;
     if (!Array.isArray(tokens)) {
       throw new HostPreviewValidationError(
-        'hostPreview.searchText must be an array of strings',
+        'hostPreview.searchText must be an array of strings'
       );
     }
     if (tokens.length > HOST_PREVIEW_LIMITS.searchTextMaxEntries) {
       throw new HostPreviewValidationError(
-        `hostPreview.searchText has ${tokens.length} entries; max is ${HOST_PREVIEW_LIMITS.searchTextMaxEntries}`,
+        `hostPreview.searchText has ${tokens.length} entries; max is ${HOST_PREVIEW_LIMITS.searchTextMaxEntries}`
       );
     }
     tokens.forEach((token, i) => {
       if (typeof token !== 'string') {
         throw new HostPreviewValidationError(
-          `hostPreview.searchText[${i}] must be a string`,
+          `hostPreview.searchText[${i}] must be a string`
         );
       }
-      checkBytes(`searchText[${i}]`, token, HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes);
+      checkBytes(
+        `searchText[${i}]`,
+        token,
+        HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes
+      );
     });
   }
 
   const serialized = textEncoder.encode(JSON.stringify(record));
   if (serialized.byteLength > HOST_PREVIEW_LIMITS.totalMaxBytes) {
     throw new HostPreviewValidationError(
-      `hostPreview serialized size ${serialized.byteLength} bytes exceeds ${HOST_PREVIEW_LIMITS.totalMaxBytes} byte cap`,
+      `hostPreview serialized size ${serialized.byteLength} bytes exceeds ${HOST_PREVIEW_LIMITS.totalMaxBytes} byte cap`
     );
   }
 }
@@ -131,7 +143,7 @@ function checkBytes(field: string, value: string, maxBytes: number): void {
   const size = textEncoder.encode(value).byteLength;
   if (size > maxBytes) {
     throw new HostPreviewValidationError(
-      `hostPreview.${field} is ${size} UTF-8 bytes; max is ${maxBytes}`,
+      `hostPreview.${field} is ${size} UTF-8 bytes; max is ${maxBytes}`
     );
   }
 }

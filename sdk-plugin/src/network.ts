@@ -24,14 +24,19 @@ export const network = {
    */
   async fetch(url: string, init?: RequestInit): Promise<Response> {
     assertEndpointDeclared(url);
-    return await callPlatform('network.fetch', (bridge) => bridge.network.fetch(url, init));
+    return await callPlatform('network.fetch', (bridge) =>
+      bridge.network.fetch(url, init)
+    );
   },
 };
 
 /**
  * Returns true when a URL matches at least one declared endpoint pattern.
  */
-export function isEndpointDeclared(url: string, patterns: readonly string[]): boolean {
+export function isEndpointDeclared(
+  url: string,
+  patterns: readonly string[]
+): boolean {
   return patterns.some((pattern) => endpointPatternToRegExp(pattern).test(url));
 }
 

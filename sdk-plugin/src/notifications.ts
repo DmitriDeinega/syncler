@@ -8,7 +8,9 @@ export const notifications = {
    * Shows a host notification.
    */
   show(opts: ShowNotificationOptions): Promise<void> {
-    return callPlatform('showNotification', (bridge) => bridge.showNotification(opts));
+    return callPlatform('showNotification', (bridge) =>
+      bridge.showNotification(opts)
+    );
   },
 };
 

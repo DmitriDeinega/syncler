@@ -13,5 +13,11 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "scripts": {
+    "format": "prettier --write \"./*.js\""
+  },
+  "devDependencies": {
+    "prettier": "^3.8.3"
   }
 }

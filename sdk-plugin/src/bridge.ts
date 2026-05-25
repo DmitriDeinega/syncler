@@ -49,7 +49,10 @@ export function clearRegisteredPlugin(): void {
 /**
  * Dispatches a host bridge hook into the registered plugin.
  */
-export async function dispatchPluginHook(hook: DispatchHook, args: unknown[]): Promise<unknown> {
+export async function dispatchPluginHook(
+  hook: DispatchHook,
+  args: unknown[]
+): Promise<unknown> {
   if (!registeredPlugin) {
     throw new Error('No Syncler plugin has been registered');
   }
@@ -58,7 +61,10 @@ export async function dispatchPluginHook(hook: DispatchHook, args: unknown[]): P
     case 'onMessage':
       return await registeredPlugin.onMessage(args[0]);
     case 'onAction':
-      return await registeredPlugin.onAction(asString(args[0], 'actionName'), args[1]);
+      return await registeredPlugin.onAction(
+        asString(args[0], 'actionName'),
+        args[1]
+      );
     case 'onDismiss':
       return await registeredPlugin.onDismiss(asString(args[0], 'deviceId'));
     case 'render':
@@ -72,7 +78,8 @@ export async function dispatchPluginHook(hook: DispatchHook, args: unknown[]): P
  * Installs `__syncler_internal_dispatch` on `window`/`globalThis` for the native host.
  */
 export function installBridgeDispatcher(): void {
-  const dispatch = (hook: DispatchHook, args: unknown[]): Promise<unknown> => dispatchPluginHook(hook, args);
+  const dispatch = (hook: DispatchHook, args: unknown[]): Promise<unknown> =>
+    dispatchPluginHook(hook, args);
   globalThis.__syncler_internal_dispatch = dispatch;
   if (globalThis.window) {
     globalThis.window.__syncler_internal_dispatch = dispatch;

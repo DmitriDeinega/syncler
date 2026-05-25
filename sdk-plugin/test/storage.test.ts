@@ -9,7 +9,9 @@ describe('storage wrapper', () => {
   });
 
   it('forwards scope on get', async () => {
-    const get = vi.fn<PlatformBridge['storage']['get']>().mockResolvedValue('value');
+    const get = vi
+      .fn<PlatformBridge['storage']['get']>()
+      .mockResolvedValue('value');
     globalThis.platform = createPlatform({ get });
 
     await expect(storage.get('key', { scope: 'user' })).resolves.toBe('value');
@@ -17,8 +19,12 @@ describe('storage wrapper', () => {
   });
 
   it('forwards scope on set and delete', async () => {
-    const set = vi.fn<PlatformBridge['storage']['set']>().mockResolvedValue(undefined);
-    const del = vi.fn<PlatformBridge['storage']['delete']>().mockResolvedValue(undefined);
+    const set = vi
+      .fn<PlatformBridge['storage']['set']>()
+      .mockResolvedValue(undefined);
+    const del = vi
+      .fn<PlatformBridge['storage']['delete']>()
+      .mockResolvedValue(undefined);
     globalThis.platform = createPlatform({ set, delete: del });
 
     await storage.set('key', 'value', { scope: 'device' });
@@ -29,7 +35,9 @@ describe('storage wrapper', () => {
   });
 });
 
-function createPlatform(storageOverrides: Partial<PlatformBridge['storage']>): PlatformBridge {
+function createPlatform(
+  storageOverrides: Partial<PlatformBridge['storage']>
+): PlatformBridge {
   return {
     showNotification: vi.fn(),
     storage: {

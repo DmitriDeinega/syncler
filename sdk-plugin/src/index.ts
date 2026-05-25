@@ -1,5 +1,8 @@
 import { network as networkApi } from './network';
-import { notifications as notificationsApi, showNotification as showNotificationApi } from './notifications';
+import {
+  notifications as notificationsApi,
+  showNotification as showNotificationApi,
+} from './notifications';
 import {
   callPlatform,
   callPlatformSync,
@@ -12,7 +15,11 @@ import {
 import { storage as storageApi } from './storage';
 import { DismissBehavior } from './enums';
 
-export { BasePlugin, type DismissAction, type NotificationDescriptor } from './base-plugin';
+export {
+  BasePlugin,
+  type DismissAction,
+  type NotificationDescriptor,
+} from './base-plugin';
 export {
   clearRegisteredPlugin,
   dispatchPluginHook,
@@ -31,7 +38,12 @@ export {
   type PluginManifest,
   type ValidatePluginManifestOptions,
 } from './manifest';
-export { EndpointNotDeclaredError, assertEndpointDeclared, isEndpointDeclared, network } from './network';
+export {
+  EndpointNotDeclaredError,
+  assertEndpointDeclared,
+  isEndpointDeclared,
+  network,
+} from './network';
 export { notifications, showNotification } from './notifications';
 export {
   PlatformError,
@@ -73,14 +85,18 @@ export const platform = {
   camera: {
     /** Captures an image through the host camera UI. */
     capture(opts?: CameraCaptureOptions) {
-      return callPlatform('camera.capture', (bridge) => bridge.camera.capture(opts));
+      return callPlatform('camera.capture', (bridge) =>
+        bridge.camera.capture(opts)
+      );
     },
   },
   /** Gallery APIs exposed by the host bridge. */
   gallery: {
     /** Picks one or more gallery items through the host UI. */
     pick(opts?: GalleryPickOptions) {
-      return callPlatform('gallery.pick', (bridge) => bridge.gallery.pick(opts));
+      return callPlatform('gallery.pick', (bridge) =>
+        bridge.gallery.pick(opts)
+      );
     },
   },
   /** File APIs exposed by the host bridge. */
@@ -94,18 +110,24 @@ export const platform = {
   location: {
     /** Reads the current location through the host bridge. */
     current(opts?: LocationCurrentOptions) {
-      return callPlatform('location.current', (bridge) => bridge.location.current(opts));
+      return callPlatform('location.current', (bridge) =>
+        bridge.location.current(opts)
+      );
     },
   },
   /** Message response APIs exposed by the host bridge. */
   message: {
     /** Sends an action response payload back through the host bridge. */
     respond(actionId: string, payload: unknown) {
-      return callPlatform('message.respond', (bridge) => bridge.message.respond(actionId, payload));
+      return callPlatform('message.respond', (bridge) =>
+        bridge.message.respond(actionId, payload)
+      );
     },
     /** Sets host dismiss behavior for the active message. */
     dismissBehavior(behavior: DismissBehavior) {
-      return callPlatformSync('message.dismissBehavior', (bridge) => bridge.message.dismissBehavior(behavior));
+      return callPlatformSync('message.dismissBehavior', (bridge) =>
+        bridge.message.dismissBehavior(behavior)
+      );
     },
   },
   /** Host bridge version. */

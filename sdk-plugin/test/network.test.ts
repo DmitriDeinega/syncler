@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BasePlugin } from '../src/base-plugin';
 import { registerPlugin, clearRegisteredPlugin } from '../src/bridge';
 import { Capability, DismissBehavior } from '../src/enums';
-import { EndpointNotDeclaredError, isEndpointDeclared, network } from '../src/network';
+import {
+  EndpointNotDeclaredError,
+  isEndpointDeclared,
+  network,
+} from '../src/network';
 import type { PlatformBridge } from '../src/platform';
 
 class NetworkPlugin extends BasePlugin {
@@ -15,7 +19,11 @@ class NetworkPlugin extends BasePlugin {
     bundleHash: 'a'.repeat(64),
     signature: 'b'.repeat(128),
     declaredCapabilities: [Capability.NETWORK],
-    declaredEndpoints: ['https://api.example.com/v1/item', 'https://api.example.com/v1/*', 'https://*.example.net/feed'],
+    declaredEndpoints: [
+      'https://api.example.com/v1/item',
+      'https://api.example.com/v1/*',
+      'https://*.example.net/feed',
+    ],
     dismissBehavior: DismissBehavior.DISMISS_LOCAL_ONLY,
     minPlatformVersion: '1.0.0',
   };
@@ -33,18 +41,42 @@ describe('network endpoint allowlist', () => {
   });
 
   it('matches exact endpoints', () => {
-    expect(isEndpointDeclared('https://api.example.com/v1/item', ['https://api.example.com/v1/item'])).toBe(true);
-    expect(isEndpointDeclared('https://api.example.com/v1/other', ['https://api.example.com/v1/item'])).toBe(false);
+    expect(
+      isEndpointDeclared('https://api.example.com/v1/item', [
+        'https://api.example.com/v1/item',
+      ])
+    ).toBe(true);
+    expect(
+      isEndpointDeclared('https://api.example.com/v1/other', [
+        'https://api.example.com/v1/item',
+      ])
+    ).toBe(false);
   });
 
   it('matches wildcard paths', () => {
-    expect(isEndpointDeclared('https://api.example.com/v1/users', ['https://api.example.com/v1/*'])).toBe(true);
-    expect(isEndpointDeclared('https://api.example.com/v1/users/1', ['https://api.example.com/v1/*'])).toBe(false);
+    expect(
+      isEndpointDeclared('https://api.example.com/v1/users', [
+        'https://api.example.com/v1/*',
+      ])
+    ).toBe(true);
+    expect(
+      isEndpointDeclared('https://api.example.com/v1/users/1', [
+        'https://api.example.com/v1/*',
+      ])
+    ).toBe(false);
   });
 
   it('matches wildcard host segments', () => {
-    expect(isEndpointDeclared('https://img.example.net/feed', ['https://*.example.net/feed'])).toBe(true);
-    expect(isEndpointDeclared('https://a.b.example.net/feed', ['https://*.example.net/feed'])).toBe(false);
+    expect(
+      isEndpointDeclared('https://img.example.net/feed', [
+        'https://*.example.net/feed',
+      ])
+    ).toBe(true);
+    expect(
+      isEndpointDeclared('https://a.b.example.net/feed', [
+        'https://*.example.net/feed',
+      ])
+    ).toBe(false);
   });
 
   it('throws before bridge fetch when endpoint is undeclared', async () => {
@@ -52,22 +84,33 @@ describe('network endpoint allowlist', () => {
     globalThis.platform = createPlatform(fetch);
     registerPlugin(new NetworkPlugin());
 
-    await expect(network.fetch('https://evil.example.com/')).rejects.toBeInstanceOf(EndpointNotDeclaredError);
+    await expect(
+      network.fetch('https://evil.example.com/')
+    ).rejects.toBeInstanceOf(EndpointNotDeclaredError);
     expect(fetch).not.toHaveBeenCalled();
   });
 
   it('calls bridge fetch for declared endpoints', async () => {
     const response = new Response('ok');
-    const fetch = vi.fn<PlatformBridge['network']['fetch']>().mockResolvedValue(response);
+    const fetch = vi
+      .fn<PlatformBridge['network']['fetch']>()
+      .mockResolvedValue(response);
     globalThis.platform = createPlatform(fetch);
     registerPlugin(new NetworkPlugin());
 
-    await expect(network.fetch('https://api.example.com/v1/users')).resolves.toBe(response);
-    expect(fetch).toHaveBeenCalledWith('https://api.example.com/v1/users', undefined);
+    await expect(
+      network.fetch('https://api.example.com/v1/users')
+    ).resolves.toBe(response);
+    expect(fetch).toHaveBeenCalledWith(
+      'https://api.example.com/v1/users',
+      undefined
+    );
   });
 });
 
-function createPlatform(fetch: PlatformBridge['network']['fetch']): PlatformBridge {
+function createPlatform(
+  fetch: PlatformBridge['network']['fetch']
+): PlatformBridge {
   return {
     showNotification: vi.fn(),
     storage: {

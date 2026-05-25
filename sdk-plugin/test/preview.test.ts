@@ -25,13 +25,21 @@ describe('validateHostPreview', () => {
 
   it('rejects non-object payloads', () => {
     expect(() => validateHostPreview('hi')).toThrow(HostPreviewValidationError);
-    expect(() => validateHostPreview(['hi'])).toThrow(HostPreviewValidationError);
+    expect(() => validateHostPreview(['hi'])).toThrow(
+      HostPreviewValidationError
+    );
   });
 
   it('requires title', () => {
-    expect(() => validateHostPreview({ subtitle: 'x' })).toThrow(/title is required/);
-    expect(() => validateHostPreview({ title: '' })).toThrow(/title is required/);
-    expect(() => validateHostPreview({ title: '   ' })).toThrow(/title is required/);
+    expect(() => validateHostPreview({ subtitle: 'x' })).toThrow(
+      /title is required/
+    );
+    expect(() => validateHostPreview({ title: '' })).toThrow(
+      /title is required/
+    );
+    expect(() => validateHostPreview({ title: '   ' })).toThrow(
+      /title is required/
+    );
   });
 
   it('enforces title byte cap', () => {
@@ -51,34 +59,42 @@ describe('validateHostPreview', () => {
       validateHostPreview({
         title: 'ok',
         subtitle: 'a'.repeat(HOST_PREVIEW_LIMITS.subtitleMaxBytes + 1),
-      }),
+      })
     ).toThrow(/subtitle/);
     expect(() =>
       validateHostPreview({
         title: 'ok',
         summary: 'a'.repeat(HOST_PREVIEW_LIMITS.summaryMaxBytes + 1),
-      }),
+      })
     ).toThrow(/summary/);
   });
 
   it('rejects searchText that is not an array', () => {
     expect(() =>
-      validateHostPreview({ title: 'ok', searchText: 'a comma, separated, list' }),
+      validateHostPreview({
+        title: 'ok',
+        searchText: 'a comma, separated, list',
+      })
     ).toThrow(/searchText must be an array/);
   });
 
   it('enforces searchText entry count', () => {
-    const tokens = Array.from({ length: HOST_PREVIEW_LIMITS.searchTextMaxEntries + 1 }, (_, i) => `t${i}`);
-    expect(() => validateHostPreview({ title: 'ok', searchText: tokens })).toThrow(
-      /searchText has/,
+    const tokens = Array.from(
+      { length: HOST_PREVIEW_LIMITS.searchTextMaxEntries + 1 },
+      (_, i) => `t${i}`
     );
+    expect(() =>
+      validateHostPreview({ title: 'ok', searchText: tokens })
+    ).toThrow(/searchText has/);
   });
 
   it('enforces searchText entry byte cap', () => {
-    const oneFatToken = 'a'.repeat(HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes + 1);
-    expect(() => validateHostPreview({ title: 'ok', searchText: [oneFatToken] })).toThrow(
-      /searchText\[0\]/,
+    const oneFatToken = 'a'.repeat(
+      HOST_PREVIEW_LIMITS.searchTextEntryMaxBytes + 1
     );
+    expect(() =>
+      validateHostPreview({ title: 'ok', searchText: [oneFatToken] })
+    ).toThrow(/searchText\[0\]/);
   });
 
   it('enforces total serialized size against bloat in unknown fields', () => {
