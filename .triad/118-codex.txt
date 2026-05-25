@@ -1,0 +1,11 @@
+Verdict: **YELLOW**
+
+Items:
+
+1. [SandboxRouter.kt:174](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:174) process-death cleanup is not fully idempotent. `values.toList()` followed by `clear()` is not atomic against already-queued `onPluginUnloaded` / `onPluginCrashed`. If a callback removes a token after the death snapshot but before/around the death loop, both paths can call `connection.release()` for the same load ref. Use remove-result gating per token in the death path too, e.g. snapshot keys/entries, then `if (handles.remove(token) != null) release + dispatch`.
+
+2. [SandboxRouter.kt:241](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:241) and [SandboxRouter.kt:246](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:246) still dispatch stale crash/unload lifecycle events even when `releaseHandle` would find no active handle. The release is idempotent, but the lifecycle signal is not generation-fenced. That means the load-fail teardown case can still emit `onPluginUnloaded` after the host catch has already cleaned up. If step 5’s dispatcher treats these as authoritative lifecycle events, this can cause bogus teardown/drain behavior. Prefer making `releaseHandle` return the removed handle/boolean and dispatch only when removal wins, except for an explicitly justified synthetic process-death path.
+
+Still missing before step 5: fix the two lifecycle idempotency gaps above, or document why stale crash/unload dispatch is intentionally part of the step-5 contract.
+
+Anything new: the `:app` dependency fix looks correct, and the load pre-registration plus catch cleanup is directionally right. I did not rerun builds/tests because this review was explicitly read-only/no mutation.

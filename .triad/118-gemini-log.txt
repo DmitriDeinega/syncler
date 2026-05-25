@@ -1,0 +1,24 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+Verdict on the fixups: **YELLOW**
+
+The implementation addresses the core findings from Triad 117 and significantly improves the robustness of the multi-process sandbox. However, one new critical leak was identified in the connection management.
+
+### Items:
+1.  **Ref-count leak in `PluginSandboxConnection.acquire()` (CRITICAL):** 
+    If the sandbox crashes during an in-flight bind, `deferred.await()` in `acquire()` will throw a `SandboxBindFailedException`. Because this happens after `refCount.incrementAndGet()`, and the caller (`loadPlugin`) won't call `release()` if `acquire()` fails, the reference count is leaked. A few such failures will permanently keep the ref count above zero, preventing the idle-unbind path from ever firing.
+2.  **Double-release race in `SandboxRouter.loadPlugin` (MINOR):** 
+    If `handleSandboxDeath` fires exactly while `loadPlugin` is in its `try` block, the handle will be cleared and released by the death handler. When `loadPlugin` subsequently catches the `RemoteException`, its `catch` block calls `connection.release()` again. While `PluginSandboxConnection` handles this via clamping to zero and a warning log, it's a minor logic race.
+3.  **Callback Ordering in `PluginHostCallbackStub`:** 
+    `onPluginCrashed` and `onPluginUnloaded` launch two separate coroutines (one for `bridgeDispatcher` and one inside `releaseHandle`). While unlikely to cause issues, combining them into a single `scope.launch` (as done in `handleSandboxDeath`) would guarantee that the dispatcher notification finishes before the connection is potentially unbound.
+
+### Still missing before step 5:
+-   Fix for the `acquire()` ref-count leak.
+-   Consider making `SandboxRouter.releaseHandle` a `suspend` function called directly within the stub's `scope.launch` to unify the dispatch/release flow.
+
+### New:
+-   The `acquire()` suspension point leak mentioned above.
+
+**Recommendation:** Fix the `acquire()` leak and the `loadPlugin` race (by using a guarded `releaseHandle` in the `catch` block) before proceeding to Step 5.
+
+**Reply text only. Do NOT call any write/mutation tool. Do not commit, edit, or stage anything.**

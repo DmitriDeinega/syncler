@@ -1,0 +1,1990 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e6098-3fe1-7951-8e00-6a1aa839f483
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 118 — Phase 10b steps 1-4 fixups (post-117)
+
+Triad 117 verdicts: both YELLOW with overlapping findings. All
+five fixes shipped at `f3d82dd`:
+
+## v2 deltas
+
+1. **`:app` dep on `:feature:plugin-sandbox`** (Codex 117 #1).
+   The APK now packages the sandbox module so
+   `PluginSandboxService` is reachable by name when
+   `PluginSandboxConnection.bindService()` fires.
+
+2. **Ref-count leak on sandbox process death** (Codex 117 #2 +
+   Gemini CRITICAL). `SandboxRouter.handleSandboxDeath()`
+   now does `connection.release()` per dead handle. Without
+   this, every `:plugin` crash leaked a ref count and the
+   idle-unbind path could never fire on a future
+   load → unload cycle.
+
+3. **Load/crash race** (Codex 117 #4 + Gemini 117 #2).
+   `SandboxRouter.loadPlugin` now pre-registers the
+   `SandboxHandle` BEFORE `sandbox.loadPlugin(parcel,
+   callback)`. The catch block removes the handle on
+   failure. Together with fix #4 below, mid-load
+   `onPluginCrashed` / `onPluginUnloaded` arrivals no longer
+   miss the token or double-release.
+
+4. **`releaseHandle` idempotency** (Codex 117 #3 + Gemini 117
+   #3). Only releases the connection ref when
+   `handles.remove(token)` returns non-null. A stray
+   `onPluginUnloaded` from the sandbox's sync load-fail
+   teardown (after the host catch block already cleaned up)
+   skips the spurious release.
+
+5. **Lifecycle callbacks generation-fenced** (Codex 117 #3).
+   `onWebViewError` + `onPluginReady` check
+   `handles.containsKey(token)` and drop+warn-log if stale.
+   `onPluginCrashed` + `onPluginUnloaded` route through
+   `releaseHandle` whose idempotency guard already covers
+   them.
+
+## Deferred (not blocking)
+
+- **Mutex contention on `PluginSandboxConnection.acquire`
+  fast path** (Gemini 117 #4). Lockless DCL with
+  `AtomicReference` would let steady-state acquires bypass
+  the mutex. Current behavior is correct, just
+  serializes-where-it-could-be-concurrent. Revisit if
+  profiler flags it.
+- **64 KB cap measured in `String.length` vs byte length**
+  (Gemini 117 #5). 64K characters is comfortably safe for
+  manifest JSON even with multi-byte content. Revisit if
+  real-world manifests trend multi-byte-heavy.
+
+## Files
+
+- `android/app/build.gradle.kts` (+ dep)
+- `android/feature/plugin-host/src/main/kotlin/.../sandbox/SandboxRouter.kt`
+  (loadPlugin pre-register + idempotent releaseHandle +
+   handleSandboxDeath release + lifecycle fences)
+
+## Test status
+
+`:app:assembleDebug` + `:feature:plugin-host:compileDebugKotlin`
+both succeed. Existing
+`:feature:plugin-sandbox:testDebugUnitTest` (4 tests) still
+passes.
+
+## Output
+
+Per reviewer, terse:
+
+1. Verdict on the fixups: GREEN / YELLOW / RED + items.
+2. Anything still missing before step 5.
+3. Anything new.
+
+If dual-GREEN, step 5 begins (real `PluginWebViewHostFactory`,
+e2e test, `PluginBridge` rewire).
+
+**Reply text only. Do NOT call any write/mutation tool. Do not
+commit, edit, or stage anything.**
+
+codex
+I’ll review this in read-only mode and inspect the target commit plus the affected files/tests. No writes, staging, or mutation commands.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --name-only --format=medium f3d82dd' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline --decorate --no-renames f3d82dd' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+ succeeded in 299ms:
+?? .triad/118-codex-log.txt
+?? .triad/118-phase10b-steps1-4-v2-prompt.md
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 306ms:
+f3d82dd phase 10b steps 1-4 fixups (triad 117 findings)
+ android/app/build.gradle.kts                       |  4 ++
+ .../android/pluginhost/sandbox/SandboxRouter.kt    | 83 ++++++++++++++++++----
+ 2 files changed, 72 insertions(+), 15 deletions(-)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 307ms:
+commit f3d82ddd85e0aed8591360ddf180a71a95e2f64b
+Author: Dima <ddeynega@gmail.com>
+Date:   Mon May 25 22:23:24 2026 +0300
+
+    phase 10b steps 1-4 fixups (triad 117 findings)
+    
+    Both reviewers YELLOW with overlapping findings. All four
+    load-bearing fixes plus the :app dep fix:
+    
+    1. :app dependency on :feature:plugin-sandbox (Codex 117 #1).
+       bindService targets PluginSandboxService by name; without
+       :app pulling in the sandbox module the service class is
+       not packaged into the APK and runtime bind fails. Fixed in
+       app/build.gradle.kts.
+    
+    2. Ref-count leak on sandbox process death (Codex #2 + Gemini
+       CRITICAL). SandboxRouter.handleSandboxDeath cleared handles
+       but never released the connection ref each handle had
+       acquired during loadPlugin. After a single :plugin crash
+       the ref count was permanently > 0 — idle-unbind could never
+       fire on a future load -> unload cycle. Fix: handleSandboxDeath
+       now does connection.release() per dead handle in addition
+       to the synthetic onPluginCrashed dispatch.
+    
+    3. Load/crash race (Codex #4 + Gemini #2). The host inserted
+       the handle into the map AFTER sandbox.loadPlugin() returned,
+       so a callback firing mid-load arrived at the stub with no
+       handle visible. Fix: pre-register the handle BEFORE the
+       AIDL call; on throw the catch block removes it before
+       releasing.
+    
+    4. releaseHandle now idempotent (Codex #3 + Gemini #3).
+       Only release the connection ref when handles.remove(token)
+       returns non-null. A stray onPluginUnloaded from a sync
+       load-fail teardown (when the host catch block already
+       cleaned up) no longer double-releases. The pre-registration
+       fix above + this idempotency guard together close the
+       double-release scenario.
+    
+    5. Lifecycle callbacks generation-fenced (Codex #3).
+       onWebViewError + onPluginReady now check
+       handles.containsKey(sandboxToken) and drop+warn-log if
+       the token is stale. onPluginCrashed and onPluginUnloaded
+       route through releaseHandle which is itself idempotent,
+       so they don't need a separate pre-fence.
+    
+    Build green: :feature:plugin-host:compileDebugKotlin +
+    :app:assembleDebug both succeed.
+    
+    Deferred to step 5 + later:
+    - Mutex contention on PluginSandboxConnection.acquire fast
+      path (Gemini #4). Lockless DCL pattern with
+      AtomicReference is a nice-to-have; current behavior is
+      correct, just not maximally concurrent on the steady-state
+      rebind.
+    - String length vs byte length on the 64 KB diagnostic cap
+      (Gemini #5). 64K *characters* is comfortably safe for
+      manifest JSON; revisit if real-world manifests trend
+      multi-byte-heavy.
+    
+    Step 5 begins next.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+android/app/build.gradle.kts
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+The commit touches only the two expected files. I’m going through the actual diff now, then I’ll cross-check the current surrounding code for races that the patch may not show in isolation.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff f3d82dd''^ f3d82dd -- android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff f3d82dd''^ f3d82dd -- android/app/build.gradle.kts' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt' in D:\Projects\syncler
+ succeeded in 318ms:
+diff --git a/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt b/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt
+index 8f436c2..5e2cf94 100644
+--- a/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt
++++ b/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt
+@@ -61,6 +61,18 @@ class SandboxRouter(
+      */
+     suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+         val sandbox = connection.acquire()
++        // Triad 117: pre-register the handle BEFORE the AIDL call so
++        // a synchronous-or-oneway callback firing mid-load doesn't
++        // arrive at the stub with no handle visible. On failure we
++        // remove the handle in the catch — `releaseHandle` is
++        // idempotent so a late `onPluginUnloaded` from the sandbox's
++        // synchronous load-fail teardown won't double-release.
++        val handle = SandboxHandle(
++            sandboxToken = parcel.sandboxToken,
++            pluginId = parcel.pluginId,
++            router = this,
++        )
++        handles[parcel.sandboxToken] = handle
+         try {
+             val callback = PluginHostCallbackStub(parcel.sandboxToken)
+             val returnedToken = sandbox.loadPlugin(parcel, callback)
+@@ -68,16 +80,14 @@ class SandboxRouter(
+                 "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
+                     "${parcel.sandboxToken} — fatal sandbox bug"
+             }
+-            val handle = SandboxHandle(
+-                sandboxToken = parcel.sandboxToken,
+-                pluginId = parcel.pluginId,
+-                router = this,
+-            )
+-            handles[parcel.sandboxToken] = handle
+             return handle
+         } catch (exc: Throwable) {
+-            // bindService succeeded but loadPlugin failed — release
+-            // the connection ref so we don't leak.
++            // bindService succeeded but loadPlugin failed — undo
++            // the pre-registration + release the connection ref.
++            // If the sandbox's load-fail teardown fires a oneway
++            // onPluginUnloaded after this, releaseHandle's
++            // remove-returns-null guard skips the spurious release.
++            handles.remove(parcel.sandboxToken)
+             connection.release()
+             throw exc
+         }
+@@ -127,20 +137,46 @@ class SandboxRouter(
+         }
+     }
+ 
++    /**
++     * Idempotent release. Triad 117 finding (Codex #3, Gemini #3):
++     * only release when the handle is actually present in the map.
++     * A stray `onPluginUnloaded` for an unknown token (e.g. from
++     * the sandbox's sync load-fail teardown after the host catch
++     * block already cleaned up) must not over-release the
++     * connection ref count.
++     */
+     private fun releaseHandle(sandboxToken: Int) {
+-        handles.remove(sandboxToken)
+-        scope.launch { connection.release() }
++        val removed = handles.remove(sandboxToken)
++        if (removed != null) {
++            scope.launch { connection.release() }
++        } else {
++            Timber.tag(TAG).w(
++                "releaseHandle for unknown token=%d — skipping release (idempotent guard)",
++                sandboxToken,
++            )
++        }
+     }
+ 
++    /**
++     * Sandbox process died — `ServiceConnection.onServiceDisconnected`
++     * fired. Triad 117 (Codex #2, Gemini CRITICAL): every active
++     * handle leaked an `acquire()` that will never be balanced by
++     * the (now-impossible) `onPluginUnloaded`. We MUST release each
++     * one explicitly here, otherwise the ref count stays > 0 forever
++     * and the idle-unbind path can never fire on a future
++     * load → unload cycle.
++     */
+     private fun handleSandboxDeath() {
+-        // Snapshot + clear, then notify each handle's bridge
+-        // dispatcher with a synthetic "plugin_crashed" so it can
+-        // drain pending-callback maps.
++        // Snapshot + clear under the same operation. Each removed
++        // handle gets a paired connection.release() + a synthetic
++        // onPluginCrashed so the bridge dispatcher's pending-call
++        // maps can drain.
+         val dead = handles.values.toList()
+         handles.clear()
+         dead.forEach { handle ->
+             scope.launch {
+                 bridgeDispatcher.onPluginCrashed(handle.sandboxToken, "process_died")
++                connection.release()
+             }
+         }
+     }
+@@ -175,17 +211,34 @@ class SandboxRouter(
+         }
+ 
+         override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
++            if (!handles.containsKey(sandboxToken)) {
++                Timber.tag(TAG).w(
++                    "onWebViewError for stale token=%d — dropping",
++                    sandboxToken,
++                )
++                return
++            }
+             scope.launch { bridgeDispatcher.onWebViewError(sandboxToken, code, message) }
+         }
+ 
+         override fun onPluginReady(sandboxToken: Int) {
++            if (!handles.containsKey(sandboxToken)) {
++                Timber.tag(TAG).w(
++                    "onPluginReady for stale token=%d — dropping",
++                    sandboxToken,
++                )
++                return
++            }
+             scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
+         }
+ 
+         override fun onPluginCrashed(sandboxToken: Int, reason: String) {
++            // releaseHandle is idempotent — even if a stale crash
++            // fires after a successful unload, we won't double-
++            // release. Lifecycle dispatch still happens so callers
++            // get a "plugin gone" signal even for stale tokens
++            // (defensive — they may have stashed the token).
+             scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+-            // Drop the handle proactively — onPluginCrashed implies
+-            // the sandbox isn't going to fire onPluginUnloaded.
+             releaseHandle(sandboxToken)
+         }
+ 
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 322ms:
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index f3cf130..7167118 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -69,6 +69,10 @@ dependencies {
+     implementation(project(":feature:inbox"))
+     implementation(project(":feature:pairing"))
+     implementation(project(":feature:plugin-host"))
++    // Phase 10b (Codex 117 #1): the :app APK must package the
++    // sandbox module so PluginSandboxService is reachable by name
++    // when PluginSandboxConnection.bindService() fires.
++    implementation(project(":feature:plugin-sandbox"))
+     implementation(project(":feature:settings"))
+ 
+     implementation(platform(libs.androidx.compose.bom))
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 351ms:
+package app.syncler.android.pluginhost.sandbox
+
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Host-side counterpart to the sandbox's `PluginTokenCoordinator`.
+ *
+ * - Allocates `sandboxToken` (process-local monotonic int).
+ * - Receives `IPluginHostCallback` calls from the sandbox and
+ *   routes them to the appropriate per-token handler.
+ * - Owns the host-side pending-callback map for bridge calls so
+ *   capability results land back at the right `callbackId`.
+ * - Provides the high-level entry points
+ *   [loadPlugin] / [unload] / [dispatchHook] /
+ *   [deliverBridgeResult] that the rest of the host calls ‚?" they
+ *   round-trip through [PluginSandboxConnection] to the sandbox
+ *   AIDL.
+ *
+ * Step 4 ships scaffolding only ‚?" step 5 wires it into
+ * `PluginBridge` and the e2e test. The class is thread-safe via
+ * [tokenMutex] + atomic counters; AIDL callbacks land on Binder
+ * threads and dispatch to `bridgeDispatcher` on its own coroutine
+ * scope so the Binder thread doesn't block on capability work.
+ */
+class SandboxRouter(
+    private val connection: PluginSandboxConnection,
+    private val bridgeDispatcher: BridgeDispatcher,
+    private val scope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) {
+
+    private val nextToken = AtomicInteger(1)
+    private val handles = java.util.concurrent.ConcurrentHashMap<Int, SandboxHandle>()
+
+    init {
+        connection.onSandboxDeath = ::handleSandboxDeath
+    }
+
+    /**
+     * Allocate a fresh `sandboxToken`. Use this BEFORE staging the
+     * bundle so the staged path can include it. The token isn't
+     * registered with [PluginSandboxConnection] until [loadPlugin]
+     * succeeds ‚?" caller can throw away the value without leaking
+     * state.
+     */
+    fun allocateToken(): Int = nextToken.getAndIncrement()
+
+    /**
+     * Bind the sandbox (if not bound), invoke `loadPlugin`, and
+     * return a [SandboxHandle] the caller uses for hook dispatch
+     * and unload. Suspends until the sandbox acknowledges
+     * load ‚?" on failure the AIDL `IllegalStateException` (with a
+     * structured failure code) propagates.
+     */
+    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+        val sandbox = connection.acquire()
+        // Triad 117: pre-register the handle BEFORE the AIDL call so
+        // a synchronous-or-oneway callback firing mid-load doesn't
+        // arrive at the stub with no handle visible. On failure we
+        // remove the handle in the catch ‚?" `releaseHandle` is
+        // idempotent so a late `onPluginUnloaded` from the sandbox's
+        // synchronous load-fail teardown won't double-release.
+        val handle = SandboxHandle(
+            sandboxToken = parcel.sandboxToken,
+            pluginId = parcel.pluginId,
+            router = this,
+        )
+        handles[parcel.sandboxToken] = handle
+        try {
+            val callback = PluginHostCallbackStub(parcel.sandboxToken)
+            val returnedToken = sandbox.loadPlugin(parcel, callback)
+            check(returnedToken == parcel.sandboxToken) {
+                "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
+                    "${parcel.sandboxToken} ‚?" fatal sandbox bug"
+            }
+            return handle
+        } catch (exc: Throwable) {
+            // bindService succeeded but loadPlugin failed ‚?" undo
+            // the pre-registration + release the connection ref.
+            // If the sandbox's load-fail teardown fires a oneway
+            // onPluginUnloaded after this, releaseHandle's
+            // remove-returns-null guard skips the spurious release.
+            handles.remove(parcel.sandboxToken)
+            connection.release()
+            throw exc
+        }
+    }
+
+    /**
+     * Begin unload. Sandbox fires `onPluginUnloaded` when the
+     * teardown completes; the host then releases the connection
+     * ref via [releaseHandle].
+     */
+    suspend fun unload(handle: SandboxHandle) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.unloadPlugin(handle.sandboxToken)
+        } finally {
+            // We just paid an extra acquire to do the call; release
+            // it. The release that pairs with loadPlugin's acquire
+            // fires when onPluginUnloaded comes back.
+            connection.release()
+        }
+    }
+
+    suspend fun dispatchHook(
+        handle: SandboxHandle,
+        hook: String,
+        payloadJson: String,
+        callbackId: String,
+    ) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+        } finally {
+            connection.release()
+        }
+    }
+
+    suspend fun deliverBridgeResult(
+        sandboxToken: Int,
+        callbackId: String,
+        resultJson: String,
+    ) {
+        val sandbox = connection.acquire()
+        try {
+            sandbox.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+        } finally {
+            connection.release()
+        }
+    }
+
+    /**
+     * Idempotent release. Triad 117 finding (Codex #3, Gemini #3):
+     * only release when the handle is actually present in the map.
+     * A stray `onPluginUnloaded` for an unknown token (e.g. from
+     * the sandbox's sync load-fail teardown after the host catch
+     * block already cleaned up) must not over-release the
+     * connection ref count.
+     */
+    private fun releaseHandle(sandboxToken: Int) {
+        val removed = handles.remove(sandboxToken)
+        if (removed != null) {
+            scope.launch { connection.release() }
+        } else {
+            Timber.tag(TAG).w(
+                "releaseHandle for unknown token=%d ‚?" skipping release (idempotent guard)",
+                sandboxToken,
+            )
+        }
+    }
+
+    /**
+     * Sandbox process died ‚?" `ServiceConnection.onServiceDisconnected`
+     * fired. Triad 117 (Codex #2, Gemini CRITICAL): every active
+     * handle leaked an `acquire()` that will never be balanced by
+     * the (now-impossible) `onPluginUnloaded`. We MUST release each
+     * one explicitly here, otherwise the ref count stays > 0 forever
+     * and the idle-unbind path can never fire on a future
+     * load ‚+' unload cycle.
+     */
+    private fun handleSandboxDeath() {
+        // Snapshot + clear under the same operation. Each removed
+        // handle gets a paired connection.release() + a synthetic
+        // onPluginCrashed so the bridge dispatcher's pending-call
+        // maps can drain.
+        val dead = handles.values.toList()
+        handles.clear()
+        dead.forEach { handle ->
+            scope.launch {
+                bridgeDispatcher.onPluginCrashed(handle.sandboxToken, "process_died")
+                connection.release()
+            }
+        }
+    }
+
+    /**
+     * AIDL stub the sandbox calls into. Routes every event to
+     * [bridgeDispatcher] or to the per-handle bookkeeping.
+     */
+    private inner class PluginHostCallbackStub(
+        private val expectedToken: Int,
+    ) : IPluginHostCallback.Stub() {
+
+        override fun bridgeCall(
+            sandboxToken: Int,
+            method: String,
+            argsJson: String,
+            callbackId: String,
+        ) {
+            // Generation-fence ‚?" drop calls whose token doesn't
+            // match an active handle (e.g. stale callbacks from a
+            // sandboxed plugin that we've already unloaded).
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "bridgeCall for stale token=%d (expected=%d) ‚?" dropping",
+                    sandboxToken, expectedToken,
+                )
+                return
+            }
+            scope.launch {
+                bridgeDispatcher.bridgeCall(sandboxToken, method, argsJson, callbackId)
+            }
+        }
+
+        override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onWebViewError for stale token=%d ‚?" dropping",
+                    sandboxToken,
+                )
+                return
+            }
+            scope.launch { bridgeDispatcher.onWebViewError(sandboxToken, code, message) }
+        }
+
+        override fun onPluginReady(sandboxToken: Int) {
+            if (!handles.containsKey(sandboxToken)) {
+                Timber.tag(TAG).w(
+                    "onPluginReady for stale token=%d ‚?" dropping",
+                    sandboxToken,
+                )
+                return
+            }
+            scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
+        }
+
+        override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+            // releaseHandle is idempotent ‚?" even if a stale crash
+            // fires after a successful unload, we won't double-
+            // release. Lifecycle dispatch still happens so callers
+            // get a "plugin gone" signal even for stale tokens
+            // (defensive ‚?" they may have stashed the token).
+            scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+            releaseHandle(sandboxToken)
+        }
+
+        override fun onPluginUnloaded(sandboxToken: Int) {
+            scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
+            releaseHandle(sandboxToken)
+        }
+    }
+
+    companion object {
+        private const val TAG = "SandboxRouter"
+    }
+}
+
+/**
+ * Handle the host uses to address a loaded plugin in the sandbox.
+ * Opaque from outside the router; the bridge holds one per active
+ * plugin instance.
+ */
+class SandboxHandle internal constructor(
+    val sandboxToken: Int,
+    val pluginId: String,
+    private val router: SandboxRouter,
+) {
+    suspend fun unload() = router.unload(this)
+    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        router.dispatchHook(this, hook, payloadJson, callbackId)
+    }
+    suspend fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        router.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+    }
+}
+
+/**
+ * The dispatcher contract the [SandboxRouter] uses to surface
+ * sandbox events into host code. Step 5 will provide a real
+ * implementation that adapts to the existing `PluginBridge`
+ * capability dispatch + the `PluginInstance` lifecycle hooks.
+ */
+interface BridgeDispatcher {
+    suspend fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String)
+    suspend fun onWebViewError(sandboxToken: Int, code: String, message: String)
+    suspend fun onPluginReady(sandboxToken: Int)
+    suspend fun onPluginCrashed(sandboxToken: Int, reason: String)
+    suspend fun onPluginUnloaded(sandboxToken: Int)
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/PluginSandboxConnection.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg "class PluginSandboxConnection|fun release|onSandboxDeath|refCount|acquire" android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost -n' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg "SandboxRouter|SandboxHandle|BridgeDispatcher|PluginHostCallbackStub" android -n' in D:\Projects\syncler
+ succeeded in 302ms:
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:32:class SandboxRouter(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:34:    private val bridgeDispatcher: BridgeDispatcher,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:40:    private val handles = java.util.concurrent.ConcurrentHashMap<Int, SandboxHandle>()
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:57:     * return a [SandboxHandle] the caller uses for hook dispatch
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:62:    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:70:        val handle = SandboxHandle(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:77:            val callback = PluginHostCallbackStub(parcel.sandboxToken)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:101:    suspend fun unload(handle: SandboxHandle) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:114:        handle: SandboxHandle,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:188:    private inner class PluginHostCallbackStub(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:252:        private const val TAG = "SandboxRouter"
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:261:class SandboxHandle internal constructor(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:264:    private val router: SandboxRouter,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:276: * The dispatcher contract the [SandboxRouter] uses to surface
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:281:interface BridgeDispatcher {
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 308ms:
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:43:        connection.onSandboxDeath = ::handleSandboxDeath
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:63:        val sandbox = connection.acquire()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:102:        val sandbox = connection.acquire()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:106:            // We just paid an extra acquire to do the call; release
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:107:            // it. The release that pairs with loadPlugin's acquire
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:119:        val sandbox = connection.acquire()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:132:        val sandbox = connection.acquire()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:148:    private fun releaseHandle(sandboxToken: Int) {
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\SandboxRouter.kt:163:     * handle leaked an `acquire()` that will never be balanced by
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:28: *   reap `:plugin` if no plugins are loaded. A subsequent acquire
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:31: *   [onSandboxDeath] so [PluginRegistry] can notify every active
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:35: * `acquire()`/`release()` from multiple plugin loads can't
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:48:class PluginSandboxConnection(
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:52:    private val refCount = AtomicInteger(0)
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:62:    var onSandboxDeath: () -> Unit = {}
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:72:     * responsible for matching every successful [acquire] with a
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:79:    suspend fun acquire(): IPluginSandbox = mutex.withLock {
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:80:        val now = refCount.incrementAndGet()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:91:            return@withLock inflight.await().also { refCount.set(now) }
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:104:            refCount.decrementAndGet()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:116:     * subsequent [acquire] within the window cancels the unbind via
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:119:    suspend fun release() = mutex.withLock {
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:120:        val now = refCount.decrementAndGet()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:122:            Timber.tag(TAG).w("release() pushed refCount below zero — caller bug; clamping")
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:123:            refCount.set(0)
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:131:    fun activeReferenceCount(): Int = refCount.get()
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:137:            if (refCount.get() <= 0 && sandbox != null) {
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:162:            Timber.tag(TAG).i("sandbox connected (token count=%d)", refCount.get())
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:166:            Timber.tag(TAG).w("sandbox disconnected — firing onSandboxDeath")
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:172:            runCatching { onSandboxDeath() }
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost\sandbox\PluginSandboxConnection.kt:173:                .onFailure { Timber.tag(TAG).w(it, "onSandboxDeath callback threw") }
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 346ms:
+package app.syncler.android.pluginhost.sandbox
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import app.syncler.core.pluginaidl.IPluginSandbox
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import timber.log.Timber
+
+/**
+ * Phase 10b step 3 ‚?" single source of truth for the host's binding
+ * to `PluginSandboxService` in the `:plugin` subprocess.
+ *
+ * Responsibilities:
+ *
+ * - Bind the sandbox service on first load via
+ *   `bindService(intent, this, BIND_AUTO_CREATE)`.
+ * - Hold the `IPluginSandbox` reference for callers.
+ * - Track an active-plugin reference count. When it goes 0‚+'1, bind;
+ *   when it drops 1‚+'0, schedule a 30 s `unbindService` so the OS can
+ *   reap `:plugin` if no plugins are loaded. A subsequent acquire
+ *   inside the window cancels the unbind.
+ * - On `onServiceDisconnected` (sandbox crash) fire
+ *   [onSandboxDeath] so [PluginRegistry] can notify every active
+ *   token's `onPluginCrashed` handler.
+ *
+ * The bind/unbind dance is mutex-serialized so concurrent
+ * `acquire()`/`release()` from multiple plugin loads can't
+ * interleave a stray unbind between a 0‚+'1 and the next operation.
+ *
+ * See `docs/plugin-host-multi-process.md` "Lifecycle / Connection
+ * teardown".
+ */
+/**
+ * Construct exactly one of these per `Application`. Hilt-style
+ * `@Singleton` / `@Inject` aren't wired in this module yet
+ * (Phase 0/1 plugin-host wiring predates Hilt here), so the host
+ * `Application` (or the app-level DI graph that depends on this
+ * module) is responsible for instance-singleton enforcement.
+ */
+class PluginSandboxConnection(
+    private val appContext: Context,
+) {
+    private val mutex = Mutex()
+    private val refCount = AtomicInteger(0)
+    private var sandbox: IPluginSandbox? = null
+
+    /**
+     * Set externally by [PluginRegistry] (or whoever owns
+     * lifecycle); fired on `ServiceConnection.onServiceDisconnected`
+     * so the registry can mark every active token as `process_dead`
+     * and fire `onPluginCrashed("process_died")`.
+     */
+    @Volatile
+    var onSandboxDeath: () -> Unit = {}
+
+    private val idleUnbindHandler = Handler(Looper.getMainLooper())
+    private var idleUnbindRunnable: Runnable? = null
+
+    private var connectInflight: CompletableDeferred<IPluginSandbox>? = null
+
+    /**
+     * Acquire a reference to the bound sandbox. Binds if necessary
+     * and suspends until [onServiceConnected] fires. The caller is
+     * responsible for matching every successful [acquire] with a
+     * later [release] when the plugin is unloaded.
+     *
+     * Throws [SandboxBindFailedException] if `bindService` returns
+     * false (manifest misconfig, missing package, etc.) ‚?" that's a
+     * programmer error, not a runtime condition.
+     */
+    suspend fun acquire(): IPluginSandbox = mutex.withLock {
+        val now = refCount.incrementAndGet()
+        // Cancel any pending idle unbind ‚?" we have a live caller again.
+        cancelIdleUnbind()
+        val existing = sandbox
+        if (existing != null) {
+            return@withLock existing
+        }
+        // Need to bind. If a previous coroutine is already binding,
+        // wait on the in-flight deferred.
+        val inflight = connectInflight
+        if (inflight != null) {
+            return@withLock inflight.await().also { refCount.set(now) }
+        }
+        val deferred = CompletableDeferred<IPluginSandbox>()
+        connectInflight = deferred
+        val intent = Intent().apply {
+            setClassName(
+                appContext.packageName,
+                "app.syncler.feature.pluginsandbox.PluginSandboxService",
+            )
+        }
+        val ok = appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        if (!ok) {
+            connectInflight = null
+            refCount.decrementAndGet()
+            appContext.unbindService(serviceConnection)
+            throw SandboxBindFailedException(
+                "bindService returned false ‚?" :plugin process / manifest misconfigured",
+            )
+        }
+        deferred.await()
+    }
+
+    /**
+     * Release one reference. When the count hits zero schedules an
+     * idle-unbind on the main thread 30 s in the future. A
+     * subsequent [acquire] within the window cancels the unbind via
+     * [cancelIdleUnbind].
+     */
+    suspend fun release() = mutex.withLock {
+        val now = refCount.decrementAndGet()
+        if (now < 0) {
+            Timber.tag(TAG).w("release() pushed refCount below zero ‚?" caller bug; clamping")
+            refCount.set(0)
+        }
+        if (now <= 0) {
+            scheduleIdleUnbind()
+        }
+    }
+
+    /** Snapshot the current ref count. Diagnostic. */
+    fun activeReferenceCount(): Int = refCount.get()
+
+    private fun scheduleIdleUnbind() {
+        cancelIdleUnbind()
+        val runnable = Runnable {
+            // Re-check on the main thread.
+            if (refCount.get() <= 0 && sandbox != null) {
+                Timber.tag(TAG).i("idle window elapsed ‚?" unbinding :plugin")
+                runCatching { appContext.unbindService(serviceConnection) }
+                    .onFailure { Timber.tag(TAG).w(it, "unbindService failed (already unbound?)") }
+                sandbox = null
+            }
+            idleUnbindRunnable = null
+        }
+        idleUnbindRunnable = runnable
+        idleUnbindHandler.postDelayed(runnable, IDLE_UNBIND_MILLIS)
+    }
+
+    private fun cancelIdleUnbind() {
+        idleUnbindRunnable?.let {
+            idleUnbindHandler.removeCallbacks(it)
+            idleUnbindRunnable = null
+        }
+    }
+
+    private val serviceConnection: ServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = IPluginSandbox.Stub.asInterface(service)
+            sandbox = binder
+            connectInflight?.complete(binder)
+            connectInflight = null
+            Timber.tag(TAG).i("sandbox connected (token count=%d)", refCount.get())
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            Timber.tag(TAG).w("sandbox disconnected ‚?" firing onSandboxDeath")
+            sandbox = null
+            connectInflight?.completeExceptionally(
+                SandboxBindFailedException("sandbox disconnected during bind"),
+            )
+            connectInflight = null
+            runCatching { onSandboxDeath() }
+                .onFailure { Timber.tag(TAG).w(it, "onSandboxDeath callback threw") }
+        }
+    }
+
+    companion object {
+        private const val TAG = "PluginSandboxConn"
+
+        /**
+         * Idle window before unbinding the sandbox. Phase 10a v3:
+         * 30 s. Tuned to be long enough that a "user navigates away
+         * and right back" doesn't pay the cold-bind cost twice, but
+         * short enough that an actually-idle sandbox releases the
+         * process to the OS reasonably quickly.
+         */
+        const val IDLE_UNBIND_MILLIS = 30_000L
+    }
+}
+
+class SandboxBindFailedException(message: String) : IllegalStateException(message)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+One remaining edge is standing out around process-death cleanup: the new release is correct in intent, but I’m checking whether the snapshot/clear sequence is actually idempotent against already-queued lifecycle callbacks.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg "interface IPluginHostCallback|oneway|IPluginSandbox" android -g "*.aidl" -n' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg \"onPluginUnloaded|onPluginCrashed|loadPlugin\\(|unloadPlugin|PluginTokenCoordinator|PluginSandboxService\" android/feature/plugin-sandbox android/core -n" in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }'` rejected: blocked by policy
+2026-05-25T19:24:41.092339Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$i=1; Get-Content android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt | ForEach-Object { '"'{0,4}: {1}' -f "'$i, $_; $i++ }'` rejected: blocked by policy
+ succeeded in 266ms:
+android/feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:12:class PluginTokenCoordinatorTest {
+android/feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:121:    ): PluginTokenCoordinator = PluginTokenCoordinator(
+android/feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:143:    override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+android/feature/plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:146:    override fun onPluginUnloaded(sandboxToken: Int) {
+android/feature/plugin-sandbox\src\main\AndroidManifest.xml:19:            android:name="app.syncler.feature.pluginsandbox.PluginSandboxService"
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:12: * [PluginSandboxService] adapts the incoming AIDL
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:14: * [PluginTokenCoordinator].
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:20:    fun onPluginCrashed(sandboxToken: Int, reason: String)
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginHostCallbackLocal.kt:21:    fun onPluginUnloaded(sandboxToken: Int)
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:51:     * The sandbox fires `onPluginUnloaded` AFTER this returns.
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxState.kt:21:     * Host called `unloadPlugin` and sandbox is mid-teardown. Will
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxState.kt:24:     * sandbox fires `IPluginHostCallback.onPluginUnloaded`.
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:26: * [PluginSandboxService] for the host-side handling).
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:31:class PluginTokenCoordinator(
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:88:        // satisfy or drop. The adapter in PluginSandboxService
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:171:     * destroys the WebView, fires `onPluginUnloaded(sandboxToken)`,
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:201:        callback.onPluginUnloaded(sandboxToken)
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:218: * Process-wide token registry. Used by [PluginSandboxService] to
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:224:    private val coordinators = ConcurrentHashMap<Int, PluginTokenCoordinator>()
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:226:    fun put(coordinator: PluginTokenCoordinator) {
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:230:    operator fun get(sandboxToken: Int): PluginTokenCoordinator? =
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:233:    fun remove(sandboxToken: Int): PluginTokenCoordinator? =
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:240:    fun all(): Collection<PluginTokenCoordinator> = coordinators.values.toList()
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:21: * AIDL calls to the right [PluginTokenCoordinator], and owns the
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:32:class PluginSandboxService : Service() {
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:42:        // the host's onPluginUnloaded fires for each. (The host
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:56:        override fun loadPlugin(
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:73:            val coordinator = PluginTokenCoordinator(
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:93:        override fun unloadPlugin(sandboxToken: Int) {
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:96:                Timber.tag(TAG).w("unloadPlugin unknown token %d", sandboxToken)
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:201:            override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:202:                runCatching { callback.onPluginCrashed(sandboxToken, reason) }
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:203:                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginCrashed failed") }
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:205:            override fun onPluginUnloaded(sandboxToken: Int) {
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:206:                runCatching { callback.onPluginUnloaded(sandboxToken) }
+android/feature/plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:207:                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginUnloaded failed") }
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:19:    oneway void onPluginCrashed(int sandboxToken, String reason);
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:24:    // subsequent loadPlugin(pluginId) without
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:26:    oneway void onPluginUnloaded(int sandboxToken);
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:7:// PluginSandboxService. See docs/plugin-host-multi-process.md.
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:26:    int loadPlugin(in PluginLoadParcel request, in IPluginHostCallback callback);
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:29:    // IPluginHostCallback.onPluginUnloaded(sandboxToken) when the
+android/core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:31:    oneway void unloadPlugin(int sandboxToken);
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 268ms:
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:8:interface IPluginSandbox {
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:31:    oneway void unloadPlugin(int sandboxToken);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:37:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:38:    oneway void deliverBridgeResult(int sandboxToken, String callbackId, String resultJson);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:4:// PluginRegistry; passed to the sandbox via IPluginSandbox.loadPlugin.
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:8:interface IPluginHostCallback {
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:13:    // IPluginSandbox.deliverBridgeResult(sandboxToken, callbackId, ...).
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:14:    oneway void bridgeCall(int sandboxToken, String method, String argsJson, String callbackId);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:17:    oneway void onWebViewError(int sandboxToken, String code, String message);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:18:    oneway void onPluginReady(int sandboxToken);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:19:    oneway void onPluginCrashed(int sandboxToken, String reason);
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginHostCallback.aidl:26:    oneway void onPluginUnloaded(int sandboxToken);
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginTokenCoordinator.kt' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "findstr /n \".*\" android\\feature\\plugin-host\\src\\main\\kotlin\\app\\syncler\\android\\pluginhost\\sandbox\\SandboxRouter.kt" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-sandbox/src/main/kotlin/app/syncler/feature/pluginsandbox/PluginSandboxService.kt' in D:\Projects\syncler
+ succeeded in 289ms:
+1:package app.syncler.android.pluginhost.sandbox
+2:
+3:import app.syncler.core.pluginaidl.IPluginHostCallback
+4:import app.syncler.core.pluginaidl.PluginLoadParcel
+5:import java.util.concurrent.atomic.AtomicInteger
+6:import kotlinx.coroutines.CoroutineScope
+7:import kotlinx.coroutines.Dispatchers
+8:import kotlinx.coroutines.SupervisorJob
+9:import kotlinx.coroutines.launch
+10:import timber.log.Timber
+11:
+12:/**
+13: * Host-side counterpart to the sandbox's `PluginTokenCoordinator`.
+14: *
+15: * - Allocates `sandboxToken` (process-local monotonic int).
+16: * - Receives `IPluginHostCallback` calls from the sandbox and
+17: *   routes them to the appropriate per-token handler.
+18: * - Owns the host-side pending-callback map for bridge calls so
+19: *   capability results land back at the right `callbackId`.
+20: * - Provides the high-level entry points
+21: *   [loadPlugin] / [unload] / [dispatchHook] /
+22: *   [deliverBridgeResult] that the rest of the host calls — they
+23: *   round-trip through [PluginSandboxConnection] to the sandbox
+24: *   AIDL.
+25: *
+26: * Step 4 ships scaffolding only — step 5 wires it into
+27: * `PluginBridge` and the e2e test. The class is thread-safe via
+28: * [tokenMutex] + atomic counters; AIDL callbacks land on Binder
+29: * threads and dispatch to `bridgeDispatcher` on its own coroutine
+30: * scope so the Binder thread doesn't block on capability work.
+31: */
+32:class SandboxRouter(
+33:    private val connection: PluginSandboxConnection,
+34:    private val bridgeDispatcher: BridgeDispatcher,
+35:    private val scope: CoroutineScope =
+36:        CoroutineScope(SupervisorJob() + Dispatchers.Default),
+37:) {
+38:
+39:    private val nextToken = AtomicInteger(1)
+40:    private val handles = java.util.concurrent.ConcurrentHashMap<Int, SandboxHandle>()
+41:
+42:    init {
+43:        connection.onSandboxDeath = ::handleSandboxDeath
+44:    }
+45:
+46:    /**
+47:     * Allocate a fresh `sandboxToken`. Use this BEFORE staging the
+48:     * bundle so the staged path can include it. The token isn't
+49:     * registered with [PluginSandboxConnection] until [loadPlugin]
+50:     * succeeds — caller can throw away the value without leaking
+51:     * state.
+52:     */
+53:    fun allocateToken(): Int = nextToken.getAndIncrement()
+54:
+55:    /**
+56:     * Bind the sandbox (if not bound), invoke `loadPlugin`, and
+57:     * return a [SandboxHandle] the caller uses for hook dispatch
+58:     * and unload. Suspends until the sandbox acknowledges
+59:     * load — on failure the AIDL `IllegalStateException` (with a
+60:     * structured failure code) propagates.
+61:     */
+62:    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+63:        val sandbox = connection.acquire()
+64:        // Triad 117: pre-register the handle BEFORE the AIDL call so
+65:        // a synchronous-or-oneway callback firing mid-load doesn't
+66:        // arrive at the stub with no handle visible. On failure we
+67:        // remove the handle in the catch — `releaseHandle` is
+68:        // idempotent so a late `onPluginUnloaded` from the sandbox's
+69:        // synchronous load-fail teardown won't double-release.
+70:        val handle = SandboxHandle(
+71:            sandboxToken = parcel.sandboxToken,
+72:            pluginId = parcel.pluginId,
+73:            router = this,
+74:        )
+75:        handles[parcel.sandboxToken] = handle
+76:        try {
+77:            val callback = PluginHostCallbackStub(parcel.sandboxToken)
+78:            val returnedToken = sandbox.loadPlugin(parcel, callback)
+79:            check(returnedToken == parcel.sandboxToken) {
+80:                "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
+81:                    "${parcel.sandboxToken} — fatal sandbox bug"
+82:            }
+83:            return handle
+84:        } catch (exc: Throwable) {
+85:            // bindService succeeded but loadPlugin failed — undo
+86:            // the pre-registration + release the connection ref.
+87:            // If the sandbox's load-fail teardown fires a oneway
+88:            // onPluginUnloaded after this, releaseHandle's
+89:            // remove-returns-null guard skips the spurious release.
+90:            handles.remove(parcel.sandboxToken)
+91:            connection.release()
+92:            throw exc
+93:        }
+94:    }
+95:
+96:    /**
+97:     * Begin unload. Sandbox fires `onPluginUnloaded` when the
+98:     * teardown completes; the host then releases the connection
+99:     * ref via [releaseHandle].
+100:     */
+101:    suspend fun unload(handle: SandboxHandle) {
+102:        val sandbox = connection.acquire()
+103:        try {
+104:            sandbox.unloadPlugin(handle.sandboxToken)
+105:        } finally {
+106:            // We just paid an extra acquire to do the call; release
+107:            // it. The release that pairs with loadPlugin's acquire
+108:            // fires when onPluginUnloaded comes back.
+109:            connection.release()
+110:        }
+111:    }
+112:
+113:    suspend fun dispatchHook(
+114:        handle: SandboxHandle,
+115:        hook: String,
+116:        payloadJson: String,
+117:        callbackId: String,
+118:    ) {
+119:        val sandbox = connection.acquire()
+120:        try {
+121:            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+122:        } finally {
+123:            connection.release()
+124:        }
+125:    }
+126:
+127:    suspend fun deliverBridgeResult(
+128:        sandboxToken: Int,
+129:        callbackId: String,
+130:        resultJson: String,
+131:    ) {
+132:        val sandbox = connection.acquire()
+133:        try {
+134:            sandbox.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+135:        } finally {
+136:            connection.release()
+137:        }
+138:    }
+139:
+140:    /**
+141:     * Idempotent release. Triad 117 finding (Codex #3, Gemini #3):
+142:     * only release when the handle is actually present in the map.
+143:     * A stray `onPluginUnloaded` for an unknown token (e.g. from
+144:     * the sandbox's sync load-fail teardown after the host catch
+145:     * block already cleaned up) must not over-release the
+146:     * connection ref count.
+147:     */
+148:    private fun releaseHandle(sandboxToken: Int) {
+149:        val removed = handles.remove(sandboxToken)
+150:        if (removed != null) {
+151:            scope.launch { connection.release() }
+152:        } else {
+153:            Timber.tag(TAG).w(
+154:                "releaseHandle for unknown token=%d — skipping release (idempotent guard)",
+155:                sandboxToken,
+156:            )
+157:        }
+158:    }
+159:
+160:    /**
+161:     * Sandbox process died — `ServiceConnection.onServiceDisconnected`
+162:     * fired. Triad 117 (Codex #2, Gemini CRITICAL): every active
+163:     * handle leaked an `acquire()` that will never be balanced by
+164:     * the (now-impossible) `onPluginUnloaded`. We MUST release each
+165:     * one explicitly here, otherwise the ref count stays > 0 forever
+166:     * and the idle-unbind path can never fire on a future
+167:     * load → unload cycle.
+168:     */
+169:    private fun handleSandboxDeath() {
+170:        // Snapshot + clear under the same operation. Each removed
+171:        // handle gets a paired connection.release() + a synthetic
+172:        // onPluginCrashed so the bridge dispatcher's pending-call
+173:        // maps can drain.
+174:        val dead = handles.values.toList()
+175:        handles.clear()
+176:        dead.forEach { handle ->
+177:            scope.launch {
+178:                bridgeDispatcher.onPluginCrashed(handle.sandboxToken, "process_died")
+179:                connection.release()
+180:            }
+181:        }
+182:    }
+183:
+184:    /**
+185:     * AIDL stub the sandbox calls into. Routes every event to
+186:     * [bridgeDispatcher] or to the per-handle bookkeeping.
+187:     */
+188:    private inner class PluginHostCallbackStub(
+189:        private val expectedToken: Int,
+190:    ) : IPluginHostCallback.Stub() {
+191:
+192:        override fun bridgeCall(
+193:            sandboxToken: Int,
+194:            method: String,
+195:            argsJson: String,
+196:            callbackId: String,
+197:        ) {
+198:            // Generation-fence — drop calls whose token doesn't
+199:            // match an active handle (e.g. stale callbacks from a
+200:            // sandboxed plugin that we've already unloaded).
+201:            if (!handles.containsKey(sandboxToken)) {
+202:                Timber.tag(TAG).w(
+203:                    "bridgeCall for stale token=%d (expected=%d) — dropping",
+204:                    sandboxToken, expectedToken,
+205:                )
+206:                return
+207:            }
+208:            scope.launch {
+209:                bridgeDispatcher.bridgeCall(sandboxToken, method, argsJson, callbackId)
+210:            }
+211:        }
+212:
+213:        override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+214:            if (!handles.containsKey(sandboxToken)) {
+215:                Timber.tag(TAG).w(
+216:                    "onWebViewError for stale token=%d — dropping",
+217:                    sandboxToken,
+218:                )
+219:                return
+220:            }
+221:            scope.launch { bridgeDispatcher.onWebViewError(sandboxToken, code, message) }
+222:        }
+223:
+224:        override fun onPluginReady(sandboxToken: Int) {
+225:            if (!handles.containsKey(sandboxToken)) {
+226:                Timber.tag(TAG).w(
+227:                    "onPluginReady for stale token=%d — dropping",
+228:                    sandboxToken,
+229:                )
+230:                return
+231:            }
+232:            scope.launch { bridgeDispatcher.onPluginReady(sandboxToken) }
+233:        }
+234:
+235:        override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+236:            // releaseHandle is idempotent — even if a stale crash
+237:            // fires after a successful unload, we won't double-
+238:            // release. Lifecycle dispatch still happens so callers
+239:            // get a "plugin gone" signal even for stale tokens
+240:            // (defensive — they may have stashed the token).
+241:            scope.launch { bridgeDispatcher.onPluginCrashed(sandboxToken, reason) }
+242:            releaseHandle(sandboxToken)
+243:        }
+244:
+245:        override fun onPluginUnloaded(sandboxToken: Int) {
+246:            scope.launch { bridgeDispatcher.onPluginUnloaded(sandboxToken) }
+247:            releaseHandle(sandboxToken)
+248:        }
+249:    }
+250:
+251:    companion object {
+252:        private const val TAG = "SandboxRouter"
+253:    }
+254:}
+255:
+256:/**
+257: * Handle the host uses to address a loaded plugin in the sandbox.
+258: * Opaque from outside the router; the bridge holds one per active
+259: * plugin instance.
+260: */
+261:class SandboxHandle internal constructor(
+262:    val sandboxToken: Int,
+263:    val pluginId: String,
+264:    private val router: SandboxRouter,
+265:) {
+266:    suspend fun unload() = router.unload(this)
+267:    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+268:        router.dispatchHook(this, hook, payloadJson, callbackId)
+269:    }
+270:    suspend fun deliverBridgeResult(callbackId: String, resultJson: String) {
+271:        router.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+272:    }
+273:}
+274:
+275:/**
+276: * The dispatcher contract the [SandboxRouter] uses to surface
+277: * sandbox events into host code. Step 5 will provide a real
+278: * implementation that adapts to the existing `PluginBridge`
+279: * capability dispatch + the `PluginInstance` lifecycle hooks.
+280: */
+281:interface BridgeDispatcher {
+282:    suspend fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String)
+283:    suspend fun onWebViewError(sandboxToken: Int, code: String, message: String)
+284:    suspend fun onPluginReady(sandboxToken: Int)
+285:    suspend fun onPluginCrashed(sandboxToken: Int, reason: String)
+286:    suspend fun onPluginUnloaded(sandboxToken: Int)
+287:}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 336ms:
+package app.syncler.feature.pluginsandbox
+
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import timber.log.Timber
+
+/**
+ * Per-token coordinator. Holds the [PluginSandboxState], the per-
+ * token serial Channel (so concurrent host-side oneway calls land
+ * in order), and the [PluginWebViewHost] instance.
+ *
+ * The coordinator itself is thread-safe via the [stateLock]
+ * monitor. Hook + bridge-result delivery hops through [eventChannel]
+ * so the WebView host sees them sequentially even when multiple
+ * Binder threads call us at once.
+ *
+ * Lifecycle: created on [loadPlugin], destroyed on [unload] OR
+ * `process death` (no in-process signal for that ‚?" see
+ * [PluginSandboxService] for the host-side handling).
+ *
+ * See `docs/plugin-host-multi-process.md` "Lifecycle + state
+ * machine" + "Threading".
+ */
+class PluginTokenCoordinator(
+    val sandboxToken: Int,
+    val pluginId: String,
+    private val callback: PluginHostCallbackLocal,
+    private val webViewHost: PluginWebViewHost,
+    parentScope: CoroutineScope,
+) {
+    private val stateLock = Any()
+
+    @Volatile
+    private var _state: PluginSandboxState = PluginSandboxState.LOADING
+
+    val state: PluginSandboxState get() = _state
+
+    /**
+     * Per-token serial queue. CAPACITY=64 ‚?" generous; if the queue
+     * backs up that far we have a plugin that can't keep up and
+     * the host should slow down anyway. Channel.UNLIMITED is
+     * tempting but lets a runaway host OOM the sandbox.
+     */
+    private val eventChannel = Channel<Event>(capacity = 64)
+
+    private val tokenScope: CoroutineScope = CoroutineScope(
+        parentScope.coroutineContext + SupervisorJob() + Dispatchers.Default,
+    )
+
+    private val pumpJob: Job = tokenScope.launch {
+        for (event in eventChannel) {
+            when (event) {
+                is Event.Hook -> webViewHost.dispatchHook(
+                    event.hook, event.payloadJson, event.callbackId,
+                )
+                is Event.BridgeResult -> webViewHost.deliverBridgeResult(
+                    event.callbackId, event.resultJson,
+                )
+            }
+        }
+    }
+
+    /**
+     * Kick off the WebView load. Caller is the AIDL `loadPlugin`
+     * entry point. May throw with a [LoadFailureCodes] string.
+     */
+    fun startLoad(parcel: PluginLoadParcel) {
+        synchronized(stateLock) {
+            check(_state == PluginSandboxState.LOADING) {
+                "startLoad called in state $_state ‚?" bug"
+            }
+        }
+        webViewHost.startLoad(parcel, ::onBridgeCallFromWebView)
+    }
+
+    private fun onBridgeCallFromWebView(method: String, argsJson: String, callbackId: String) {
+        // No-state-gate here intentionally ‚?" the WebView may emit
+        // a bridge call between our state transition to UNLOADING
+        // and the actual WebView teardown. We deliver up to the
+        // host; the host's pending-callback map decides whether to
+        // satisfy or drop. The adapter in PluginSandboxService
+        // swallows any RemoteException from a dead host.
+        callback.bridgeCall(sandboxToken, method, argsJson, callbackId)
+    }
+
+    /**
+     * Sandbox-side equivalent of `onPluginReady` ‚?" called by the
+     * WebView host once the JS bundle is parsed + the plugin's
+     * `init` hook returned. Transitions [LOADING] -> [READY] and
+     * notifies the host via `onPluginReady(sandboxToken)`.
+     */
+    fun reportReady() {
+        val didTransition = synchronized(stateLock) {
+            if (_state == PluginSandboxState.LOADING) {
+                _state = PluginSandboxState.READY
+                true
+            } else false
+        }
+        if (didTransition) {
+            callback.onPluginReady(sandboxToken)
+        }
+    }
+
+    /** WebView host reports an unrecoverable runtime error. */
+    fun reportError(code: String, message: String) {
+        synchronized(stateLock) {
+            if (_state == PluginSandboxState.LOADING ||
+                _state == PluginSandboxState.READY
+            ) {
+                _state = PluginSandboxState.ERRORED
+            }
+        }
+        callback.onWebViewError(sandboxToken, code, message)
+    }
+
+    /**
+     * Host called `dispatchHook`. Enqueue for the pump unless the
+     * token is past `READY`. Out-of-window calls are warn-logged
+     * and dropped per the state-machine table.
+     */
+    fun submitHook(hook: String, payloadJson: String, callbackId: String) {
+        val accept = synchronized(stateLock) {
+            _state == PluginSandboxState.LOADING || _state == PluginSandboxState.READY
+        }
+        if (!accept) {
+            Timber.tag(TAG).w(
+                "dispatchHook dropped in state %s (token=%d hook=%s)",
+                _state, sandboxToken, hook,
+            )
+            return
+        }
+        val sent = eventChannel.trySend(Event.Hook(hook, payloadJson, callbackId))
+        if (!sent.isSuccess) {
+            Timber.tag(TAG).w(
+                "dispatchHook channel full (token=%d hook=%s) ‚?" dropping",
+                sandboxToken, hook,
+            )
+        }
+    }
+
+    /** Host called `deliverBridgeResult`. Same accept rules as hooks. */
+    fun submitBridgeResult(callbackId: String, resultJson: String) {
+        val accept = synchronized(stateLock) {
+            _state == PluginSandboxState.LOADING || _state == PluginSandboxState.READY
+        }
+        if (!accept) {
+            Timber.tag(TAG).w(
+                "deliverBridgeResult dropped in state %s (token=%d callback=%s)",
+                _state, sandboxToken, callbackId,
+            )
+            return
+        }
+        val sent = eventChannel.trySend(Event.BridgeResult(callbackId, resultJson))
+        if (!sent.isSuccess) {
+            Timber.tag(TAG).w(
+                "deliverBridgeResult channel full (token=%d callback=%s) ‚?" dropping",
+                sandboxToken, callbackId,
+            )
+        }
+    }
+
+    /**
+     * Begin teardown. Transitions to [UNLOADING], cancels the pump,
+     * destroys the WebView, fires `onPluginUnloaded(sandboxToken)`,
+     * transitions to [UNLOADED]. Idempotent.
+     */
+    fun unload() {
+        val shouldRun = synchronized(stateLock) {
+            when (_state) {
+                PluginSandboxState.UNLOADING,
+                PluginSandboxState.UNLOADED -> false
+                else -> {
+                    _state = PluginSandboxState.UNLOADING
+                    true
+                }
+            }
+        }
+        if (!shouldRun) return
+
+        // Stop accepting new events; let the pump drain anything
+        // in-flight before we destroy the WebView.
+        eventChannel.close()
+
+        // Best-effort: wait briefly for the pump to drain. If a
+        // hook is mid-evaluateJavascript, we accept it'll finish
+        // racing the WebView destroy ‚?" webViewHost.destroy is the
+        // canonical "JS is gone" signal.
+        runCatching { webViewHost.destroy() }
+            .onFailure { Timber.tag(TAG).w(it, "webViewHost.destroy threw (token=%d)", sandboxToken) }
+
+        synchronized(stateLock) {
+            _state = PluginSandboxState.UNLOADED
+        }
+        callback.onPluginUnloaded(sandboxToken)
+
+        // Release coroutines.
+        tokenScope.cancel()
+    }
+
+    private sealed interface Event {
+        data class Hook(val hook: String, val payloadJson: String, val callbackId: String) : Event
+        data class BridgeResult(val callbackId: String, val resultJson: String) : Event
+    }
+
+    companion object {
+        private const val TAG = "PluginSandbox"
+    }
+}
+
+/**
+ * Process-wide token registry. Used by [PluginSandboxService] to
+ * look up the right coordinator per AIDL transaction. Concurrent-
+ * map keyed by [Int] token; coordinator lifecycle owns its own
+ * thread-safety.
+ */
+class PluginTokenRegistry {
+    private val coordinators = ConcurrentHashMap<Int, PluginTokenCoordinator>()
+
+    fun put(coordinator: PluginTokenCoordinator) {
+        coordinators[coordinator.sandboxToken] = coordinator
+    }
+
+    operator fun get(sandboxToken: Int): PluginTokenCoordinator? =
+        coordinators[sandboxToken]
+
+    fun remove(sandboxToken: Int): PluginTokenCoordinator? =
+        coordinators.remove(sandboxToken)
+
+    fun activeReadyOrLoadingCount(): Int = coordinators.values.count { c ->
+        c.state == PluginSandboxState.READY || c.state == PluginSandboxState.LOADING
+    }
+
+    fun all(): Collection<PluginTokenCoordinator> = coordinators.values.toList()
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 344ms:
+package app.syncler.feature.pluginsandbox
+
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.IPluginSandbox
+import app.syncler.core.pluginaidl.PluginLoadParcel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import timber.log.Timber
+
+/**
+ * Phase 10 multi-process plugin host: the `:plugin` subprocess
+ * service. Declared in this module's AndroidManifest with
+ * `android:process=":plugin"`.
+ *
+ * The service binds host clients via [IPluginSandbox.Stub], routes
+ * AIDL calls to the right [PluginTokenCoordinator], and owns the
+ * shared [PluginTokenRegistry]. Per-token work happens on
+ * coroutines owned by each coordinator; the service's own scope
+ * is short-lived bookkeeping only.
+ *
+ * Step 2 ships the wiring + state machine. The actual
+ * [PluginWebViewHost] implementation is supplied by
+ * [PluginWebViewHostFactory], which today returns a no-op stub ‚?"
+ * step 5 of Phase 10b will land the real WebView implementation
+ * once connectedAndroidTest is wired up.
+ */
+class PluginSandboxService : Service() {
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val registry = PluginTokenRegistry()
+    private val webViewHostFactory: PluginWebViewHostFactory = NoopPluginWebViewHostFactory
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onDestroy() {
+        // Process is going away. Tear down every active token so
+        // the host's onPluginUnloaded fires for each. (The host
+        // also handles ServiceConnection.onServiceDisconnected as
+        // the authoritative crash path; this is a best-effort
+        // graceful cleanup.)
+        registry.all().forEach { coordinator ->
+            runCatching { coordinator.unload() }
+                .onFailure { Timber.tag(TAG).w(it, "graceful unload failed") }
+        }
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
+    private val binder = object : IPluginSandbox.Stub() {
+
+        override fun loadPlugin(
+            request: PluginLoadParcel,
+            callback: IPluginHostCallback,
+        ): Int {
+            validateParcel(request)
+            // Same-token re-load is a host bug ‚?" we treat it as
+            // CONCURRENT_LOAD_IN_PROGRESS to match the state-machine
+            // table's "loadPlugin while loading" row.
+            registry[request.sandboxToken]?.let { existing ->
+                Timber.tag(TAG).w(
+                    "loadPlugin token=%d already in state %s",
+                    request.sandboxToken, existing.state,
+                )
+                throw IllegalStateException(LoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS)
+            }
+
+            val host = webViewHostFactory.create(request)
+            val coordinator = PluginTokenCoordinator(
+                sandboxToken = request.sandboxToken,
+                pluginId = request.pluginId,
+                callback = adaptCallback(callback),
+                webViewHost = host,
+                parentScope = serviceScope,
+            )
+            registry.put(coordinator)
+            try {
+                coordinator.startLoad(request)
+            } catch (exc: Exception) {
+                // Load threw ‚?" coordinator never reaches READY; we
+                // drop it from the registry and rethrow over Binder.
+                registry.remove(request.sandboxToken)
+                runCatching { coordinator.unload() }
+                throw exc
+            }
+            return request.sandboxToken
+        }
+
+        override fun unloadPlugin(sandboxToken: Int) {
+            val coordinator = registry[sandboxToken]
+            if (coordinator == null) {
+                Timber.tag(TAG).w("unloadPlugin unknown token %d", sandboxToken)
+                return
+            }
+            // Run on the coordinator's own dispatch (well, just
+            // here on the Binder thread ‚?" unload is mostly state
+            // updates + a WebView destroy that the impl can
+            // marshal to main if needed).
+            coordinator.unload()
+            registry.remove(sandboxToken)
+            maybeWipeProcessWebViewState()
+        }
+
+        override fun dispatchHook(
+            sandboxToken: Int,
+            hook: String,
+            payloadJson: String,
+            callbackId: String,
+        ) {
+            val coordinator = registry[sandboxToken] ?: run {
+                Timber.tag(TAG).w("dispatchHook unknown token %d", sandboxToken)
+                return
+            }
+            coordinator.submitHook(hook, payloadJson, callbackId)
+        }
+
+        override fun deliverBridgeResult(
+            sandboxToken: Int,
+            callbackId: String,
+            resultJson: String,
+        ) {
+            val coordinator = registry[sandboxToken] ?: run {
+                Timber.tag(TAG).w("deliverBridgeResult unknown token %d", sandboxToken)
+                return
+            }
+            coordinator.submitBridgeResult(callbackId, resultJson)
+        }
+
+        override fun querySandboxState(sandboxToken: Int): String {
+            val coordinator = registry[sandboxToken]
+            return coordinator?.state?.wire ?: "unknown"
+        }
+    }
+
+    /**
+     * Validate [PluginLoadParcel] shape before instantiating a
+     * coordinator. Per Phase 10a v4 error semantics, throws
+     * [IllegalStateException] with a [LoadFailureCodes] code.
+     *
+     * Bundle hash re-verification + renderer support check happen
+     * inside the [PluginWebViewHost.startLoad] impl (where they
+     * have access to the actual file + the renderer registry).
+     */
+    private fun validateParcel(request: PluginLoadParcel) {
+        if (request.pluginId.isBlank() || request.bundleFilePath.isBlank() ||
+            request.bundleHashHex.isBlank()
+        ) {
+            throw IllegalStateException(LoadFailureCodes.PARCEL_MALFORMED)
+        }
+        if (request.diagnosticManifestJson.length > PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP) {
+            throw IllegalStateException(LoadFailureCodes.DIAGNOSTIC_FIELD_OVERSIZE)
+        }
+    }
+
+    /**
+     * Process-global WebView state wipe per Phase 10a v4: ONLY
+     * fired when zero tokens are in `READY`/`LOADING`. We don't
+     * actually call `WebStorage.deleteAllData()` /
+     * `CookieManager.removeAllCookies()` here in step 2 ‚?" those
+     * need the real WebView impl. Stub left as a hook.
+     */
+    private fun maybeWipeProcessWebViewState() {
+        if (registry.activeReadyOrLoadingCount() == 0) {
+            Timber.tag(TAG).i(
+                "no active plugins remain ‚?" WebView state wipe hook fires (step 5 impl)",
+            )
+            // step 5: WebStorage.getInstance().deleteAllData()
+            //         CookieManager.getInstance().removeAllCookies(null)
+        }
+    }
+
+    /**
+     * Adapt an incoming AIDL [IPluginHostCallback] (a binder proxy
+     * to the host process) into the plain Kotlin
+     * [PluginHostCallbackLocal] the coordinator uses. Keeps AIDL
+     * types out of the coordinator's signature so unit tests can
+     * substitute a fake without touching `android.os.Binder`.
+     *
+     * `RemoteException` from any callback method gets swallowed
+     * + logged ‚?" the host process may be dead, in which case our
+     * service's `onDestroy` will fire shortly and clean up.
+     */
+    private fun adaptCallback(callback: IPluginHostCallback): PluginHostCallbackLocal =
+        object : PluginHostCallbackLocal {
+            override fun bridgeCall(sandboxToken: Int, method: String, argsJson: String, callbackId: String) {
+                runCatching { callback.bridgeCall(sandboxToken, method, argsJson, callbackId) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.bridgeCall failed") }
+            }
+            override fun onWebViewError(sandboxToken: Int, code: String, message: String) {
+                runCatching { callback.onWebViewError(sandboxToken, code, message) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onWebViewError failed") }
+            }
+            override fun onPluginReady(sandboxToken: Int) {
+                runCatching { callback.onPluginReady(sandboxToken) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginReady failed") }
+            }
+            override fun onPluginCrashed(sandboxToken: Int, reason: String) {
+                runCatching { callback.onPluginCrashed(sandboxToken, reason) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginCrashed failed") }
+            }
+            override fun onPluginUnloaded(sandboxToken: Int) {
+                runCatching { callback.onPluginUnloaded(sandboxToken) }
+                    .onFailure { Timber.tag(TAG).w(it, "host callback.onPluginUnloaded failed") }
+            }
+        }
+
+    companion object {
+        private const val TAG = "PluginSandbox"
+    }
+}
+
+/**
+ * Factory the service uses to mint [PluginWebViewHost] per load.
+ * Step 2 ships a no-op factory; step 5 will swap in the real
+ * `WebView`-touching impl.
+ */
+fun interface PluginWebViewHostFactory {
+    fun create(parcel: PluginLoadParcel): PluginWebViewHost
+}
+
+internal object NoopPluginWebViewHostFactory : PluginWebViewHostFactory {
+    override fun create(parcel: PluginLoadParcel): PluginWebViewHost =
+        NoopPluginWebViewHost
+}
+
+private object NoopPluginWebViewHost : PluginWebViewHost {
+    override fun startLoad(parcel: PluginLoadParcel, bridgeBroker: BridgeBroker) {
+        // No-op ‚?" the real impl evaluates JS in a WebView. Tests
+        // substitute a recording double.
+    }
+
+    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+        // No-op.
+    }
+
+    override fun deliverBridgeResult(callbackId: String, resultJson: String) {
+        // No-op.
+    }
+
+    override fun destroy() {
+        // No-op.
+    }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+Verdict: **YELLOW**
+
+Items:
+
+1. [SandboxRouter.kt:174](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:174) process-death cleanup is not fully idempotent. `values.toList()` followed by `clear()` is not atomic against already-queued `onPluginUnloaded` / `onPluginCrashed`. If a callback removes a token after the death snapshot but before/around the death loop, both paths can call `connection.release()` for the same load ref. Use remove-result gating per token in the death path too, e.g. snapshot keys/entries, then `if (handles.remove(token) != null) release + dispatch`.
+
+2. [SandboxRouter.kt:241](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:241) and [SandboxRouter.kt:246](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:246) still dispatch stale crash/unload lifecycle events even when `releaseHandle` would find no active handle. The release is idempotent, but the lifecycle signal is not generation-fenced. That means the load-fail teardown case can still emit `onPluginUnloaded` after the host catch has already cleaned up. If step 5’s dispatcher treats these as authoritative lifecycle events, this can cause bogus teardown/drain behavior. Prefer making `releaseHandle` return the removed handle/boolean and dispatch only when removal wins, except for an explicitly justified synthetic process-death path.
+
+Still missing before step 5: fix the two lifecycle idempotency gaps above, or document why stale crash/unload dispatch is intentionally part of the step-5 contract.
+
+Anything new: the `:app` dependency fix looks correct, and the load pre-registration plus catch cleanup is directionally right. I did not rerun builds/tests because this review was explicitly read-only/no mutation.
+tokens used
+29,466
+Verdict: **YELLOW**
+
+Items:
+
+1. [SandboxRouter.kt:174](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:174) process-death cleanup is not fully idempotent. `values.toList()` followed by `clear()` is not atomic against already-queued `onPluginUnloaded` / `onPluginCrashed`. If a callback removes a token after the death snapshot but before/around the death loop, both paths can call `connection.release()` for the same load ref. Use remove-result gating per token in the death path too, e.g. snapshot keys/entries, then `if (handles.remove(token) != null) release + dispatch`.
+
+2. [SandboxRouter.kt:241](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:241) and [SandboxRouter.kt:246](D:/Projects/syncler/android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/sandbox/SandboxRouter.kt:246) still dispatch stale crash/unload lifecycle events even when `releaseHandle` would find no active handle. The release is idempotent, but the lifecycle signal is not generation-fenced. That means the load-fail teardown case can still emit `onPluginUnloaded` after the host catch has already cleaned up. If step 5’s dispatcher treats these as authoritative lifecycle events, this can cause bogus teardown/drain behavior. Prefer making `releaseHandle` return the removed handle/boolean and dispatch only when removal wins, except for an explicitly justified synthetic process-death path.
+
+Still missing before step 5: fix the two lifecycle idempotency gaps above, or document why stale crash/unload dispatch is intentionally part of the step-5 contract.
+
+Anything new: the `:app` dependency fix looks correct, and the load pre-registration plus catch cleanup is directionally right. I did not rerun builds/tests because this review was explicitly read-only/no mutation.
