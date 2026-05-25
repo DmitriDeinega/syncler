@@ -912,3 +912,314 @@ HKDF-SHA256: BouncyCastle or cryptography library of choice
 CSPRNG: java.security.SecureRandom
 Canonical JSON: deterministic JSON encoder configured for sorted keys and compact separators
 ```
+
+## 11. Per-Device Envelope Encryption (V2, Phase 9)
+
+V2 protocol replaces the §3 per-(sender, user) `pairing_key` symmetric scheme with per-device HPKE-sealed envelopes. Every device on a user account holds its own X25519 keypair; senders fetch the recipient directory and seal a per-message Content Encryption Key (CEK) to each enrolled device.
+
+V2 is wire-incompatible with V1. Clients that speak V2 reject messages without `protocol_version == 2`. The `master_key` continues to wrap the user-state blob (§10) but no longer derives any payload encryption material.
+
+### 11.1 Key Hierarchy
+
+Per device:
+
+```text
+device_signing_keypair    = existing Ed25519 device-bound JWT key (§ device auth)
+device_encryption_keypair = NEW X25519 long-term keypair
+```
+
+The X25519 private key is stored in the device's existing `MasterKey`-wrapped EncryptedSharedPreferences (Android) alongside the Ed25519 signing key. The public key is registered with the server at enrollment time.
+
+### 11.2 HPKE Suite
+
+```text
+suite = (KEM=DHKEM(X25519, HKDF-SHA256),
+         KDF=HKDF-SHA256,
+         AEAD=AES-256-GCM)
+KEM id  = 0x0020
+KDF id  = 0x0001
+AEAD id = 0x0002
+```
+
+**Library targets:**
+
+- **Server + SDK Python:** `cryptography>=47.0.0` — `from cryptography.hazmat.primitives.hpke import Suite, KEM, KDF, AEAD`.
+- **Android (Kotlin):** Google Tink — `com.google.crypto.tink:tink-android`.
+
+PyCA `Suite.encrypt(plaintext, public_key, info=...)` returns the concatenation `enc || ciphertext`. For X25519 the KEM output `enc` is 32 bytes; the ciphertext is `len(plaintext) + 16` (AEAD tag). For a 32-byte CEK that is 48 bytes ciphertext, 80 bytes total.
+
+The wire format splits `enc` and `ciphertext` into separate base64 fields (`hpke_kem_output` + `hpke_ciphertext`) for schema-level validation cleanliness. Implementations re-concatenate them before calling `Suite.decrypt`. The 32/48/80 byte split is derived from the suite constants; implementations MUST NOT hardcode the numbers outside KEM-specific tests — a future suite swap fails closed.
+
+PyCA's single-shot HPKE only accepts `info`; it does not expose RFC 9180's separate `aad`. To match across platforms, Phase 9 uses `aad = empty` and folds ALL per-recipient authenticated context into `info`. Tink callers pass `aad = byte[0]` and the same canonical `info` bytes.
+
+### 11.3 Per-Recipient HPKE Info (canonical JSON)
+
+For each `recipient_envelope[i]` the sender builds a per-recipient `info` blob, sorted-keys canonical JSON, UTF-8, compact separators `(",", ":")`:
+
+```json
+{
+  "card_key": "...",            (live_card_upsert only)
+  "card_type": "...",           (live_card_upsert only)
+  "device_id": "<uuid>",
+  "envelope_kind": "event" | "live_card_upsert",
+  "expires_at": "<ISO8601 UTC>",
+  "min_plugin_version": "...",
+  "payload_ciphertext_sha256": "<lowercase hex>",
+  "payload_nonce": "<base64 12-byte>",
+  "plugin_id": "<uuid>",
+  "protocol_version": 2,
+  "sender_id": "<uuid>",
+  "sequence_number": <int>,     (live_card_upsert only)
+  "user_id": "<uuid>"
+}
+```
+
+Live-card upsert info adds `card_key`, `card_type`, `sequence_number`. The presence/absence of these keys is the canonical signal of the envelope kind — implementations MUST omit keys (not emit `null`) so kind A's info cannot collide with kind B's at the byte level.
+
+`payload_ciphertext_sha256` binds the CEK wrap to one payload: an attacker can't take recipient D's HPKE wrap and combine it with a different `payload_ciphertext` because HPKE seal failure-closed verifies info.
+
+`device_id` makes each recipient's info unique; one device's wrap cannot be replayed at another device even if the CEK is somehow recovered.
+
+### 11.4 Wire Format — Event Publish
+
+`POST /v1/messages/send` body:
+
+```json
+{
+  "protocol_version": 2,
+  "envelope_kind": "event",
+  "sender_id": "<uuid>",
+  "user_id": "<uuid>",
+  "plugin_id": "<uuid>",
+  "expires_at": "<ISO8601 UTC>",
+  "min_plugin_version": "...",
+  "payload_nonce": "<base64 12-byte>",
+  "payload_ciphertext": "<base64 AES-256-GCM(payload, CEK, payload_nonce, payload_aad)>",
+  "recipient_envelopes": [
+    {
+      "device_id": "<uuid>",
+      "hpke_kem_output": "<base64 32-byte>",
+      "hpke_ciphertext": "<base64 48-byte>"
+    },
+    ...
+  ],
+  "recipient_directory_version": <int>,
+  "envelope_signature": "<base64 Ed25519 sig>"
+}
+```
+
+### 11.5 Wire Format — Live-Card Upsert
+
+`POST /v1/cards/upsert` body: same as event publish PLUS `card_key`, `card_type`, `sequence_number`. `envelope_kind = "live_card_upsert"`. `card_type` is the manifest's declared type ("standard_card", etc.).
+
+### 11.6 Wire Format — Live-Card Delete
+
+`POST /v1/cards/delete` body:
+
+```json
+{
+  "protocol_version": 2,
+  "envelope_kind": "live_card_delete",
+  "sender_id": "<uuid>",
+  "user_id": "<uuid>",
+  "plugin_id": "<uuid>",
+  "card_key": "...",
+  "nonce": "<base64 12-byte>",
+  "expires_at": "<ISO8601 UTC>",
+  "envelope_signature": "<base64 Ed25519 sig>"
+}
+```
+
+Delete has no recipient_envelopes (no encrypted content). `plugin_id` is new in V2 — it prevents a captured delete envelope from replaying against a different plugin's card with the same `card_key`.
+
+### 11.7 Payload AAD (AES-GCM)
+
+```json
+{
+  "card_key": "...",            (live_card_upsert only)
+  "card_type": "...",           (live_card_upsert only)
+  "envelope_kind": "event" | "live_card_upsert",
+  "expires_at": "<ISO8601 UTC>",
+  "min_plugin_version": "...",
+  "plugin_id": "<uuid>",
+  "protocol_version": 2,
+  "sender_id": "<uuid>",
+  "sequence_number": <int>,     (live_card_upsert only)
+  "user_id": "<uuid>"
+}
+```
+
+Used as `aad` in `AES-256-GCM.encrypt(CEK, payload_nonce, payload, aad)`. The payload AAD is shared across all recipients (every device decrypts the same `payload_ciphertext`); per-recipient binding lives in the HPKE `info`.
+
+### 11.8 Ed25519 Signed Envelope
+
+Sorted-keys canonical JSON, UTF-8, compact separators. Includes EVERY recipient envelope (sorted by `device_id` lowercase UUID lexicographic):
+
+```json
+{
+  "card_key": "...",                          (live_card_upsert / delete)
+  "card_type": "...",                         (live_card_upsert)
+  "envelope_kind": "...",
+  "expires_at": "<ISO8601>",
+  "min_plugin_version": "...",                (event / live_card_upsert)
+  "nonce": "<base64>",                        (live_card_delete; named differently from payload_nonce)
+  "payload_ciphertext": "<base64>",           (event / live_card_upsert)
+  "payload_nonce": "<base64>",                (event / live_card_upsert)
+  "plugin_id": "<uuid>",
+  "protocol_version": 2,
+  "recipient_directory_version": <int>,       (event / live_card_upsert)
+  "recipient_envelopes": [                    (event / live_card_upsert)
+    {
+      "device_id": "<uuid>",
+      "hpke_ciphertext": "<base64>",
+      "hpke_kem_output": "<base64>"
+    },
+    ...
+  ],
+  "sender_id": "<uuid>",
+  "sequence_number": <int>,                   (live_card_upsert)
+  "user_id": "<uuid>"
+}
+```
+
+**Verify order (Codex 127 implementation guardrail):** server / device MUST validate the Ed25519 signature BEFORE consulting any envelope field for routing, storage, or HPKE info reconstruction. The unsigned wire bytes are untrusted until the signature passes. Implementations that read `sender_id` from the envelope to look up the verification key MUST re-verify the signature with the *resolved* sender's known public key, never trust an inline pubkey.
+
+### 11.9 Sender Device Directory
+
+`GET /v1/senders/me/devices?user_id={uuid}` (sender JWT auth, gated by active `Pairing(sender_id, user_id)`):
+
+```json
+{
+  "directory_version": <int>,
+  "user_id": "<uuid>",
+  "devices": [
+    {
+      "device_id": "<uuid>",
+      "encryption_public_key": "<base64 32-byte X25519>",
+      "updated_at": "<ISO8601 UTC>"
+    },
+    ...
+  ]
+}
+```
+
+`directory_version` is a per-user monotonic integer (`users.device_directory_version`), bumped transactionally on any device enrollment, revocation, or `encryption_public_key` rotation. Senders include the last-seen version in `recipient_directory_version` on every publish.
+
+**Consistency assumption:** the directory_version read and the recipient set check on `POST /v1/messages/send` MUST happen in the same DB transaction (strongly consistent). Phase 9 ships single-Postgres only; deferred to V2 / future replication track.
+
+### 11.10 Recipient Set Validation
+
+Server applies these checks in order, returning the first matching error:
+
+| Check | Status | Code |
+|---|---|---|
+| Duplicate `device_id` within `recipient_envelopes` | 400 | `duplicate_device_id` |
+| `device_id` not in user's `active_devices ∪ recently_revoked` | 400 | `unknown_recipient` |
+| `recipient_directory_version > server.users.device_directory_version` | 400 | `invalid_directory_version` |
+| `recipient_directory_version < server_version` AND active device missing | 409 | `stale_recipient_set` |
+| `active_devices - recipient_envelopes` non-empty | 409 | `stale_recipient_set` |
+| recently-revoked device extras (`revoked_at > now() - 5m`) | 200 | (logged at INFO) |
+| All active devices covered exactly | 200 | (success) |
+
+Sets are computed as:
+
+```sql
+active_devices = devices WHERE user_id = $1
+                          AND revoked_at IS NULL
+                          AND encryption_public_key IS NOT NULL
+recently_revoked = devices WHERE user_id = $1
+                            AND revoked_at > NOW() - INTERVAL '5 minutes'
+```
+
+`409 stale_recipient_set` responses include `X-Stale-Directory-Version: <int>` header and JSON body:
+
+```json
+{
+  "error": "stale_recipient_set",
+  "message": "...",
+  "current_directory_version": <int>,
+  "missing_device_ids": ["<uuid>", ...]
+}
+```
+
+Sender retry pattern: catch `409`, refetch directory, re-encrypt + re-publish ONCE. Repeated `409` indicates a live race (new enrollment between attempts) — sender escalates to caller.
+
+Recipient cap: `recipient_envelopes.length <= 32`. Server constant `RECIPIENT_CAP_PER_MESSAGE`.
+
+### 11.11 Trust Model
+
+The server is a **trusted device directory** for Phase 9. This is the same trust level the V1 `encrypted_user_state` blob assumed — the server delivers the wrapped master_key to the client. Phase 9 PRESERVES the V1 trust boundary; it does not improve it against an active server adversary.
+
+**Confidentiality guarantees Phase 9 DOES provide:**
+
+- Network observers can't read payloads (transport TLS + end-to-end HPKE).
+- Server reads at rest can't decrypt payloads (no master_key, no per-device private keys on the server).
+- Compromise of device A's X25519 private key reveals only device A's wraps, not device B's.
+- Per-device revocation: removing a device from `recipient_envelopes` is sufficient; no user-wide master_key rotation needed.
+
+**Confidentiality guarantees Phase 9 does NOT provide:**
+
+- **Active server key substitution.** A malicious server can serve sender-fetched directory responses with its OWN X25519 keys and gradually replace one device's key, then decrypt that device's future inbox. Mitigation requires a separate device-attestation track (existing devices co-sign new devices' encryption keys, transparency-log key change monitoring, or similar Signal-style safety numbers). Out of scope for V1.5; tracked under V2 capability surface.
+- **Forward secrecy in the message-by-message sense.** HPKE Base mode uses a fresh ephemeral sender keypair per message AND a long-term static recipient key. A device-key compromise today CAN decrypt past messages stored on the server. True forward secrecy requires ratcheting (Double Ratchet) which is out of V1.5 scope.
+
+The V1.5 roadmap claim of "forward secrecy" is replaced in Phase 9 documentation by **per-device confidentiality + rotation-free revocation** — what HPKE Base actually delivers.
+
+### 11.12 Device Enrollment
+
+`POST /v1/auth/devices/enroll` body adds `encryption_public_key`:
+
+```json
+{
+  "public_key": "<base64 Ed25519 device-bound JWT key>",
+  "encryption_public_key": "<base64 X25519 32-byte>",
+  "fcm_token": "..."
+}
+```
+
+Server stores both in the `devices` row. `device_directory_version` for the user bumps on this insert.
+
+`PUT /v1/auth/devices/me/encryption_key` (auth: `current_auth_context`, mutates only `ctx.device.id`):
+
+```json
+{
+  "encryption_public_key": "<base64 X25519 32-byte>"
+}
+```
+
+Rotates the device's encryption pubkey. Bumps `device_directory_version`. Old key material is irrecoverable after rotation — messages encrypted to the old key become undecryptable on this device.
+
+### 11.13 SSE Event
+
+User-facing SSE channel adds:
+
+```json
+{
+  "type": "devices.changed",
+  "version": <int>,
+  "user_id": "<uuid>"
+}
+```
+
+Clients refetch the user's own device list on receipt. Senders have no SSE channel; they refresh on directory cache TTL (60s) or on `409 stale_recipient_set` rejection.
+
+### 11.14 Migration Notes
+
+Phase 9 is wire-incompatible with V1. Migration in V0.1 dev-mode:
+
+- `devices.encryption_public_key` column is `BYTEA NULL` during migration; transition to `NOT NULL` after a clean-up migration once all active dev devices have re-enrolled.
+- Existing V1 live cards in the `live_cards` table are deleted by the Phase 9b migration — they're encrypted under `pairing_key` which the new client can't derive.
+- Existing V1 messages aren't migrated; users see an empty inbox on first launch of the V2 client. (Acceptable for dev-mode.)
+- The Phase 8 `master_key_rotation` flow (§10) is unchanged. `master_key` still wraps the user-state blob.
+
+### 11.15 Test Vectors
+
+Phase 9b implementation MUST produce byte-identical outputs for these fixtures:
+
+- HPKE round-trip: fixed `(skR, pkR, info, plaintext)` → expected `enc || ciphertext`.
+- Multi-recipient publish with sorted envelopes: N=3 fixed devices, fixed CEK, fixed payload → expected `recipient_envelopes` array byte-equal across Python/Kotlin.
+- Canonical info JSON: every combination of `envelope_kind` and present/absent card fields → expected canonical byte sequence.
+- Ed25519 envelope signature: fixed sender key + fixed envelope → expected signature.
+- Recipient classification: 8-row matrix from §11.10.
+
+Vectors live in `server/tests/fixtures/phase9_vectors.json` and are asserted by both `server/tests/test_phase9.py` and `android/core/crypto/src/test/.../HpkeTest.kt`.
+
