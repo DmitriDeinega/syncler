@@ -1,0 +1,30 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+(node:18772) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Verdict: **GREEN**
+
+Consultation 130 successfully addresses the blockers and requirements identified in Triad 129.
+
+### Analysis of fixups:
+
+1.  **Recipient-side Ed25519 verify (Block 1):**
+    *   `android/core/crypto/Aad.kt` correctly implements `eventSignedEnvelopeBytes` and `liveCardUpsertSignedEnvelopeBytes`.
+    *   The recursive `canonicalJsonBytes` encoder now correctly handles the nested `recipient_envelopes` array and sorts map keys lexicographically, matching the cross-platform specification.
+    *   `InboxRepository.verifyV2Signature` reconstructs the signed bytes (including sorting recipients by lowercase `device_id`) and validates against all candidate public keys for the sender. This provides the necessary protection against server-side forgery.
+
+2.  **Cursor management (Block 2):**
+    *   `InboxRepository.refresh` now tracks `sawDecryptFailure`.
+    *   If any event message (non-live card) fails signature verification, HPKE opening, or AES decryption, `sawDecryptFailure` is set to true.
+    *   The `lastSince` cursor advancement is gated by `!sawDecryptFailure`, ensuring that failed events are re-fetched in the next poll rather than being permanently skipped.
+
+3.  **Dependency Pinning:**
+    *   `server/pyproject.toml` now correctly pins `cryptography>=48.0.0,<49`, aligning with the SDK and ensuring consistent cryptographic behavior.
+
+### Phase 9 Close-out:
+
+There are no remaining blocking items for Phase 9. The deferred items (INFO logging vs DEBUG and dead schema cleanup) are diagnostic or maintenance tasks that do not impact cryptographic integrity or protocol correctness.
+
+Phase 9 is ready for close-out.
