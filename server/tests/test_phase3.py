@@ -18,14 +18,28 @@ from __future__ import annotations
 import base64
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from syncler.crypto import DirectoryDevice
 
 from app.models import LiveCard, Pairing, Plugin
+from tests.v2_helpers import (
+    build_live_card_delete_body,
+    build_live_card_upsert_body,
+    fresh_x25519_keypair,
+)
+
+
+@dataclass
+class EnrolledCardDevice:
+    device_id: uuid.UUID
+    session_token: str
+    x25519_public: bytes
 
 
 def _b64(value: bytes) -> str:
@@ -72,15 +86,30 @@ async def _signup_login(client: AsyncClient, *, email: str) -> tuple[uuid.UUID, 
     return user_id, login.json()["session_token"]
 
 
-async def _enroll_device(client: AsyncClient, token: str) -> tuple[uuid.UUID, str]:
+async def _enroll_device(client: AsyncClient, token: str) -> EnrolledCardDevice:
+    keypair = fresh_x25519_keypair()
     response = await client.post(
         "/v1/auth/devices/enroll",
         headers={"Authorization": f"Bearer {token}"},
-        json={"public_key": _b64(b"d" * 32)},
+        json={
+            "public_key": _b64(b"d" * 32),
+            "encryption_public_key": _b64(keypair.public_key_raw),
+        },
     )
     assert response.status_code == 201, response.text
     body = response.json()
-    return uuid.UUID(body["device_id"]), body["session_token"]
+    return EnrolledCardDevice(
+        device_id=uuid.UUID(body["device_id"]),
+        session_token=body["session_token"],
+        x25519_public=keypair.public_key_raw,
+    )
+
+
+def _to_directory_device(device: EnrolledCardDevice) -> DirectoryDevice:
+    return DirectoryDevice(
+        device_id=str(device.device_id),
+        encryption_public_key=device.x25519_public,
+    )
 
 
 async def _register_sender(client: AsyncClient) -> tuple[uuid.UUID, Ed25519PrivateKey]:
@@ -205,7 +234,7 @@ async def test_publish_template_rejected_unknown_layout(app_client: AsyncClient)
         endpoints=["https://lottery.app/api/*"],
     )
     response = await app_client.post("/v1/plugins/publish", json=body)
-    assert response.status_code == 422, response.text
+    assert response.status_code == 400, response.text
 
 
 @pytest.mark.asyncio
@@ -219,7 +248,7 @@ async def test_publish_template_rejected_missing_title(app_client: AsyncClient) 
         endpoints=["https://lottery.app/api/*"],
     )
     response = await app_client.post("/v1/plugins/publish", json=body)
-    assert response.status_code == 422, response.text
+    assert response.status_code == 400, response.text
 
 
 @pytest.mark.asyncio
@@ -236,7 +265,7 @@ async def test_publish_template_rejected_bad_jsonpath(app_client: AsyncClient) -
         endpoints=["https://lottery.app/api/*"],
     )
     response = await app_client.post("/v1/plugins/publish", json=body)
-    assert response.status_code == 422, response.text
+    assert response.status_code == 400, response.text
 
 
 @pytest.mark.asyncio
@@ -258,7 +287,7 @@ async def test_publish_template_rejected_action_endpoint_not_declared(
         endpoints=["https://lottery.app/api/*"],
     )
     response = await app_client.post("/v1/plugins/publish", json=body)
-    assert response.status_code == 422, response.text
+    assert response.status_code == 400, response.text
 
 
 @pytest.mark.asyncio
@@ -278,7 +307,7 @@ async def test_publish_template_rejected_duplicate_action_ids(app_client: AsyncC
         endpoints=["https://lottery.app/api/*"],
     )
     response = await app_client.post("/v1/plugins/publish", json=body)
-    assert response.status_code == 422, response.text
+    assert response.status_code == 400, response.text
 
 
 # ---------- Phase 3b: live card upsert security gates --------------------
@@ -290,24 +319,25 @@ def _upsert_body(
     plugin_id: uuid.UUID,
     private_key: Ed25519PrivateKey,
     *,
+    recipients: list[EnrolledCardDevice],
     card_key: str = "card-1",
     sequence_number: int = 1,
     expires_at: datetime | None = None,
 ) -> dict:
-    expires = expires_at or _future(hours=12)
-    body: dict = {
-        "sender_id": str(sender_id),
-        "user_id": str(user_id),
-        "plugin_id": str(plugin_id),
-        "card_key": card_key,
-        "encrypted_payload": _b64(b"ciphertext-and-tag-padding"),
-        "nonce": _b64(uuid.uuid4().bytes[:12]),
-        "sequence_number": sequence_number,
-        "expires_at": _iso(expires),
-    }
-    envelope = {**body, "card_type": "live"}
-    body["envelope_signature"] = _b64(private_key.sign(_canonical(envelope)))
-    return body
+    """Phase 9b V2 live-card upsert body (spec §11.5)."""
+    return build_live_card_upsert_body(
+        sender_id=str(sender_id),
+        user_id=str(user_id),
+        plugin_id=str(plugin_id),
+        card_key=card_key,
+        card_type="standard_card",
+        sequence_number=sequence_number,
+        payload={"card_key": card_key, "msg": "v2-card"},
+        recipient_devices=[_to_directory_device(d) for d in recipients],
+        recipient_directory_version=1,
+        sender_ed25519=private_key,
+        expires_at=expires_at,
+    )
 
 
 @pytest.mark.asyncio
@@ -316,13 +346,13 @@ async def test_card_upsert_rejected_when_plugin_revoked(
 ) -> None:
     """Codex consultation 62 RED #2: revoked plugin must not upsert cards."""
     user_id, bootstrap = await _signup_login(app_client, email="rev@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id, revoked=True,
     )
 
-    body = _upsert_body(sender_id, user_id, plugin_id, private_key)
+    body = _upsert_body(sender_id, user_id, plugin_id, private_key, recipients=[enrolled])
     response = await app_client.post("/v1/cards/upsert", json=body)
     assert response.status_code == 410, response.text
 
@@ -333,7 +363,7 @@ async def test_card_upsert_rejected_when_no_pairing(
 ) -> None:
     """Codex consultation 62 RED #3: missing active pairing must reject."""
     user_id, bootstrap = await _signup_login(app_client, email="np@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     sender_id, private_key = await _register_sender(app_client)
     # Seed a plugin without the pairing row.
     plugin = Plugin(
@@ -354,7 +384,7 @@ async def test_card_upsert_rejected_when_no_pairing(
     db_session.add(plugin)
     await db_session.commit()
 
-    body = _upsert_body(sender_id, user_id, plugin.id, private_key)
+    body = _upsert_body(sender_id, user_id, plugin.id, private_key, recipients=[enrolled])
     response = await app_client.post("/v1/cards/upsert", json=body)
     assert response.status_code == 410, response.text
 
@@ -365,7 +395,7 @@ async def test_card_upsert_rejected_when_expires_past(
 ) -> None:
     """Codex consultation 62 RED #4: already-expired expires_at is rejected."""
     user_id, bootstrap = await _signup_login(app_client, email="exp1@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
@@ -373,6 +403,7 @@ async def test_card_upsert_rejected_when_expires_past(
 
     body = _upsert_body(
         sender_id, user_id, plugin_id, private_key,
+        recipients=[enrolled],
         expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     response = await app_client.post("/v1/cards/upsert", json=body)
@@ -385,7 +416,7 @@ async def test_card_upsert_rejected_when_expires_exceeds_48h(
 ) -> None:
     """Codex consultation 62 RED #4: expires_at beyond the 48h cap is rejected."""
     user_id, bootstrap = await _signup_login(app_client, email="exp2@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
@@ -393,6 +424,7 @@ async def test_card_upsert_rejected_when_expires_exceeds_48h(
 
     body = _upsert_body(
         sender_id, user_id, plugin_id, private_key,
+        recipients=[enrolled],
         expires_at=_future(hours=72),  # > 48h cap
     )
     response = await app_client.post("/v1/cards/upsert", json=body)
@@ -405,7 +437,7 @@ async def test_card_upsert_sequence_regression_rejected(
 ) -> None:
     """Phase 3b: lower sequence_number than existing must 409."""
     user_id, bootstrap = await _signup_login(app_client, email="seq@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     sender_id, private_key = await _register_sender(app_client)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
@@ -413,6 +445,7 @@ async def test_card_upsert_sequence_regression_rejected(
 
     first = _upsert_body(
         sender_id, user_id, plugin_id, private_key,
+        recipients=[enrolled],
         card_key="seq-card", sequence_number=10,
     )
     r1 = await app_client.post("/v1/cards/upsert", json=first)
@@ -420,6 +453,7 @@ async def test_card_upsert_sequence_regression_rejected(
 
     older = _upsert_body(
         sender_id, user_id, plugin_id, private_key,
+        recipients=[enrolled],
         card_key="seq-card", sequence_number=5,
     )
     r2 = await app_client.post("/v1/cards/upsert", json=older)
@@ -438,9 +472,9 @@ async def test_card_delete_signature_bound_to_user(
     """
     sender_id, private_key = await _register_sender(app_client)
     alice_user_id, alice_bootstrap = await _signup_login(app_client, email="alice@x.com")
-    await _enroll_device(app_client, alice_bootstrap)
+    alice_enrolled = await _enroll_device(app_client, alice_bootstrap)
     bob_user_id, bob_bootstrap = await _signup_login(app_client, email="bob@x.com")
-    await _enroll_device(app_client, bob_bootstrap)
+    bob_enrolled = await _enroll_device(app_client, bob_bootstrap)
 
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=alice_user_id, sender_id=sender_id,
@@ -456,33 +490,27 @@ async def test_card_delete_signature_bound_to_user(
     )
     await db_session.commit()
 
-    # Both upsert a card with the SAME card_key.
-    for uid in (alice_user_id, bob_user_id):
-        body = _upsert_body(sender_id, uid, plugin_id, private_key, card_key="shared-key")
+    # Both upsert a card with the SAME card_key, each sealed to their
+    # own device.
+    for uid, enrolled in ((alice_user_id, alice_enrolled), (bob_user_id, bob_enrolled)):
+        body = _upsert_body(
+            sender_id, uid, plugin_id, private_key,
+            recipients=[enrolled], card_key="shared-key",
+        )
         r = await app_client.post("/v1/cards/upsert", json=body)
         assert r.status_code == 201, r.text
 
-    # Build a delete envelope for ALICE's card and submit it.
-    # Phase 12: delete envelope now binds nonce + expires_at too.
-    delete_nonce_b64 = _b64(uuid.uuid4().bytes[:12])
-    delete_expires_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    alice_envelope = _canonical(
-        {
-            "sender_id": str(sender_id),
-            "user_id": str(alice_user_id),
-            "card_key": "shared-key",
-            "nonce": delete_nonce_b64,
-            "expires_at": delete_expires_at,
-        }
+    # Build a V2 delete envelope for ALICE's card. The envelope binds
+    # user_id (Codex 62 RED #5) AND plugin_id (Codex 125 RED #1 fix),
+    # so this delete cannot affect Bob's card with the same card_key
+    # — that's the test invariant.
+    delete_body = build_live_card_delete_body(
+        sender_id=str(sender_id),
+        user_id=str(alice_user_id),
+        plugin_id=str(plugin_id),
+        card_key="shared-key",
+        sender_ed25519=private_key,
     )
-    delete_body = {
-        "sender_id": str(sender_id),
-        "user_id": str(alice_user_id),
-        "card_key": "shared-key",
-        "nonce": delete_nonce_b64,
-        "expires_at": delete_expires_at,
-        "envelope_signature": _b64(private_key.sign(alice_envelope)),
-    }
     response = await app_client.post("/v1/cards/delete", json=delete_body)
     assert response.status_code == 204
 
@@ -508,34 +536,22 @@ def _delete_body(
     user_id: uuid.UUID,
     private_key,
     *,
+    plugin_id: uuid.UUID,
     card_key: str,
     nonce: bytes | None = None,
     expires_at: datetime | None = None,
 ) -> dict:
-    """Build a Phase-12-shaped delete request body."""
-    if nonce is None:
-        nonce = uuid.uuid4().bytes[:12]
-    if expires_at is None:
-        expires_at = datetime.now(UTC) + timedelta(hours=1)
-    expires_at_str = expires_at.isoformat().replace("+00:00", "Z")
-    nonce_b64 = _b64(nonce)
-    envelope = _canonical(
-        {
-            "sender_id": str(sender_id),
-            "user_id": str(user_id),
-            "card_key": card_key,
-            "nonce": nonce_b64,
-            "expires_at": expires_at_str,
-        }
+    """Phase 9b V2 live-card delete body (spec §11.6). plugin_id is
+    now part of the canonical signed envelope (Codex 125 RED #1 fix)."""
+    return build_live_card_delete_body(
+        sender_id=str(sender_id),
+        user_id=str(user_id),
+        plugin_id=str(plugin_id),
+        card_key=card_key,
+        sender_ed25519=private_key,
+        nonce=nonce,
+        expires_at=expires_at,
     )
-    return {
-        "sender_id": str(sender_id),
-        "user_id": str(user_id),
-        "card_key": card_key,
-        "nonce": nonce_b64,
-        "expires_at": expires_at_str,
-        "envelope_signature": _b64(private_key.sign(envelope)),
-    }
 
 
 @pytest.mark.asyncio
@@ -549,22 +565,22 @@ async def test_card_delete_rejects_replayed_envelope(
     """
     sender_id, private_key = await _register_sender(app_client)
     user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
     )
 
     # First card + first delete succeed.
-    body1 = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    body1 = _upsert_body(sender_id, user_id, plugin_id, private_key, recipients=[enrolled], card_key="C")
     r = await app_client.post("/v1/cards/upsert", json=body1)
     assert r.status_code == 201, r.text
 
-    delete = _delete_body(sender_id, user_id, private_key, card_key="C")
+    delete = _delete_body(sender_id, user_id, private_key, plugin_id=plugin_id, card_key="C")
     r = await app_client.post("/v1/cards/delete", json=delete)
     assert r.status_code == 204, r.text
 
     # Sender re-creates the card (could be a legitimate later state).
-    body2 = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    body2 = _upsert_body(sender_id, user_id, plugin_id, private_key, recipients=[enrolled], card_key="C")
     r = await app_client.post("/v1/cards/upsert", json=body2)
     assert r.status_code == 201, r.text
 
@@ -581,16 +597,16 @@ async def test_card_delete_rejects_expired_envelope(
     """A delete with expires_at in the past gets 400. Codex 95."""
     sender_id, private_key = await _register_sender(app_client)
     user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
     )
-    body = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    body = _upsert_body(sender_id, user_id, plugin_id, private_key, recipients=[enrolled], card_key="C")
     await app_client.post("/v1/cards/upsert", json=body)
 
     expired = datetime.now(UTC) - timedelta(seconds=5)
     delete = _delete_body(
-        sender_id, user_id, private_key, card_key="C", expires_at=expired,
+        sender_id, user_id, private_key, plugin_id=plugin_id, card_key="C", expires_at=expired,
     )
     r = await app_client.post("/v1/cards/delete", json=delete)
     assert r.status_code == 400, r.text
@@ -604,16 +620,16 @@ async def test_card_delete_rejects_exceeds_ttl_cap(
     """A delete with expires_at > now + 48h gets 400. Same cap as upsert."""
     sender_id, private_key = await _register_sender(app_client)
     user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     plugin_id = await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
     )
-    body = _upsert_body(sender_id, user_id, plugin_id, private_key, card_key="C")
+    body = _upsert_body(sender_id, user_id, plugin_id, private_key, recipients=[enrolled], card_key="C")
     await app_client.post("/v1/cards/upsert", json=body)
 
     too_far = datetime.now(UTC) + timedelta(hours=72)
     delete = _delete_body(
-        sender_id, user_id, private_key, card_key="C", expires_at=too_far,
+        sender_id, user_id, private_key, plugin_id=plugin_id, card_key="C", expires_at=too_far,
     )
     r = await app_client.post("/v1/cards/delete", json=delete)
     assert r.status_code == 400, r.text
@@ -629,30 +645,26 @@ async def test_card_delete_rejects_naive_expires_at(
     """
     sender_id, private_key = await _register_sender(app_client)
     user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
     )
 
-    # Submit a delete with a naive datetime string (no Z, no offset).
+    # Submit a delete with a naive datetime string (no Z, no offset)
+    # — Pydantic's `expires_at` validator rejects it before signature
+    # verification.
     nonce = _b64(uuid.uuid4().bytes[:12])
     naive_iso = (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
-    envelope = _canonical(
-        {
-            "sender_id": str(sender_id),
-            "user_id": str(user_id),
-            "card_key": "C",
-            "nonce": nonce,
-            "expires_at": naive_iso,
-        }
-    )
     body = {
+        "protocol_version": 2,
+        "envelope_kind": "live_card_delete",
         "sender_id": str(sender_id),
         "user_id": str(user_id),
+        "plugin_id": str(uuid.uuid4()),
         "card_key": "C",
         "nonce": nonce,
         "expires_at": naive_iso,
-        "envelope_signature": _b64(private_key.sign(envelope)),
+        "envelope_signature": _b64(b"\xff" * 64),
     }
     r = await app_client.post("/v1/cards/delete", json=body)
     # 400 (our app's validation_exception_handler downgrades 422 -> 400).
@@ -672,13 +684,17 @@ async def test_card_delete_records_nonce_even_when_card_missing(
     """
     sender_id, private_key = await _register_sender(app_client)
     user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
-    await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
     await _seed_pairing_and_live_plugin(
         db_session, user_id=user_id, sender_id=sender_id,
     )
 
     # Delete a card that doesn't exist — should still succeed (idempotent).
-    delete = _delete_body(sender_id, user_id, private_key, card_key="never-existed")
+    delete = _delete_body(
+        sender_id, user_id, private_key,
+        plugin_id=uuid.uuid4(),  # any valid uuid; the lookup just misses
+        card_key="never-existed",
+    )
     r = await app_client.post("/v1/cards/delete", json=delete)
     assert r.status_code == 204, r.text
 
@@ -699,7 +715,8 @@ async def test_inbox_omits_dismissed_messages(
     filters dismissed_at IS NULL. A dismissed message must not re-surface
     in the next inbox pull on the dismissing device."""
     user_id, bootstrap = await _signup_login(app_client, email="dismiss@x.com")
-    _, session_token = await _enroll_device(app_client, bootstrap)
+    enrolled = await _enroll_device(app_client, bootstrap)
+    session_token = enrolled.session_token
     sender_id, private_key = await _register_sender(app_client)
 
     db_session.add(
@@ -726,27 +743,18 @@ async def test_inbox_omits_dismissed_messages(
     db_session.add(plugin)
     await db_session.commit()
 
-    # Send a message via the public send route.
-    expires = _future(hours=2)
-    envelope = {
-        "sender_id": str(sender_id),
-        "user_id": str(user_id),
-        "plugin_id": str(plugin.id),
-        "encrypted_body": _b64(b"ciphertext-and-tag-padding"),
-        "nonce": _b64(uuid.uuid4().bytes[:12]),
-        "min_plugin_version": "",
-        "expires_at": _iso(expires),
-    }
-    sig = _b64(private_key.sign(_canonical(envelope)))
-    send_body = {
-        "sender_id": str(sender_id),
-        "user_id": str(user_id),
-        "plugin_id": str(plugin.id),
-        "encrypted_body": envelope["encrypted_body"],
-        "nonce": envelope["nonce"],
-        "envelope_signature": sig,
-        "expires_at": _iso(expires),
-    }
+    # Send a V2 event publish via the public send route.
+    from tests.v2_helpers import build_event_publish_body
+    send_body = build_event_publish_body(
+        sender_id=str(sender_id),
+        user_id=str(user_id),
+        plugin_id=str(plugin.id),
+        payload={"msg": "v2-event"},
+        recipient_devices=[_to_directory_device(enrolled)],
+        recipient_directory_version=1,
+        sender_ed25519=private_key,
+        expires_at=_future(hours=2),
+    )
     send = await app_client.post("/v1/messages/send", json=send_body)
     assert send.status_code == 201, send.text
     message_id = send.json()["message_id"]

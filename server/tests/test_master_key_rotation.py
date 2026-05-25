@@ -72,7 +72,7 @@ async def _signup_login_enroll(
     enroll = await client.post(
         "/v1/auth/devices/enroll",
         headers={"Authorization": f"Bearer {bootstrap}"},
-        json={"public_key": _b64(b"d" * 32)},
+        json={"public_key": _b64(b"d" * 32), "encryption_public_key": _b64(b"e" * 32)},
     )
     assert enroll.status_code == 201, enroll.text
     return enroll.json()["session_token"], auth_key

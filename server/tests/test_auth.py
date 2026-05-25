@@ -185,7 +185,7 @@ async def test_account_delete_invalidates_existing_token(client: AsyncClient) ->
     bootstrap = login.json()["session_token"]
     enroll = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4)},
+        json={"public_key": b64_bytes(32, 4), "encryption_public_key": b64_bytes(32, 104)},
         headers={"Authorization": f"Bearer {bootstrap}"},
     )
     # Account delete now requires the device-bound token (Codex consultation
@@ -217,7 +217,7 @@ async def test_full_auth_flow(client: AsyncClient) -> None:
     bootstrap = login.json()["session_token"]
     enroll = await client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4)},
+        json={"public_key": b64_bytes(32, 4), "encryption_public_key": b64_bytes(32, 104)},
         headers={"Authorization": f"Bearer {bootstrap}"},
     )
     # Sensitive routes (list_devices) require the device-bound token from

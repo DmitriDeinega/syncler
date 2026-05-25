@@ -162,7 +162,7 @@ async def _signup_login_enroll(client: AsyncClient, email: str, fill: int) -> st
     enroll = await client.post(
         "/v1/auth/devices/enroll",
         headers={"Authorization": f"Bearer {bootstrap}"},
-        json={"public_key": b64_bytes(32, fill + 3)},
+        json={"public_key": b64_bytes(32, fill + 3), "encryption_public_key": b64_bytes(32, fill + 103)},
     )
     return enroll.json()["session_token"]
 
@@ -284,7 +284,7 @@ async def test_revoke_device_closes_event_stream(client: AsyncClient) -> None:
     enroll_b = await client.post(
         "/v1/auth/devices/enroll",
         headers={"Authorization": f"Bearer {bootstrap_token}"},
-        json={"public_key": b64_bytes(32, 100)},
+        json={"public_key": b64_bytes(32, 100), "encryption_public_key": b64_bytes(32, 200)},
     )
     second_token = enroll_b.json()["session_token"]
 

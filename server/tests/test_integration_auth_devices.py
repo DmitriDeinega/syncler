@@ -38,7 +38,7 @@ async def test_auth_device_and_account_lifecycle(app_client: AsyncClient) -> Non
     # one and still have a valid device-bound token to delete the account.
     enroll_a = await app_client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 4), "fcm_token": "test-fcm-token"},
+        json={"public_key": b64_bytes(32, 4), "encryption_public_key": b64_bytes(32, 104), "fcm_token": "test-fcm-token"},
         headers=bootstrap_headers,
     )
     assert enroll_a.status_code == 201
@@ -47,7 +47,7 @@ async def test_auth_device_and_account_lifecycle(app_client: AsyncClient) -> Non
 
     enroll_b = await app_client.post(
         "/v1/auth/devices/enroll",
-        json={"public_key": b64_bytes(32, 5)},
+        json={"public_key": b64_bytes(32, 5), "encryption_public_key": b64_bytes(32, 105)},
         headers=bootstrap_headers,
     )
     assert enroll_b.status_code == 201
