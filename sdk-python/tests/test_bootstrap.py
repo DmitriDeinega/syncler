@@ -33,6 +33,7 @@ from syncler.broker_storage import (
     BrokerEntry,
     BrokerStorageConflictError,
     InMemoryBrokerStorage,
+    UnknownPairingIdError,
 )
 
 
@@ -201,9 +202,19 @@ def test_in_memory_broker_storage_cas():
     s = InMemoryBrokerStorage()
     pairing_id = "00000000-1111-2222-3333-444444444444"
     entry_a = BrokerEntry(user_id="aaaa", pairing_key=b"\x01" * 32)
+    # Phase 6 pending-pairing registry: reserve is now required
+    # before complete (defense-in-depth alongside the broker handler's
+    # 404 gate). Unreserved complete raises UnknownPairingIdError.
+    with pytest.raises(UnknownPairingIdError):
+        s.complete(pairing_id, entry_a)
+    s.reserve(pairing_id)
+    assert s.is_reserved(pairing_id)
     # Phase 5a-2.1: complete() returns True on first completion,
     # False on idempotent replay. Broker uses this to send 201 vs 200.
     assert s.complete(pairing_id, entry_a) is True
+    # is_reserved stays True after completion so a re-POST gets to
+    # the CAS layer, not bounced as 404 (Gemini 93 + Codex 93).
+    assert s.is_reserved(pairing_id)
     # Idempotent second store with same values.
     assert s.complete(pairing_id, entry_a) is False
     assert s.fetch(pairing_id) == entry_a
@@ -211,3 +222,111 @@ def test_in_memory_broker_storage_cas():
     entry_b = BrokerEntry(user_id="bbbb", pairing_key=b"\x02" * 32)
     with pytest.raises(BrokerStorageConflictError):
         s.complete(pairing_id, entry_b)
+
+
+def test_client_create_pairing_qr_reserves_pairing_id(tmp_path):
+    """Phase 6 / Codex 93 missing-test: confirm
+    Client.create_pairing_qr(sender_broker_url=...) calls
+    storage.reserve(pairing_id) so the broker handler's 404 gate
+    accepts the subsequent envelope."""
+    from unittest.mock import MagicMock, patch
+
+    from syncler.client import Client
+
+    storage = InMemoryBrokerStorage()
+    # Build a Client with our storage. private_key_path needs a real
+    # Ed25519 PEM; generate one to a tmp file.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, NoEncryption, PrivateFormat,
+    )
+    key_path = tmp_path / "test-sender.pem"
+    key_pem = Ed25519PrivateKey.generate().private_bytes(
+        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
+    )
+    key_path.write_bytes(key_pem)
+
+    client = Client(
+        sender_name="Test",
+        private_key_path=str(key_path),
+        broker_storage=storage,
+    )
+    client.set_sender_id("11111111-1111-1111-1111-111111111111")
+
+    pairing_id = "22222222-3333-4444-5555-666666666666"
+    server_response = MagicMock()
+    server_response.json.return_value = {
+        "pairing_id": pairing_id,
+        "pairing_token": "tkn",
+        "broker_url": "https://syncler.example.com/pair?token=tkn",
+    }
+    server_response.raise_for_status = lambda: None
+
+    qr_path = tmp_path / "qr.png"
+    with patch.object(client.session, "post", return_value=server_response):
+        # Patch the QR renderer too so we don't need PIL/qrcode here.
+        with patch("syncler.client._render_qr"):
+            client.create_pairing_qr(
+                sender_broker_url="https://broker.example.com/",
+                out_path=str(qr_path),
+            )
+
+    assert storage.is_reserved(pairing_id), \
+        "create_pairing_qr(sender_broker_url=...) must call storage.reserve(pairing_id)"
+
+
+def test_client_create_pairing_qr_does_not_reserve_without_broker_url(tmp_path):
+    """V1 manual-pairing path: when sender_broker_url is None, the
+    Client should NOT call reserve() — there's no broker to gate.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from syncler.client import Client
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, NoEncryption, PrivateFormat,
+    )
+
+    storage = InMemoryBrokerStorage()
+    key_path = tmp_path / "test-sender.pem"
+    key_path.write_bytes(Ed25519PrivateKey.generate().private_bytes(
+        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
+    ))
+
+    client = Client(
+        sender_name="Test",
+        private_key_path=str(key_path),
+        broker_storage=storage,
+    )
+    client.set_sender_id("11111111-1111-1111-1111-111111111111")
+
+    pairing_id = "abcdef00-0000-0000-0000-000000000000"
+    server_response = MagicMock()
+    server_response.json.return_value = {
+        "pairing_id": pairing_id,
+        "pairing_token": "tkn",
+        "broker_url": "https://syncler.example.com/pair?token=tkn",
+    }
+    server_response.raise_for_status = lambda: None
+
+    with patch.object(client.session, "post", return_value=server_response):
+        with patch("syncler.client._render_qr"):
+            client.create_pairing_qr(out_path=str(tmp_path / "qr.png"))
+
+    assert not storage.is_reserved(pairing_id)
+
+
+def test_in_memory_broker_storage_reserve_idempotent():
+    """Phase 6: reserving an already-reserved or already-completed
+    pairing_id is a no-op (an immediate re-pair after wait_for_pairing
+    returned would otherwise be racy)."""
+    s = InMemoryBrokerStorage()
+    pairing_id = "11111111-2222-3333-4444-555555555555"
+    s.reserve(pairing_id)
+    s.reserve(pairing_id)  # idempotent
+    assert s.is_reserved(pairing_id)
+    s.complete(pairing_id, BrokerEntry(user_id="xx", pairing_key=b"\x00" * 32))
+    s.reserve(pairing_id)  # still a no-op after completion
+    assert s.is_reserved(pairing_id)
+    # Unknown ID is not reserved.
+    assert not s.is_reserved("99999999-9999-9999-9999-999999999999")

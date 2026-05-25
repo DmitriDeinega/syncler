@@ -120,7 +120,12 @@ def keypair() -> tuple[X25519PrivateKey, bytes]:
 
 @pytest.fixture
 def storage() -> InMemoryBrokerStorage:
-    return InMemoryBrokerStorage()
+    s = InMemoryBrokerStorage()
+    # Phase 6: pre-reserve the canonical test pairing_id so the
+    # broker handler's pending-pairing 404 gate doesn't fire on
+    # every test. Unknown-pairing tests use a different ID.
+    s.reserve(_PAIRING_ID)
+    return s
 
 
 @pytest.fixture
@@ -253,6 +258,40 @@ def test_invalid_low_order_ephemeral_pubkey_returns_401_opaque(client, keypair):
     response = client.post("/", json=envelope)
     assert response.status_code == 401, response.text
     assert response.json()["detail"] == "bootstrap decrypt failed"
+
+
+# Phase 6: pending-pairing registry. Cryptographically-valid envelope
+# for a pairing_id that was never reserved must 404 before reaching
+# decrypt. Closes the §9.3 V1.5 deviation.
+def test_unreserved_pairing_id_returns_404_opaque(client, keypair):
+    priv, pub = keypair
+    unreserved_id = "12345678-1234-1234-1234-1234567890ab"
+    envelope = _build_envelope(
+        sender_bootstrap_priv=priv,
+        sender_bootstrap_pub_raw=pub,
+        pairing_id=unreserved_id,
+    )
+    response = client.post("/", json=envelope)
+    assert response.status_code == 404, response.text
+    # Opaque body — must NOT echo the requested pairing_id back (Codex 93).
+    body_text = response.text
+    assert unreserved_id not in body_text
+
+
+# Phase 6: after a successful completion, is_reserved should still
+# return True (so a re-POST gets to the CAS layer for the 200/409
+# decision rather than being bounced as 404).
+def test_replay_after_completion_does_not_404(client, keypair, storage):
+    priv, pub = keypair
+    pk = b"\xcd" * 32
+    env1 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk)
+    r1 = client.post("/", json=env1)
+    assert r1.status_code == 201, r1.text
+    # storage now has _entries[pairing_id]. is_reserved should be True.
+    assert storage.is_reserved(_PAIRING_ID)
+    env2 = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub, pairing_key=pk)
+    r2 = client.post("/", json=env2)
+    assert r2.status_code == 200, r2.text
 
 
 # --------------------------- shape validation (400) ---------------------------

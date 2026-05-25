@@ -545,7 +545,7 @@ def action():
 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
 
-A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `set-pairing <user_id> <pairing_key_hex>` (the example still uses V1 manual pairing) → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip.
+A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip. The example uses the automated V1.5 pairing flow with an in-process broker thread; `set-pairing` is preserved as a V1 manual fallback when the broker can't be reached.
 
 ## 8.5 Automated pairing (V1.5)
 
@@ -658,26 +658,29 @@ If step 5 fails (broker down, network glitch), the app **shows a fallback banner
 | `bootstrap_key_signature` doesn't verify | **Hard refusal.** Pairing NOT finalized. Treated as substitution-attack indicator — user does not get a fallback. |
 | Preview has only some bootstrap fields | **Hard refusal**, same reason. Sender MUST register all four atomically. |
 | Broker returns 401 (decrypt failed) | Fallback banner (manual paste). |
+| Broker returns 404 (pairing slot not found) | Fallback banner. Usually a multi-process miswire: the Client's `reserve()` call landed in a different process / worker than the broker's `is_reserved()` check. Use a shared `BrokerStorage` backend (Redis, Postgres) so reservations propagate. |
 | Broker returns 409 (replay with different values) | Fallback banner — the pairing key from your sender's `wait_for_pairing` will not match this device's, so the user must paste the device's values. |
 | Broker returns 5xx or times out | Retried up to 3 attempts (250ms / 750ms backoff). If still failing, fallback banner. |
 | Sender's `wait_for_pairing` times out | Sender's responsibility — typically loop again with a fresh QR. The device-side pairing is still real; user can paste manually. |
 
 ### Security boundaries
 
-Three guards make this safe:
+Four guards make this safe:
 
 1. **Bootstrap key signature.** The sender's X25519 bootstrap public key is signed by its long-term Ed25519 signing key (which the user confirms via fingerprint). The Syncler server cannot substitute its own X25519 key — the signature would fail to verify against the Ed25519 pub key the user just confirmed.
 
 2. **AAD-binding on `sender_broker_url`.** Even if the Syncler server could change which URL the device POSTs to, the broker reconstructs AAD using its OWN configured `sender_broker_url`. An envelope crafted for a different URL fails AEAD tag verification.
 
-3. **CAS replay guard at the broker.** A captured envelope replayed to the same broker with the same plaintext is idempotent (200). Replayed with different values gets a 409.
+3. **Pending-pairing registry at the broker.** Before any decrypt, the broker checks `storage.is_reserved(pairing_id)` and 404s unknown IDs. An attacker who knows the public bootstrap key can mint a cryptographically valid envelope for an arbitrary uuid4, but it can't reach the decrypt path unless the Client previously reserved that ID via `create_pairing_qr(sender_broker_url=...)`.
+
+4. **CAS replay guard at the broker.** A captured envelope replayed to the same broker with the same plaintext is idempotent (200). Replayed with different values gets a 409.
 
 ### Production hardening
 
-- Use Redis or Postgres for `BrokerStorage` (the shipped `InMemoryBrokerStorage` is NOT safe across multiple uvicorn workers — each worker has its own dict, so the same envelope can decrypt-and-complete twice).
-- The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. Without it, an attacker with the public bootstrap key can spam the decrypt path for cheap-but-not-free CPU. Implement per-IP and per-`pairing_id` limits.
+- Use Redis or Postgres for `BrokerStorage`. The shipped `InMemoryBrokerStorage` is single-process only — fine for the trading-bot example where the Client and broker share one Python process, but **insufficient for multi-process deployments**. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)`; if the broker app runs in a different uvicorn worker, that call's effect won't be visible to the broker's `is_reserved()` check and every pairing will 404. Use a shared backing store that implements the `BrokerStorage` Protocol atomically (one `reserve` call visible to all workers).
+- The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. The pending-pairing registry blocks envelopes for un-issued `pairing_id`s, but once an attacker knows a reserved ID they can still spam decrypt attempts on it — the rate limiter is your CPU defense. Implement per-IP and per-`pairing_id` limits.
 - Terminate TLS at your reverse proxy; the broker is HTTP-only inside the trust boundary.
-- See `docs/crypto-spec.md §9.3 "V1.5 deviation"` for the fixed-config-broker tradeoff (does NOT reject envelopes for unknown `pairing_id`s — UUID entropy + rate limiter are the V1.5 mitigations).
+- See `docs/crypto-spec.md §9.3` for the single-fixed-`sender_broker_url` design (per-pairing URLs are a V2 add).
 
 ## 9. Common server errors
 

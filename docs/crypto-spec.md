@@ -428,18 +428,15 @@ Canonical JSON binds the envelope to the specific pairing and broker.
 
 **Security Rule:** The broker MUST NOT reconstruct `sender_broker_url` from the envelope. It MUST use the `sender_broker_url` stored in its own pairing state (indexed by `pairing_id`) created when the sender called `pairing/initiate`.
 
-#### V1.5 deviation: fixed-config broker
+#### Single fixed `sender_broker_url` and the pending-pairing registry
 
-The reference broker implementation shipped under the optional `syncler[broker]` extra (`sdk-python/syncler/broker/app.py`) makes a deliberate tradeoff for V1.5: it uses a **single fixed `sender_broker_url`** configured at app startup, not a per-`pairing_id` map.
+The reference broker implementation shipped under the optional `syncler[broker]` extra (`sdk-python/syncler/broker/app.py`) uses a **single fixed `sender_broker_url`** configured at app startup, not a per-`pairing_id` map. This satisfies the "AAD-binding" half of the security rule above — the trusted state IS the configured URL, byte-equal to what the sender signed at `pairing/initiate`. Per-`pairing_id` URLs are deferred to V2 (rotating broker URLs are not currently a use case).
 
-This satisfies the "AAD-binding" half of the security rule above — the trusted state IS the configured URL, byte-equal to what the sender signed at `pairing/initiate` — but DOES NOT satisfy the "reject unknown `pairing_id`" half. An attacker with knowledge of the public bootstrap key can mint a cryptographically valid envelope for an arbitrary uuid4 `pairing_id` (they pick the AAD; AEAD authenticates the ciphertext, not the existence of a prior `/initiate` call for that ID).
+The "reject unknown `pairing_id`" half of the rule is enforced via the **pending-pairing registry** built into [BrokerStorage] as of Phase 6. `Client.create_pairing_qr(sender_broker_url=...)` calls `storage.reserve(pairing_id)` when the Syncler server hands back the freshly-issued ID; the broker handler calls `storage.is_reserved(pairing_id)` BEFORE attempting decrypt and returns HTTP 404 (opaque) for unknown IDs. `complete()` ALSO enforces the same invariant as defense-in-depth (raises `UnknownPairingIdError`, which the handler maps to the same 404).
 
-The V1.5 mitigations:
-- `pairing_id` is `uuid4` (~122 bits of entropy), so an attacker cannot enumerate real pending IDs to harvest them.
-- The broker's `rate_limiter` hook is **mandatory in production** — without it an attacker can spam decrypt attempts.
-- V2 will add a pending-pairing registry as a first-class `BrokerStorage` method, at which point this deviation can be removed.
+The mandatory `rate_limiter` hook on `make_app(...)` is still strongly recommended in production to defend against decrypt-spam DOS targeting a known-reserved `pairing_id`. The pending-pairing registry guards the entry point; the rate limiter guards CPU once an attacker knows a real ID.
 
-Production senders that need stricter behavior today implement their own [BrokerStorage] backed by Postgres or Redis, store a row at `pairing/initiate` time, and reject `complete()` calls for unknown `pairing_id`s.
+For multi-process production deployments, `InMemoryBrokerStorage` is insufficient because `reserve()` from the Client process won't be visible to `is_reserved()` in a separate broker process. Use a shared backing store (Redis, Postgres) that implements the [BrokerStorage] Protocol atomically.
 
 ### 9.4 Test Vectors
 

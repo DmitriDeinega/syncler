@@ -33,6 +33,23 @@ class BrokerStorageConflictError(Exception):
     NOT a conflict (no exception)."""
 
 
+class UnknownPairingIdError(Exception):
+    """Phase 6: raised by `complete()` when the `pairing_id` was never
+    reserved by a prior `reserve()` call. The broker handler maps this
+    to HTTP 404 (opaque) so an attacker who knows the public bootstrap
+    key can't get past the pending check by minting a valid envelope
+    for a random uuid4 — the pairing must have been initiated by a
+    legitimate `Client.create_pairing_qr(sender_broker_url=...)` call
+    first.
+
+    NOTE this is a Protocol-breaking change for third-party
+    `BrokerStorage` implementations that landed in V1.5: custom stores
+    must now track pending IDs atomically alongside completed entries,
+    OR they must accept this behavior change (no silent fall-through
+    when complete is called for an unreserved ID).
+    """
+
+
 class BrokerStorage(Protocol):
     """The broker storage protocol.
 
@@ -42,35 +59,58 @@ class BrokerStorage(Protocol):
     different values raise [BrokerStorageConflictError]. This semantics
     is what defeats envelope replay (spec §9.3).
 
-    Phase 5a-2.1 — V1.5 fixed-config broker note: the protocol does not
-    track *pending* pairing IDs; `complete()` accepts any UUID. This
-    means the broker built on top of this storage cannot reject
-    envelopes whose `pairing_id` was never reserved by a prior
-    `pairing/initiate`. The primary replay guard is still the CAS in
-    `complete()`, and UUID entropy (122 bits for uuid4) plus the
-    mandatory rate limiter make storage pollution by an attacker
-    impractical. V2 will add a pending-pairing registry. See
-    `docs/crypto-spec.md §9.3` "V1.5 deviation" for the full
-    discussion.
+    Phase 6 — pending-pairing registry. The protocol now tracks
+    *pending* pairing IDs in addition to completed entries:
+
+    - `Client.create_pairing_qr(sender_broker_url=...)` calls
+      `reserve(pairing_id)` so the broker side knows which IDs are
+      legitimately in flight.
+    - The broker handler calls `is_reserved(pairing_id)` BEFORE
+      attempting decrypt; unknown IDs are rejected with HTTP 404.
+    - `complete()` raises [UnknownPairingIdError] when called for an
+      ID that was never reserved (defense-in-depth — the handler
+      check should already have fired, but a buggy caller or race
+      shouldn't silently complete an unknown slot).
+
+    This closes the "V1.5 fixed-config deviation" documented in
+    earlier crypto-spec drafts.
     """
 
     def reserve(self, pairing_id: str) -> None:
-        """Called at `pairing/initiate` time to mark the slot. Optional
-        for in-memory storage; required for storages where you need
-        explicit slot creation (e.g. DB rows with not-null
-        constraints). Idempotent."""
+        """Mark `pairing_id` as a legitimate pending slot. Called by
+        `Client.create_pairing_qr(sender_broker_url=...)` after the
+        Syncler server issues the pairing_id, so the broker side can
+        distinguish "real pending pairing" from "attacker-minted
+        envelope for a random UUID".
+
+        Idempotent (re-reserving an already-reserved or already-
+        completed ID is a no-op). Implementations MUST be atomic at
+        the storage layer.
+        """
+
+    def is_reserved(self, pairing_id: str) -> bool:
+        """Returns ``True`` if `pairing_id` was previously reserved
+        OR has already been completed. Used by the broker handler
+        for the pre-decrypt 404 gate.
+
+        Returning True for completed IDs is intentional — `complete()`
+        itself enforces the CAS, so a re-POST for an idempotent or
+        conflicting completion needs to reach `complete()` to get the
+        right 200/409 response (not get bounced as 404).
+        """
 
     def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
         """Compare-and-set. Returns ``True`` when this call was the
         first completion (the storage was previously empty for this
         ``pairing_id``); returns ``False`` on idempotent replay of the
-        same values. Raises [BrokerStorageConflictError] when the
-        entry differs from a previously-stored one.
+        same values.
 
-        - First call for `pairing_id` → stores entry, returns ``True``.
+        - First call for a reserved `pairing_id` → stores entry, returns ``True``.
         - Second call with same `entry` → idempotent, returns ``False``.
         - Second call with different `entry` →
           [BrokerStorageConflictError].
+        - Call for a `pairing_id` that was never reserved →
+          [UnknownPairingIdError].
 
         The FastAPI broker uses the return value to distinguish HTTP
         201 (first completion) from 200 (idempotent replay).
@@ -87,24 +127,45 @@ class BrokerStorage(Protocol):
 class InMemoryBrokerStorage:
     """Default in-process implementation. Suitable for dev / tests /
     single-process toy deployments. Loses state on restart. NOT safe
-    across multiple uvicorn workers — each worker has its own dict,
-    so `complete()` calls land in different processes and replays may
-    appear as 201 in one worker and 200 in another, or worst case
-    let two devices complete the same pairing inconsistently. Use a
-    real storage backend (Redis, Postgres) for production multi-worker
-    setups.
+    across multiple uvicorn workers AND NOT safe across multiple
+    Python processes — each worker has its own state, so a `reserve()`
+    from the sender's Client process won't be visible to a broker
+    running in a separate worker. Single-process deployments (Client
+    + broker app in the same Python — e.g. the trading-bot example
+    via a background thread) work fine. Production multi-worker
+    setups need a real storage backend (Redis, Postgres).
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._entries: dict[str, BrokerEntry] = {}
+        self._reserved: set[str] = set()
 
     def reserve(self, pairing_id: str) -> None:
-        # No-op: dict permits any key. `complete` is the CAS point.
-        return None
+        """Mark a pairing_id as pending. Idempotent; reserving an
+        already-completed pairing is also a no-op (an immediate
+        re-pair after wait_for_pairing returned would otherwise be
+        racy)."""
+        with self._lock:
+            self._reserved.add(pairing_id)
+
+    def is_reserved(self, pairing_id: str) -> bool:
+        """True if pairing_id was reserved OR already completed."""
+        with self._lock:
+            return pairing_id in self._reserved or pairing_id in self._entries
 
     def complete(self, pairing_id: str, entry: BrokerEntry) -> bool:
         with self._lock:
+            # Defense-in-depth: handler already checks is_reserved
+            # before reaching here. A buggy caller or race shouldn't
+            # silently complete an unreserved ID — flag loudly.
+            if (
+                pairing_id not in self._reserved
+                and pairing_id not in self._entries
+            ):
+                raise UnknownPairingIdError(
+                    f"pairing_id {pairing_id} was never reserved",
+                )
             existing = self._entries.get(pairing_id)
             if existing is None:
                 self._entries[pairing_id] = entry
@@ -126,4 +187,5 @@ __all__ = [
     "BrokerStorage",
     "BrokerStorageConflictError",
     "InMemoryBrokerStorage",
+    "UnknownPairingIdError",
 ]

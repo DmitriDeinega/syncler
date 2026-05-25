@@ -18,41 +18,41 @@ semantics:
   mismatch, exp outside ±5min window, bootstrap key id mismatch).
   Response body is opaque on purpose so an attacker can't probe
   which field caused the failure.
+- ``404 Not Found`` — ``pairing_id`` was never reserved by a
+  legitimate ``Client.create_pairing_qr(sender_broker_url=...)``
+  call (Phase 6 pending-pairing registry). Response body is
+  opaque — no echo of the requested ``pairing_id`` to keep
+  enumeration unhelpful.
 - ``409 Conflict`` — replay with DIFFERENT ``(user_id,
   pairing_key)`` values for the same ``pairing_id``. Indicates a
   replay attack or a sender bug.
 
-Security framing (Phase 5a-2.1 / consultation 87):
+Security framing:
 
-The V1.5 broker ships with a SINGLE fixed ``sender_broker_url`` (the
-URL the sender registered + signed at ``pairing/initiate``). The
-trusted state per ``pairing_id`` is therefore byte-equal to the
-configured URL. This satisfies the AAD-binding rule in
+The broker uses a SINGLE fixed ``sender_broker_url`` (the URL the
+sender registered + signed at ``pairing/initiate``). The trusted
+state per ``pairing_id`` is therefore byte-equal to the configured
+URL. This satisfies the AAD-binding rule in
 ``docs/crypto-spec.md §9.3``.
 
-What this DOES NOT satisfy: the spec also says the broker SHOULD
-reject envelopes whose ``pairing_id`` is unknown to the sender. The
-V1.5 broker accepts ANY ``pairing_id`` because [BrokerStorage] has no
-pending-pairing registry. AEAD prevents tampering of an existing
-envelope, but anyone who knows the public bootstrap key can mint a
-cryptographically valid envelope for an arbitrary uuid4
-``pairing_id`` (they pick the AAD; AEAD doesn't authenticate that
-the ``pairing_id`` came from a real ``/initiate``).
-
-Mitigations:
-
-- ``pairing_id`` uses ``uuid4`` with ~122 bits of entropy, so an
-  attacker can't enumerate real pending IDs.
-- The optional ``rate_limiter`` hook is **mandatory in production**
-  to defend against decrypt-spam DOS.
-- V2 will add a pending-pairing registry as a first-class storage
-  method, after which this comment block can shrink.
+Pending-pairing registry (Phase 6): the broker now rejects
+envelopes whose ``pairing_id`` was never reserved by a legitimate
+``Client.create_pairing_qr(sender_broker_url=...)`` call. This
+closes the earlier "V1.5 fixed-config deviation" — an attacker
+with knowledge of the public bootstrap key can still mint a
+cryptographically valid envelope for an arbitrary uuid4, but the
+404 gate fires before the decrypt path. UUID entropy (~122 bits)
+makes guessing a reserved ID impractical; the mandatory
+``rate_limiter`` hook is still strongly recommended in
+production to defend against decrypt-spam DOS on the same UUID.
 
 Public hosts using a CDN / load balancer in front of this app:
 terminate TLS at the LB, keep the broker on a private network,
 forward client IP via X-Forwarded-For so the rate limiter can key
-on it. ``InMemoryBrokerStorage`` is single-process only — production
-multi-worker deployments need Redis or Postgres.
+on it. ``InMemoryBrokerStorage`` is single-process only —
+production multi-worker deployments AND multi-process
+sender+broker setups need Redis or Postgres so ``reserve()``
+calls in one process are visible to ``is_reserved()`` in another.
 """
 
 from __future__ import annotations
@@ -73,6 +73,7 @@ from ..broker_storage import (
     BrokerEntry,
     BrokerStorage,
     BrokerStorageConflictError,
+    UnknownPairingIdError,
 )
 
 _log = logging.getLogger(__name__)
@@ -187,6 +188,15 @@ def make_app(
                     detail=f"{field} must be a string",
                 )
 
+        # Phase 6 pending-pairing registry: cheap pre-decrypt gate.
+        # Unknown pairing_id → 404 opaque (Codex 93: don't echo the
+        # ID in the body so a prober can't enumerate or learn about
+        # the registry shape). Closes the §9.3 V1.5 deviation —
+        # attacker can't mint a valid envelope for a random uuid4
+        # and reach the decrypt path.
+        if not storage.is_reserved(body["pairing_id"]):
+            raise HTTPException(status_code=404, detail="pairing slot not found")
+
         # Base64 length validation BEFORE decrypt (consult 80/87).
         try:
             ephemeral_pubkey_raw = base64.b64decode(
@@ -250,6 +260,12 @@ def make_app(
                 body["pairing_id"],
                 BrokerEntry(user_id=user_id, pairing_key=pairing_key),
             )
+        except UnknownPairingIdError as exc:
+            # Race: pairing_id passed the pre-decrypt is_reserved
+            # check but was unreserved between then and now. Treat
+            # the same as the gate above (404 opaque).
+            _log.warning("bootstrap complete on unknown pairing_id: %s", exc)
+            raise HTTPException(status_code=404, detail="pairing slot not found")
         except BrokerStorageConflictError as exc:
             _log.warning("bootstrap CAS conflict: %s", exc)
             raise HTTPException(status_code=409, detail="pairing_id replay with different values")

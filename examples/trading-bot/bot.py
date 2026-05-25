@@ -27,7 +27,9 @@ import hashlib
 import json
 import os
 import random
+import socket
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -37,9 +39,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "sdk-python"))
 
 from syncler import Client, SynclerError  # noqa: E402
+from syncler.bootstrap import (  # noqa: E402
+    load_x25519_private_key_from_raw,
+    x25519_keypair_pem,
+)
+from syncler.broker_storage import InMemoryBrokerStorage  # noqa: E402
 
 STATE_FILE = os.path.join(HERE, "state.json")
 PRIVATE_KEY_FILE = os.path.expanduser("~/.syncler/keys/trading-bot.pem")
+BOOTSTRAP_PRIV_FILE = os.path.expanduser(
+    "~/.syncler/keys/trading-bot-bootstrap.bin",
+)
 BASE_URL = os.environ.get("SYNCLER_BASE_URL", "http://localhost:8000")
 # Connectivity defaults are chosen for the Android emulator: 10.0.2.2 is
 # the emulator's loopback to the host machine. Physical-device users
@@ -50,6 +60,48 @@ DEVICE_LAN_HOST = os.environ.get("SYNCLER_LAN_HOST", "10.0.2.2")
 ACK_PORT = int(os.environ.get("SYNCLER_ACK_PORT", "8001"))
 ACK_URL = os.environ.get("SYNCLER_ACK_URL", f"http://{DEVICE_LAN_HOST}:{ACK_PORT}/api/ack")
 BUNDLE_URL = os.environ.get("SYNCLER_BUNDLE_URL", f"http://{DEVICE_LAN_HOST}:{ACK_PORT}/plugin.bundle.js")
+BROKER_PORT = int(os.environ.get("SYNCLER_BROKER_PORT", "8002"))
+SENDER_BROKER_URL = os.environ.get(
+    "SYNCLER_BROKER_URL", f"http://{DEVICE_LAN_HOST}:{BROKER_PORT}/",
+)
+
+
+def _load_or_create_bootstrap_keypair(state: dict):
+    """Generate the bootstrap X25519 keypair once and persist private
+    key bytes to BOOTSTRAP_PRIV_FILE with restrictive perms where the
+    platform supports it. Public key bytes (hex) ride in state.json so
+    the bot can pass them to make_app(...) on every startup without
+    needing to re-derive them.
+
+    Codex 93 note: Windows doesn't honor 0600 from Python the same
+    way POSIX does; if you need real key-file ACLs on Windows use
+    icacls or a vault.
+    """
+    if (
+        os.path.exists(BOOTSTRAP_PRIV_FILE)
+        and "bootstrap_pub_hex" in state
+    ):
+        priv_raw = open(BOOTSTRAP_PRIV_FILE, "rb").read()
+        pub_raw = bytes.fromhex(state["bootstrap_pub_hex"])
+        return load_x25519_private_key_from_raw(priv_raw), pub_raw
+    priv, pub_raw = x25519_keypair_pem()
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, NoEncryption, PrivateFormat,
+    )
+    priv_raw = priv.private_bytes(
+        Encoding.Raw, PrivateFormat.Raw, NoEncryption(),
+    )
+    os.makedirs(os.path.dirname(BOOTSTRAP_PRIV_FILE) or ".", exist_ok=True)
+    with open(BOOTSTRAP_PRIV_FILE, "wb") as f:
+        f.write(priv_raw)
+    try:
+        os.chmod(BOOTSTRAP_PRIV_FILE, 0o600)
+    except (NotImplementedError, OSError):
+        # Windows / unusual platforms — best effort.
+        pass
+    state["bootstrap_pub_hex"] = pub_raw.hex()
+    save_state(state)
+    return load_x25519_private_key_from_raw(priv_raw), pub_raw
 
 
 def load_state() -> dict:
@@ -87,24 +139,150 @@ def cmd_register() -> None:
     print("Next: python bot.py pair")
 
 
+def _ensure_bootstrap_key_registered(client: Client, state: dict, pub_raw: bytes) -> None:
+    """Idempotent: register the X25519 bootstrap pub key once with
+    syncler. The server keeps the key (and our Ed25519 signature
+    over it) so the preview endpoint can hand it to the Android
+    device. `state["bootstrap_key_id"]` records the server's
+    SHA-256(pub)[:16] handle so we can detect rotations.
+    """
+    expected_kid = hashlib.sha256(pub_raw).digest()[:16].hex()
+    if state.get("bootstrap_key_id_hex") == expected_kid:
+        return
+    server_kid_b64 = client.register_bootstrap_key(bootstrap_public_key_raw=pub_raw)
+    import base64 as _b64
+    state["bootstrap_key_id_hex"] = _b64.b64decode(server_kid_b64).hex()
+    save_state(state)
+
+
+def _start_broker_thread(
+    priv,
+    pub_raw: bytes,
+    sender_broker_url: str,
+    storage: InMemoryBrokerStorage,
+) -> threading.Thread:
+    """Run syncler.broker.make_app(...) in a uvicorn server in a
+    background thread of THIS process so create_pairing_qr's
+    reserve() call lands in the same storage that the broker reads
+    via is_reserved(). Production senders run the broker as a
+    separate uvicorn process behind a reverse proxy; the
+    InMemoryBrokerStorage doesn't survive that split (different
+    processes = different dicts).
+
+    Fail-fast on bind: check the port is free before spawning the
+    thread so `pair` doesn't silently hang if 8002 is already in
+    use (Codex 93).
+    """
+    from syncler.broker import make_app
+    import uvicorn
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", BROKER_PORT))
+    except OSError as e:
+        sock.close()
+        raise SystemExit(
+            f"broker port {BROKER_PORT} is in use ({e}); set SYNCLER_BROKER_PORT to override",
+        )
+    sock.close()
+
+    app = make_app(
+        bootstrap_private_key=priv,
+        bootstrap_public_key_raw=pub_raw,
+        sender_broker_url=sender_broker_url,
+        storage=storage,
+    )
+    config = uvicorn.Config(
+        app, host="0.0.0.0", port=BROKER_PORT, log_level="warning",
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True, name="broker")
+    thread.start()
+    # Wait briefly for the server to come up before returning so the
+    # device's POST during pairing doesn't race the startup window.
+    # Codex 94 YELLOW: fail-fast if uvicorn never starts — otherwise
+    # `cmd_pair` would silently block in wait_for_pairing for 120s.
+    for _ in range(50):
+        time.sleep(0.05)
+        if server.started:
+            break
+    if not server.started or not thread.is_alive():
+        raise SystemExit(
+            f"broker thread failed to start on port {BROKER_PORT} within 2.5s",
+        )
+    return thread
+
+
 def cmd_pair() -> None:
+    """V1.5 automated pairing — register the bootstrap key once,
+    start a broker thread in-process, build a QR that includes
+    sender_broker_url, and block on wait_for_pairing until the
+    device POSTs the encrypted envelope.
+
+    Fallback: if the device can't reach the broker for any reason,
+    `pair` will time out — re-run the manual flow via
+    `python bot.py set-pairing <user_id> <pairing_key_hex>` using
+    the values shown on the Syncler app's fallback banner.
+    """
     state = load_state()
     client = make_client(state)
     if "sender_id" not in state:
         print("Run `register` first.", file=sys.stderr)
         sys.exit(1)
-    qr_path = client.create_pairing_qr(ttl_seconds=300, out_path=os.path.join(HERE, "pairing.png"))
+
+    priv, pub_raw = _load_or_create_bootstrap_keypair(state)
+    _ensure_bootstrap_key_registered(client, state, pub_raw)
+
+    storage = InMemoryBrokerStorage()
+    client = Client(
+        sender_name="Trading Bot",
+        private_key_path=PRIVATE_KEY_FILE,
+        base_url=BASE_URL,
+        broker_storage=storage,
+    )
+    client.set_sender_id(state["sender_id"])
+
+    _start_broker_thread(priv, pub_raw, SENDER_BROKER_URL, storage)
+    print(f"Broker listening on 0.0.0.0:{BROKER_PORT}")
+    print(f"  device-reachable URL: {SENDER_BROKER_URL}")
+
+    qr_path = client.create_pairing_qr(
+        ttl_seconds=300,
+        out_path=os.path.join(HERE, "pairing.png"),
+        sender_broker_url=SENDER_BROKER_URL,
+    )
     print(f"QR written to {qr_path}")
-    print("Scan it in the Syncler app, confirm the fingerprint, then:")
-    print("  python bot.py set-pairing <user_id> <pairing_key_hex>")
+    print("Scan it in the Syncler app and confirm the fingerprint.")
+    print("Waiting for the device to POST the bootstrap envelope (120s)…")
+
+    try:
+        pairing = client.wait_for_pairing(timeout_seconds=120)
+    except TimeoutError:
+        print("Timed out waiting for pairing.", file=sys.stderr)
+        print(
+            "Fallback: re-run scan, copy the user_id + pairing_key_hex from the device, "
+            "then `python bot.py set-pairing <user_id> <pairing_key_hex>`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    state["user_id"] = pairing.user_id
+    state["pairing_key_hex"] = client.pairing_key.hex()
+    save_state(state)
+    print(f"Paired automatically. user_id = {pairing.user_id}")
 
 
 def cmd_set_pairing(user_id: str, pairing_key_hex: str) -> None:
+    """V1 manual-pairing fallback. Use when the automated `pair`
+    flow can't complete (broker unreachable, dev environment
+    without a reverse proxy, etc.). The device shows these values
+    on the pairing screen when the bootstrap POST fails.
+    """
     state = load_state()
     state["user_id"] = user_id
     state["pairing_key_hex"] = pairing_key_hex
     save_state(state)
-    print("Pairing recorded.")
+    print("Pairing recorded (manual / V1 fallback).")
 
 
 def cmd_loop() -> None:

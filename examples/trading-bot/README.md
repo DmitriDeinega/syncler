@@ -39,19 +39,27 @@ python bot.py register
 
 Prints a `sender_id` and writes it to `state.json`. Persists across runs.
 
-### 3. Pair with a user
+### 3. Pair with a user (automated, V1.5)
 
 ```sh
 python bot.py pair
 ```
 
-Writes `pairing.png` (the QR). Scan it in the Syncler app and confirm the fingerprint. The app shows your `user_id` and a `pairing_key_hex` after confirm. Paste them back:
+This:
+1. Generates the sender's X25519 bootstrap keypair on first run and persists the private key to `~/.syncler/keys/trading-bot-bootstrap.bin` (0600 where the platform supports it; Windows users may need to ACL the file manually). The public key is registered with Syncler (idempotent — re-runs are no-ops once the key id matches).
+2. Starts an in-process broker on `0.0.0.0:8002` (override with `SYNCLER_BROKER_PORT`). The broker shares the bot's `InMemoryBrokerStorage` so the QR's reserved `pairing_id` is visible to the broker's pre-decrypt 404 gate.
+3. Writes `pairing.png` (the QR, now carrying `sender_broker_url`) and blocks on `Client.wait_for_pairing(timeout_seconds=120)`.
+4. Scan the QR in the Syncler app, confirm the fingerprint. After the device finishes the encrypted bootstrap POST, `pair` returns and `state.json` carries `user_id` + `pairing_key_hex`.
+
+The broker URL the device sees is `SYNCLER_BROKER_URL` (defaults to `http://${SYNCLER_LAN_HOST}:8002/`). Same connectivity matrix as the ack server — see [Connecting your Android device](#connecting-your-android-device) below.
+
+**Fallback (V1 manual).** If `pair` times out — broker unreachable from the device, no LAN connectivity, etc. — the Syncler app shows the `user_id` + `pairing_key_hex` block, just like in V1:
 
 ```sh
 python bot.py set-pairing <user_id> <pairing_key_hex>
 ```
 
-(Automated pairing has shipped end-to-end — see `docs/integration-guide.md §8.5`. This example still uses the V1 manual copy-paste; migrating it to `Client.wait_for_pairing(...)` is a follow-up V1.5 dogfood task.)
+This writes the same state.json values that `pair` would have on success, so the rest of the walkthrough continues unchanged.
 
 ### 4. Build + sign the plugin
 
