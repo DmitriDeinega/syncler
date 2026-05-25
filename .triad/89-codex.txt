@@ -1,0 +1,25 @@
+Item 1 — Android UX: YELLOW
+
+- `PairingRepository.postBootstrapEnvelope()` documents retrying `429`, but the implementation treats all 4xx as terminal. The stated plan says terminal on 4xx, so code is acceptable; the comment is misleading.
+- `PairingScreen.kt:110` decodes `senderPublicKey` outside a guarded path. A malformed preview can crash instead of becoming `BootstrapHardError`.
+- Android tests were not run, so this remains YELLOW until Gradle compiles the new Hilt/Retrofit wiring.
+
+Item 2 — FastAPI broker: RED
+
+- `sdk-python/syncler/bootstrap.py:149-150` can raise non-`BootstrapDecryptError` exceptions for attacker-controlled but length-valid X25519 public keys, e.g. low-order/invalid points. `sdk-python/syncler/broker/app.py:227-240` only maps `BootstrapDecryptError` to opaque `401`, so this can become a public `500` instead of the promised opaque decrypt failure.
+- Missing test: valid-shape envelope with a 32-byte invalid/low-order `ephemeral_pubkey` must return `401`, not `500`.
+- Packaging footgun: new broker tests import FastAPI, but `sdk-python[dev]` does not include the `broker` extra. A clean dev install may not be able to run the full SDK test suite.
+
+Item 3 — Docs: RED
+
+- `docs/integration-guide.md:616` calls `client.set_bootstrap_keypair(...)`, but `Client` has no such method.
+- `docs/integration-guide.md:627` calls `wait_for_pairing(timeout=120)`, but the API parameter is `timeout_seconds`.
+- `docs/integration-guide.md:628` uses `pairing.pairing_key`, but `Pairing` only contains `pairing_id` and `user_id`; the key is stored on `client.pairing_key`.
+
+Missing from consult 88 dual-GREEN plan:
+
+- Broker test for invalid 32-byte X25519 public input returning opaque `401`.
+- Docs must be reconciled with the actual SDK API.
+- Prefer at least one Android repository/viewmodel test for automated classification/signature failure/fallback paths, not only DTO serialization.
+
+Commit-readiness vote: NO.

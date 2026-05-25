@@ -1,0 +1,52 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+(node:7708) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Error executing tool read_file: File not found.
+I have reviewed the Phase 5a-2.1 plan and evaluated it against the codebase and the Phase 5 agreement (`.triad/70-phase5-agreement.md`).
+
+### **Verdict: GREEN (with minor technical refinements)**
+
+The plan is technically sound and completes the V1.5 automated pairing "DX bridge." The security model—specifically binding the bootstrap key trust to the manually confirmed Ed25519 fingerprint—is correctly preserved.
+
+---
+
+### **Answers to Open Questions**
+
+1.  **Item 1 — Manual fallback retry strategy:**
+    **Verdict: Immediate fallback is acceptable.** Given that the user is actively waiting on the "Confirming" state, a long retry loop (exponential backoff) would be frustrating. A single retry or a very short timeout (e.g., 5s) before showing the manual fallback banner is optimal. If the broker is down, it's likely a configuration issue on the sender's end that won't resolve in seconds.
+
+2.  **Item 2 — Broker URL strategy:**
+    **Verdict: Fixed-config is acceptable for V1.5.** Senders can simulate per-pairing URLs by embedding tokens in the path of the fixed base URL if they need isolation. Land the fixed-config `sender_broker_url` now and defer per-pairing storage to V2.
+
+3.  **Item 2 — Auth on POST endpoint:**
+    **Verdict: No HTTP auth required, but add Rate Limiting.** Decryption *is* the authentication. However, I recommend adding a basic `pairing_id`-based rate limiter (or at least a "Security Note" in the broker docs/code) to prevent a malicious actor from spamming decrypt attempts and causing CPU exhaustion.
+
+4.  **Item 3 — Doc sectioning:**
+    **Verdict: §8.5 is the correct placement.** It keeps the manual flow as the foundational understanding (§8) and immediately presents the automated "upgrade" as the modern default.
+
+---
+
+### **Refinements & Missing Constraints**
+
+1.  **Android: Wire DTO for Bootstrap Envelope**
+    The plan mentions `postBootstrapEnvelope(brokerUrl, dto)`. Ensure you define a `BootstrapEnvelopeDto` in the network module that handles the Base64 encoding of the `ByteArray` fields produced by `BootstrapEnvelope.build(...)`. The `aadJson` field should **not** be on the wire (it's for local reconstruction), but `bootstrap_key_id` (Base64) **is** required for the broker to find the right key version.
+
+2.  **Broker: Idempotency Details**
+    The plan says "Return 201 on success." Per the agreement, the broker should return **201 for the first write** and **200 for idempotent re-POSTs** of the same values (already handled by `InMemoryBrokerStorage`, but the FastAPI handler needs to surface the distinction).
+
+3.  **UI Success State**
+    When automated pairing succeeds, the `PairingSuccessCard` should hide the "Copy these values" section. Transitioning to a "Paired automatically" success state with just the sender details and a "Done" button is cleaner than repurposing the manual card.
+
+4.  **Signature Verification Input**
+    Verify the repository uses the **raw bytes** of the X25519 key for the signature check: `b"syncler-v1-bootstrap-key:" + raw_pub`. The plan says "literal bytes," which is correct.
+
+### **Strategic Intent for Execution**
+Upon approval, I will:
+1.  **Android:** Update `SynclerApi` DTOs, extend `PairingRepository` with signature verification and broker POST logic, and branch the `PairingScreen` UI.
+2.  **SDK:** Implement the FastAPI broker app factory and CLI invocation under the `[broker]` extra.
+3.  **Docs:** Rewrite the integration guide sections to feature the automated path as the V1.5 standard.
+
+**Status: Ready for implementation.**

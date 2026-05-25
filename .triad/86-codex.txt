@@ -1,0 +1,35 @@
+**Verdict**
+
+Item 1 Android UX: **YELLOW**  
+Plan is directionally right, but add two constraints before implementation:
+
+- Do not send the broker POST through the authenticated `SynclerApi`/OkHttp client. The current auth interceptor will attach the user bearer token to any request without an `Authorization` header, including a Retrofit `@Url` request to a sender-controlled host. Use a separate unauthenticated broker HTTP client/API, and test that `Authorization` is absent.
+- Current `/complete` does **not** return `user_id` or `pairing_key`; Android generates `pairingKey` locally and can get `user_id` from `Session.currentUserId()`. The plan text should be corrected so implementation does not wait for nonexistent response fields.
+
+Also: partial bootstrap fields or unsupported `bootstrap_protocol_version` should be a hard protocol error, not silent manual fallback. All four absent = manual; malformed/incomplete automated metadata = refuse.
+
+Item 2 FastAPI broker: **YELLOW**  
+The app factory is useful, but the storage/trusted-state story is underspecified relative to the agreement. Current `BrokerStorage` only stores completed entries and `InMemoryBrokerStorage.reserve()` is a no-op, so the proposed broker cannot really “look up `pairing_id`” or reject unknown pairings. Either extend storage to track pending/reserved pairing IDs, or clearly document and test that V1.5 fixed-config mode weakens the “unknown pairing_id rejected” rule.
+
+Also align replay status semantics: the agreement says identical replay returns `200` idempotently; the proposed test says `201`. Pick one explicitly. I prefer agreement-compatible `200` for idempotent replay, `201` only for first completion.
+
+Item 3 Docs: **GREEN**  
+The placement and content are right. Make sure docs use the shipped names: `sender_broker_url`, not older `broker_url` wording except where explaining the distinction from `PairingInitiateResponse.broker_url`.
+
+**Open Questions**
+
+1. Manual fallback after `/complete`: acceptable, but do 2-3 short retries first with bounded exponential backoff/jitter. After `/complete`, local pairing is already valid, so fallback display is correct. Do not delete the local record.
+
+2. Fixed broker URL: acceptable for V1.5 only if documented as “single broker URL per app/process” and the broker still uses trusted config, not envelope data. Per-pairing URL storage can defer, but do not pretend this fully satisfies the per-pairing trusted-state rule.
+
+3. No auth: yes, no auth header required. But ship basic rate limiting or at least a hook/middleware slot. Failed decrypts are cheap-ish but still attacker-controllable CPU.
+
+4. Section number: use **§8.5**. Stability beats perfect numbering here.
+
+**Missing / New Constraints**
+
+- Android broker POST must not leak Syncler auth headers.
+- Android tests should include “broker request has no Authorization header”.
+- Broker storage needs pending/reserved pairing awareness or a documented fixed-config deviation.
+- Broker envelope validation should enforce exact base64 lengths before decrypt: X25519 32, nonce 12, key id 16, ciphertext nonempty.
+- Docs should mention `InMemoryBrokerStorage` is not safe across multiple uvicorn workers.

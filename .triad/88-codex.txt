@@ -1,0 +1,25 @@
+Per-item:
+
+1. **Android UX: YELLOW**
+   Mostly solid, but two tightenings remain:
+   - Clarify retry count. “Cap at 3 attempts” conflicts with `250ms / 750ms / 2s`, which implies three delays and likely four tries. Say either “3 total attempts, delays 250ms then 750ms” or “initial + 3 retries.”
+   - The snake_case test should include Kotlin serialization/output, not only deserialization. A fixed JSON sample deserializing on both sides does not prove Android sends snake_case.
+
+2. **FastAPI broker: GREEN**
+   The fixed-config security framing is now honest, the status behavior is crisp, and the storage return-value contract is sufficient for replay semantics. The rate-limiter exception policy is also explicit enough.
+
+3. **Docs: GREEN**
+   The required spec correction is included, especially the §9.3 deviation note. That addresses the main RED from consult 87.
+
+**Anything still missing**
+
+- Add an Android test that serializes `BootstrapEnvelopeDto` and asserts the emitted JSON keys are exactly:
+  `protocol_version`, `pairing_id`, `sender_id`, `bootstrap_key_id`, `exp`, `ephemeral_pubkey`, `nonce`, `ciphertext`.
+- Clarify retry attempt counting before implementation.
+
+**Anything new**
+
+- For FastAPI tests, remember that testing `RuntimeError -> 500` may require configuring the test client not to re-raise server exceptions.
+- For broker shape validation, decide explicitly whether extra JSON fields are rejected or ignored. I would reject extras for a strict 8-field envelope.
+
+Overall: **YELLOW only because of the Android retry-count ambiguity and insufficient DTO serialization test.** After those two edits, I’d call this dual-GREEN.

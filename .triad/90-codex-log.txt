@@ -1,0 +1,1098 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e5c73-3ea7-79e0-806b-e9ca68a4e64c
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — READ THIS BEFORE DOING ANYTHING ELSE
+
+You are in REVIEW MODE. Your ONLY output is a text reply to the
+prompt below. You are FORBIDDEN from:
+
+  - Writing or editing ANY file (no write_file, no edit_file, no
+    str_replace, no create_file, no apply_diff).
+  - Running ANY shell command that mutates state (no git commit,
+    no git add, no git checkout, no git push, no git stash, no
+    mkdir, no pip install, no npm install, no rm, no mv, no touch,
+    no chmod).
+  - Running tests, builds, signing keys, gradle, uvicorn, or any
+    other side-effecting operation.
+  - Creating or modifying ANY directory.
+
+You MAY use:
+  - read_file / cat / Get-Content (to inspect files for context)
+  - grep / ripgrep / Select-String (read-only search)
+  - list_directory / ls / Get-ChildItem (read-only)
+  - git status / git log / git diff / git show (read-only)
+
+The orchestrator (human + me) commits. Three prior consultations
+had review-mode violations and were reverted. If you violate this
+again, the work proceeds without your verdict.
+
+Reply with ONLY the verdict — no implementation summary, no
+"I have updated...", no "All tests passing..."
+=================================================================
+
+# Consultation 90 — Phase 5a-2.1 fix-ups (post-89)
+
+Consultation 89 voted: **Gemini GREEN, Codex RED on three concrete
+bugs**. This consultation reviews the fix-ups.
+
+## What Codex 89 caught
+
+### RED — Item 2 — Broker leaks 500 on invalid X25519 ephemeral pubkey
+
+> `sdk-python/syncler/bootstrap.py:149-150` can raise
+> non-`BootstrapDecryptError` exceptions for attacker-controlled
+> but length-valid X25519 public keys, e.g. low-order/invalid points.
+> `sdk-python/syncler/broker/app.py:227-240` only maps
+> `BootstrapDecryptError` to opaque `401`, so this can become a
+> public `500` instead of the promised opaque decrypt failure.
+
+### RED — Item 2 — Packaging footgun
+
+> New broker tests import FastAPI, but `sdk-python[dev]` does not
+> include the `broker` extra. A clean dev install may not be able
+> to run the full SDK test suite.
+
+### RED — Item 3 — Docs reference non-existent API
+
+> `docs/integration-guide.md:616` calls `client.set_bootstrap_keypair(...)`,
+> but `Client` has no such method.
+> `docs/integration-guide.md:627` calls `wait_for_pairing(timeout=120)`,
+> but the API parameter is `timeout_seconds`.
+> `docs/integration-guide.md:628` uses `pairing.pairing_key`, but
+> `Pairing` only contains `pairing_id` and `user_id`; the key is
+> stored on `client.pairing_key`.
+
+### YELLOW — Item 1 — Minor
+
+> `PairingScreen.kt:110` decodes `senderPublicKey` outside a
+> guarded path. A malformed preview can crash instead of becoming
+> `BootstrapHardError`.
+
+> `PairingRepository.postBootstrapEnvelope()` documents retrying
+> `429`, but the implementation treats all 4xx as terminal.
+
+## Fix-ups applied
+
+### 1. `sdk-python/syncler/bootstrap.py` — wrap X25519 ECDH errors
+
+```python
+# X25519 ECDH. `from_public_bytes` validates input length and
+# `exchange` rejects low-order / invalid points — both can raise
+# ValueError / cryptography-library exceptions. Wrap as
+# BootstrapDecryptError so the broker's exception handler doesn't
+# let an opaque-401 path leak a 500 (Codex consultation 89 RED).
+try:
+    eph_pub = X25519PublicKey.from_public_bytes(ephemeral_pubkey)
+    shared_secret = sender_bootstrap_priv.exchange(eph_pub)
+except Exception as exc:
+    raise BootstrapDecryptError(
+        "X25519 ECDH failed — invalid ephemeral_pubkey",
+    ) from exc
+```
+
+### 2. New regression test in `sdk-python/tests/test_broker_app.py`
+
+```python
+def test_invalid_low_order_ephemeral_pubkey_returns_401_opaque(client, keypair):
+    """Codex 89 RED: X25519 low-order/invalid points must surface as
+    opaque 401, not a 500 from the X25519 library bubbling up."""
+    priv, pub = keypair
+    envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+    # All-zero is a well-known low-order point that cryptography
+    # rejects at exchange() time.
+    envelope["ephemeral_pubkey"] = _b64(b"\x00" * 32)
+    response = client.post("/", json=envelope)
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"] == "bootstrap decrypt failed"
+```
+
+22/22 sdk-python tests pass (16 broker + 5 bootstrap + 1 CAS).
+
+### 3. `sdk-python/pyproject.toml` `[dev]` extra now includes broker deps
+
+```toml
+dev = [
+    "pytest>=8.0,<9",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "httpx>=0.27",
+]
+```
+
+So `pip install -e .[dev]` on a clean checkout runs the full suite.
+
+### 4. Docs API references corrected
+
+`docs/integration-guide.md §8.5` step 4 now reads:
+
+```python
+client = Client(
+    sender_name="Example",
+    private_key_path="sender.pem",
+    broker_storage=storage,
+)
+# The sender's X25519 bootstrap keypair lives outside Client (the
+# broker app holds it). The Client only needs the storage handle
+# to learn when a pairing has completed.
+
+path = client.create_pairing_qr(
+    ttl_seconds=300,
+    out_path="pair.png",
+    sender_broker_url="https://sender.example.com/syncler/bootstrap",
+)
+
+# Blocks until the broker writes (user_id, pairing_key) to storage.
+# On success the Pairing dataclass carries `pairing_id` + `user_id`;
+# the 32-byte pairing key is stored on `client.pairing_key` so
+# subsequent `send_to(...)` calls just work.
+pairing = client.wait_for_pairing(timeout_seconds=120)
+# `client.pairing_key` is now set; no further `set_pairing` call needed.
+```
+
+Removed: `set_bootstrap_keypair` (no such method), `timeout=`
+(actual is `timeout_seconds`), `pairing.pairing_key` (key is
+on `client.pairing_key`).
+
+### 5. Android YELLOWs
+
+`PairingScreen.kt` now does the senderPublicKey base64 decode
+inside a `runCatching` and routes failures to `BootstrapHardError`:
+
+```kotlin
+val senderEdPub = runCatching {
+    android.util.Base64.decode(current.preview.senderPublicKey, android.util.Base64.NO_WRAP)
+}.getOrNull()
+if (senderEdPub == null || senderEdPub.size != 32) {
+    _state.value = PairingState.BootstrapHardError(
+        preview = current.preview,
+        message = "preview senderPublicKey is not a valid 32-byte base64 Ed25519 key",
+    )
+    return
+}
+```
+
+`PairingRepository.postBootstrapEnvelope` comment corrected to
+match implementation (all 4xx terminal; 429+Retry-After deferred
+to V2).
+
+## What I need
+
+Per reviewer:
+1. Per-item: GREEN / YELLOW / RED.
+2. Confirm: Codex 89 REDs are all addressed.
+3. Anything new.
+4. Commit-readiness vote.
+
+Reply text only. Do NOT call any write/mutation tool.
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"set_bootstrap_keypair|wait_for_pairing\\(|pairing\\.pairing_key|Retry-After|429|senderPublicKey|ephemeral_pubkey|X25519 ECDH\" sdk-python docs android" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git diff -- sdk-python/syncler/bootstrap.py sdk-python/tests/test_broker_app.py sdk-python/pyproject.toml docs/integration-guide.md android/app/src/main/java/com/syncler/PairingScreen.kt android/app/src/main/java/com/syncler/PairingRepository.kt' in D:\Projects\syncler
+ succeeded in 269ms:
+diff --git a/docs/integration-guide.md b/docs/integration-guide.md
+index 9f65cd1..53ca645 100644
+--- a/docs/integration-guide.md
++++ b/docs/integration-guide.md
+@@ -20,6 +20,8 @@ In every case you also need **backend code** that publishes the plugin once and
+ 
+ The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, arrival time — pulled from the `hostPreview` block you embed in your payload (§2). The detail view that opens on tap is what your script bundle's `render()` or your template manifest produces.
+ 
++**Pairing** — V1 has the user copy `user_id` + `pairing_key_hex` from the device into your sender's CLI by hand. V1.5 (the default going forward) replaces the copy step with an encrypted POST from the device to your sender's broker. The user only sees the fingerprint-confirm step; the rest is automatic. See §8.5 for setup.
++
+ ### What the host does for you
+ 
+ Once a card is in a user's inbox, the host handles all of the following without you doing anything plugin-side:
+@@ -539,6 +541,138 @@ def action():
+ 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
+ 10. Confirm your `/api/action` endpoint received the POST.
+ 
++## 8.5 Automated pairing (V1.5)
++
++V1 pairing makes the user copy `user_id` + `pairing_key_hex` by hand into your sender's CLI. V1.5 replaces step 5 above with an encrypted POST: after the user confirms the fingerprint, the app silently delivers the pairing key to your sender's broker. The user never sees a hex blob.
++
++The protocol underneath (HPKE-style envelope, X25519 ECDH, AES-GCM with AAD-binding) is in `docs/crypto-spec.md §9`. This section is the integration walkthrough.
++
++### Why automated
++
++- One-step pairing for users.
++- Production senders don't need a manual-paste UX.
++- The substitution-attack guards (Ed25519 over the bootstrap key + AAD-binding on `sender_broker_url`) keep V1's trust model intact.
++
++### Sender setup
++
++You need to do four things, once:
++
++1. **Generate an X25519 bootstrap keypair** alongside your existing Ed25519 signing key. Persist the private key somewhere safe (file with 0600, KMS, secrets manager).
++
++   ```python
++   from syncler.bootstrap import x25519_keypair_pem
++   bootstrap_priv, bootstrap_pub_raw = x25519_keypair_pem()
++   # bootstrap_pub_raw is 32 raw bytes — store both fields somewhere
++   # your broker process can read them.
++   ```
++
++2. **Register the bootstrap key with syncler** (once per sender, or per rotation):
++
++   ```python
++   client.register_bootstrap_key(bootstrap_public_key_raw=bootstrap_pub_raw)
++   ```
++
++   Internally the SDK Ed25519-signs `b"syncler-v1-bootstrap-key:" + bootstrap_pub_raw` and POSTs to `/v1/senders/me/bootstrap-key`.
++
++3. **Run a broker** that your devices POST to. The SDK ships one under the `[broker]` extra:
++
++   ```sh
++   pip install 'syncler[broker]'
++   ```
++
++   ```python
++   # broker_app.py
++   from syncler.broker import make_app
++   from syncler.broker_storage import InMemoryBrokerStorage
++   from syncler.bootstrap import load_x25519_private_key_from_raw
++
++   storage = InMemoryBrokerStorage()
++   priv = load_x25519_private_key_from_raw(open("bootstrap.key", "rb").read())
++   pub_raw = open("bootstrap.pub", "rb").read()
++
++   app = make_app(
++       bootstrap_private_key=priv,
++       bootstrap_public_key_raw=pub_raw,
++       sender_broker_url="https://sender.example.com/syncler/bootstrap",
++       storage=storage,
++   )
++   ```
++
++   ```sh
++   uvicorn broker_app:app --host 0.0.0.0 --port 8443 \
++       --ssl-keyfile=key.pem --ssl-certfile=cert.pem
++   ```
++
++   Your reverse proxy maps `https://sender.example.com/syncler/bootstrap` → this app.
++
++4. **Tell `Client` where the broker storage lives** so `wait_for_pairing` can poll it:
++
++   ```python
++   client = Client(
++       sender_name="Example",
++       private_key_path="sender.pem",
++       broker_storage=storage,            # NEW — same storage the broker app writes to
++   )
++   # The sender's X25519 bootstrap keypair lives outside Client (the
++   # broker app holds it). The Client only needs the storage handle
++   # to learn when a pairing has completed.
++
++   path = client.create_pairing_qr(
++       ttl_seconds=300,
++       out_path="pair.png",
++       sender_broker_url="https://sender.example.com/syncler/bootstrap",  # NEW
++   )
++
++   # Blocks until the broker writes (user_id, pairing_key) to storage.
++   # On success the Pairing dataclass carries `pairing_id` + `user_id`;
++   # the 32-byte pairing key is stored on `client.pairing_key` so
++   # subsequent `send_to(...)` calls just work.
++   pairing = client.wait_for_pairing(timeout_seconds=120)
++   # `client.pairing_key` is now set; no further `set_pairing` call needed.
++   ```
++
++### Android user flow
++
++When the device fetches the preview and sees all four bootstrap fields, the pairing screen uses the automated path:
++
++1. User scans the QR.
++2. App fetches preview; verifies `bootstrap_key_signature` against the sender's Ed25519 pub key.
++3. User confirms the fingerprint (unchanged).
++4. App calls `/complete` — Syncler-side pairing is finalized.
++5. App builds the bootstrap envelope and POSTs to `sender_broker_url`.
++6. Broker decrypts, writes to its storage, returns 201.
++7. `Client.wait_for_pairing` in your sender's send loop picks up the new pairing tuple.
++
++If step 5 fails (broker down, network glitch), the app **shows a fallback banner** with the same `user_id` + `pairing_key_hex` block as the V1 manual flow. The device-side pairing is already real (step 4 finalized it); only the sender catch-up needs the manual paste.
++
++### Failure modes
++
++| What | App behavior |
++|---|---|
++| `bootstrap_key_signature` doesn't verify | **Hard refusal.** Pairing NOT finalized. Treated as substitution-attack indicator — user does not get a fallback. |
++| Preview has only some bootstrap fields | **Hard refusal**, same reason. Sender MUST register all four atomically. |
++| Broker returns 401 (decrypt failed) | Fallback banner (manual paste). |
++| Broker returns 409 (replay with different values) | Fallback banner — the pairing key from your sender's `wait_for_pairing` will not match this device's, so the user must paste the device's values. |
++| Broker returns 5xx or times out | Retried up to 3 attempts (250ms / 750ms backoff). If still failing, fallback banner. |
++| Sender's `wait_for_pairing` times out | Sender's responsibility — typically loop again with a fresh QR. The device-side pairing is still real; user can paste manually. |
++
++### Security boundaries
++
++Three guards make this safe:
++
++1. **Bootstrap key signature.** The sender's X25519 bootstrap public key is signed by its long-term Ed25519 signing key (which the user confirms via fingerprint). The Syncler server cannot substitute its own X25519 key — the signature would fail to verify against the Ed25519 pub key the user just confirmed.
++
++2. **AAD-binding on `sender_broker_url`.** Even if the Syncler server could change which URL the device POSTs to, the broker reconstructs AAD using its OWN configured `sender_broker_url`. An envelope crafted for a different URL fails AEAD tag verification.
++
++3. **CAS replay guard at the broker.** A captured envelope replayed to the same broker with the same plaintext is idempotent (200). Replayed with different values gets a 409.
++
++### Production hardening
++
++- Use Redis or Postgres for `BrokerStorage` (the shipped `InMemoryBrokerStorage` is NOT safe across multiple uvicorn workers — each worker has its own dict, so the same envelope can decrypt-and-complete twice).
++- The `rate_limiter` hook on `make_app(...)` is **mandatory** in production. Without it, an attacker with the public bootstrap key can spam the decrypt path for cheap-but-not-free CPU. Implement per-IP and per-`pairing_id` limits.
++- Terminate TLS at your reverse proxy; the broker is HTTP-only inside the trust boundary.
++- See `docs/crypto-spec.md §9.3 "V1.5 deviation"` for the fixed-config-broker tradeoff (does NOT reject envelopes for unknown `pairing_id`s — UUID entropy + rate limiter are the V1.5 mitigations).
++
+ ## 9. Common server errors
+ 
+ The server returned a 4xx or 5xx; here's what to change.
+diff --git a/sdk-python/pyproject.toml b/sdk-python/pyproject.toml
+index d56213f..09b8f98 100644
+--- a/sdk-python/pyproject.toml
++++ b/sdk-python/pyproject.toml
+@@ -13,6 +13,22 @@ dependencies = [
+ [project.optional-dependencies]
+ dev = [
+     "pytest>=8.0,<9",
++    # Broker deps included in [dev] so `pip install -e .[dev]` lets a
++    # clean checkout run the broker tests without remembering to also
++    # install [broker]. Production senders that just want the SDK +
++    # broker (no test deps) install [broker] only.
++    "fastapi>=0.110,<1",
++    "uvicorn[standard]>=0.27,<1",
++    "httpx>=0.27",
++]
++# V1.5 automated pairing — ready-to-mount FastAPI broker app
++# (`syncler.broker.make_app`). Senders that opt into automated
++# pairing install with `pip install syncler[broker]` and run their
++# own broker behind their `sender_broker_url`. Vanilla
++# `pip install syncler` does NOT pull FastAPI / uvicorn.
++broker = [
++    "fastapi>=0.110,<1",
++    "uvicorn[standard]>=0.27,<1",
+ ]
+ 
+ [build-system]
+diff --git a/sdk-python/syncler/bootstrap.py b/sdk-python/syncler/bootstrap.py
+index 631047a..a71d721 100644
+--- a/sdk-python/syncler/bootstrap.py
++++ b/sdk-python/syncler/bootstrap.py
+@@ -145,9 +145,18 @@ def decrypt_bootstrap_envelope(
+             f"exp outside ±{BROKER_CLOCK_SKEW_SECONDS}s tolerance: delta={delta:.1f}s",
+         )
+ 
+-    # X25519 ECDH.
+-    eph_pub = X25519PublicKey.from_public_bytes(ephemeral_pubkey)
+-    shared_secret = sender_bootstrap_priv.exchange(eph_pub)
++    # X25519 ECDH. `from_public_bytes` validates input length and
++    # `exchange` rejects low-order / invalid points — both can raise
++    # ValueError / cryptography-library exceptions. Wrap as
++    # BootstrapDecryptError so the broker's exception handler doesn't
++    # let an opaque-401 path leak a 500 (Codex consultation 89 RED).
++    try:
++        eph_pub = X25519PublicKey.from_public_bytes(ephemeral_pubkey)
++        shared_secret = sender_bootstrap_priv.exchange(eph_pub)
++    except Exception as exc:
++        raise BootstrapDecryptError(
++            "X25519 ECDH failed — invalid ephemeral_pubkey",
++        ) from exc
+ 
+     # HKDF derivation. salt = eph_pub || sender_bootstrap_pub.
+     salt = ephemeral_pubkey + sender_bootstrap_pub
+warning: in the working copy of 'sdk-python/syncler/bootstrap.py', LF will be replaced by CRLF the next time Git touches it
+
+ succeeded in 279ms:
+ M android/core/network/src/main/kotlin/app/syncler/core/network/NetworkModule.kt
+ M android/core/network/src/main/kotlin/app/syncler/core/network/SynclerApi.kt
+ M android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt
+ M android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingScreen.kt
+ M create-plugin/index.js
+ M create-plugin/package.json
+ M docs/crypto-spec.md
+ M docs/integration-guide.md
+ M sdk-plugin/package.json
+ M sdk-plugin/src/base-plugin.ts
+ M sdk-plugin/src/bridge.ts
+ M sdk-plugin/src/index.ts
+ M sdk-plugin/src/network.ts
+ M sdk-plugin/src/notifications.ts
+ M sdk-plugin/src/platform.ts
+ M sdk-plugin/src/preview.ts
+ M sdk-plugin/src/storage.ts
+ M sdk-plugin/test/base-plugin.test.ts
+ M sdk-plugin/test/network.test.ts
+ M sdk-plugin/test/preview.test.ts
+ M sdk-plugin/test/storage.test.ts
+ M sdk-python/pyproject.toml
+ M sdk-python/syncler/bootstrap.py
+ M sdk-python/syncler/broker_storage.py
+ M sdk-python/tests/test_bootstrap.py
+?? .editorconfig
+?? .prettierrc
+?? .triad/86-codex-log.txt
+?? .triad/86-codex.txt
+?? .triad/86-gemini-log.txt
+?? .triad/86-phase5a-2-1-plan-prompt.md
+?? .triad/87-codex-log.txt
+?? .triad/87-codex.txt
+?? .triad/87-gemini-log.txt
+?? .triad/87-phase5a-2-1-plan-revised-prompt.md
+?? .triad/88-codex-log.txt
+?? .triad/88-codex.txt
+?? .triad/88-gemini-log.txt
+?? .triad/88-phase5a-2-1-plan-final-prompt.md
+?? .triad/89-codex-log.txt
+?? .triad/89-codex.txt
+?? .triad/89-gemini-log.txt
+?? .triad/89-phase5a-2-1-review-prompt.md
+?? .triad/90-codex-log.txt
+?? .triad/90-phase5a-2-1-fixups-prompt.md
+?? android/core/network/src/main/kotlin/app/syncler/core/network/BrokerApi.kt
+?? android/core/network/src/test/kotlin/app/syncler/core/network/BrokerApiTest.kt
+?? create-plugin/package-lock.json
+?? eslint.config.js
+?? package-lock.json
+?? package.json
+?? sdk-plugin/package-lock.json
+?? sdk-python/syncler/broker/
+?? sdk-python/tests/test_broker_app.py
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ succeeded in 271ms:
+sdk-python\tests\test_broker_app.py:110:        "ephemeral_pubkey": _b64(eph_pub_raw),
+sdk-python\tests\test_broker_app.py:245:def test_invalid_low_order_ephemeral_pubkey_returns_401_opaque(client, keypair):
+sdk-python\tests\test_broker_app.py:252:    envelope["ephemeral_pubkey"] = _b64(b"\x00" * 32)
+sdk-python\tests\test_broker_app.py:287:    # ephemeral_pubkey must decode to 32 bytes; pass 31.
+sdk-python\tests\test_broker_app.py:289:    envelope["ephemeral_pubkey"] = _b64(b"\x00" * 31)
+sdk-python\tests\test_broker_app.py:329:        raise HTTPException(status_code=429, detail="too many requests")
+sdk-python\tests\test_broker_app.py:342:    assert response.status_code == 429
+sdk-python\tests\test_bootstrap.py:76:        "ephemeral_pubkey": eph_pub,
+sdk-python\tests\test_bootstrap.py:133:        ephemeral_pubkey=envelope["ephemeral_pubkey"],
+sdk-python\tests\test_bootstrap.py:165:            ephemeral_pubkey=envelope["ephemeral_pubkey"],
+sdk-python\tests\test_bootstrap.py:192:            ephemeral_pubkey=envelope["ephemeral_pubkey"],
+docs\integration-guide.md:433:- **Rate limit.** Fixed window of 60 upserts per minute per `(sender_id, user_id, card_key)`; else 429. (There's also an IP-bucketed pre-auth limit of 120/min for cheap DoS protection.)
+docs\integration-guide.md:548:The protocol underneath (HPKE-style envelope, X25519 ECDH, AES-GCM with AAD-binding) is in `docs/crypto-spec.md §9`. This section is the integration walkthrough.
+docs\integration-guide.md:630:   pairing = client.wait_for_pairing(timeout_seconds=120)
+docs\integration-guide.md:684:- **`429 rate limited`** — back off + retry per `Retry-After` header.
+docs\crypto-spec.md:455:signature: 714def847ce5343f9b06f9263a57e192975709a73a92ae290b8b0eee47770c184eb3c5492d5a8adaed3b459c5614294ea9ddcd64e7b697af2e7b61142f3ac608
+docs\crypto-spec.md:475:ciphertext_with_tag: e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276f381ecd54c2bd928e836c28fe6e6dd68
+sdk-python\syncler\client.py:75:        pairing = client.wait_for_pairing(timeout_seconds=300)
+sdk-python\syncler\client.py:109:        # ``wait_for_pairing(...)`` on the V1.5 automated flow; can be
+sdk-python\syncler\client.py:113:        # writes to AND ``wait_for_pairing(...)`` polls from. None for
+sdk-python\syncler\client.py:167:        ``Client.wait_for_pairing(...)`` against the same broker storage
+sdk-python\syncler\client.py:226:    def wait_for_pairing(
+sdk-python\syncler\broker_storage.py:5:``Client.wait_for_pairing(...)`` polls this storage to learn when a
+sdk-python\syncler\broker_storage.py:84:        Called repeatedly by `Client.wait_for_pairing(...)`."""
+sdk-python\syncler\broker\app.py:6:[BrokerStorage]. The sender's ``Client.wait_for_pairing(...)`` polls
+sdk-python\syncler\broker\app.py:88:    "ephemeral_pubkey",
+sdk-python\syncler\broker\app.py:135:            circuit with a chosen status (e.g. 429). Any non-
+sdk-python\syncler\broker\app.py:183:                      "ephemeral_pubkey", "nonce", "ciphertext"):
+sdk-python\syncler\broker\app.py:192:            ephemeral_pubkey_raw = base64.b64decode(
+sdk-python\syncler\broker\app.py:193:                body["ephemeral_pubkey"], validate=True,
+sdk-python\syncler\broker\app.py:206:        if len(ephemeral_pubkey_raw) != _EXPECTED_EPHEMERAL_PUB_BYTES:
+sdk-python\syncler\broker\app.py:209:                detail=f"ephemeral_pubkey must decode to {_EXPECTED_EPHEMERAL_PUB_BYTES} bytes",
+sdk-python\syncler\broker\app.py:234:                ephemeral_pubkey=ephemeral_pubkey_raw,
+sdk-python\syncler\bootstrap.py:106:    ephemeral_pubkey: bytes,
+sdk-python\syncler\bootstrap.py:148:    # X25519 ECDH. `from_public_bytes` validates input length and
+sdk-python\syncler\bootstrap.py:154:        eph_pub = X25519PublicKey.from_public_bytes(ephemeral_pubkey)
+sdk-python\syncler\bootstrap.py:158:            "X25519 ECDH failed — invalid ephemeral_pubkey",
+sdk-python\syncler\bootstrap.py:162:    salt = ephemeral_pubkey + sender_bootstrap_pub
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:85:            response.senderPublicKey != preview.senderPublicKey ||
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:86:            response.senderPublicKeyFingerprint != preview.senderPublicKeyFingerprint ||
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:103:            senderPublicKey = Base64.decode(response.senderPublicKey, Base64.NO_WRAP),
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:104:            fingerprint = response.senderPublicKeyFingerprint,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:177:        senderPublicKeyEd25519Raw: ByteArray,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:182:        return Signing.verify(senderPublicKeyEd25519Raw, input, bootstrapKeySignatureRaw)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:187:     * Retries on transient failures (network, timeout, HTTP 5xx, 429)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingRepository.kt:211:                // 429. Honoring 429 with Retry-After is a documented V2
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:110:            // The senderPublicKey field comes from /preview as a
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:116:                android.util.Base64.decode(current.preview.senderPublicKey, android.util.Base64.NO_WRAP)
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:121:                    message = "preview senderPublicKey is not a valid 32-byte base64 Ed25519 key",
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:126:                senderPublicKeyEd25519Raw = senderEdPub,
+android\feature\pairing\src\main\kotlin\app\syncler\feature\pairing\PairingScreen.kt:353:                Text(preview.senderPublicKeyFingerprint, fontFamily = FontFamily.Monospace)
+android\core\network\src\test\kotlin\app\syncler\core\network\BrokerApiTest.kt:77:                "bootstrap_key_id", "exp", "ephemeral_pubkey",
+android\core\network\src\test\kotlin\app\syncler\core\network\BrokerApiTest.kt:89:        assertEquals("Bw==", body.getString("ephemeral_pubkey"))
+android\core\storage\src\test\kotlin\app\syncler\core\storage\SyncedPairedSenderStoreTest.kt:340:        senderPublicKey = ByteArray(32) { 0x11 },
+android\core\storage\src\test\kotlin\app\syncler\core\storage\SyncedPairedSenderStoreTest.kt:352:        senderPublicKey = "EREREREREREREREREREREREREREREREREREREREREREREQ==",
+android\core\storage\src\test\kotlin\app\syncler\core\storage\SyncedPairedSenderStoreTest.kt:365:        senderPublicKey = dec.decode(senderPublicKey),
+android\core\storage\src\test\kotlin\app\syncler\core\storage\SyncedPairedSenderStoreTest.kt:379:        senderPublicKey = enc.encodeToString(senderPublicKey),
+android\core\storage\src\test\kotlin\app\syncler\core\storage\StateMergerTest.kt:348:        senderPublicKey = "cHVibGlja2V5",
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:196:    @Json(name = "sender_public_key") val senderPublicKey: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:197:    @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:223:    @Json(name = "sender_public_key") val senderPublicKey: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\SynclerApi.kt:224:    @Json(name = "sender_public_key_fingerprint") val senderPublicKeyFingerprint: String,
+android\core\network\src\main\kotlin\app\syncler\core\network\BrokerApi.kt:49:    @Json(name = "ephemeral_pubkey") val ephemeralPubkey: String,
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:54:    private val BOOTSTRAP_SIG_HEX = "714def847ce5343f9b06f9263a57e192975709a73a92ae290b8b0eee47770c184eb3c5492d5a8adaed3b459c5614294ea9ddcd64e7b697af2e7b61142f3ac608"
+android\core\crypto\src\test\kotlin\app\syncler\core\crypto\SpecVectorsTest.kt:76:    private val BOOTSTRAP_CIPHERTEXT_HEX = "e4a7378b1739a2c6bf053a09689bf54c97c44f268455ac7ec413844fcfe313757d2c9ebdbc1ba979998aa3880d68db65bd4263de3bf65f9f541a1009b6fcd5ee327979e0431eee1be93ecf2c12442946514cf4e5e351ef9ee996ed721367bcc1cff20fb71dd2701ee8daad6a9e7276f381ecd54c2bd928e836c28fe6e6dd68"
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:341:    val senderPublicKey: String,       // base64
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:353:        put("sender_public_key", senderPublicKey)
+android\core\storage\src\main\kotlin\app\syncler\core\storage\EncryptedUserState.kt:367:            senderPublicKey = o.getString("sender_public_key"),
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:34:    val senderPublicKey: ByteArray,
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:288:            senderPublicKey = Base64.decode(obj.getString("sender_public_key"), Base64.NO_WRAP),
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:315:    senderPublicKey = Base64.decode(senderPublicKey, Base64.NO_WRAP),
+android\core\storage\src\main\kotlin\app\syncler\core\storage\PairedSenderStore.kt:329:    senderPublicKey = Base64.encodeToString(senderPublicKey, Base64.NO_WRAP),
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content android\\feature\\pairing\\src\\main\\kotlin\\app\\syncler\\feature\\pairing\\PairingRepository.kt | Select-Object -Skip 170 -First 65" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content sdk-python\\syncler\\broker\\app.py | Select-Object -Skip 210 -First 45" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content sdk-python\\tests\\test_broker_app.py | Select-Object -Skip 235 -First 27" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content android\\feature\\pairing\\src\\main\\kotlin\\app\\syncler\\feature\\pairing\\PairingScreen.kt | Select-Object -Skip 90 -First 55" in D:\Projects\syncler
+ succeeded in 331ms:
+    priv, pub = keypair
+    envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+    # Replace the bootstrap_key_id with a bogus 16-byte value ג€”
+    # rotation guard fires.
+    envelope["bootstrap_key_id"] = _b64(b"\x00" * 16)
+    response = client.post("/", json=envelope)
+    assert response.status_code == 401, response.text
+
+
+def test_invalid_low_order_ephemeral_pubkey_returns_401_opaque(client, keypair):
+    """Codex 89 RED: X25519 low-order/invalid points must surface as
+    opaque 401, not a 500 from the X25519 library bubbling up."""
+    priv, pub = keypair
+    envelope = _build_envelope(sender_bootstrap_priv=priv, sender_bootstrap_pub_raw=pub)
+    # All-zero is a well-known low-order point that cryptography
+    # rejects at exchange() time.
+    envelope["ephemeral_pubkey"] = _b64(b"\x00" * 32)
+    response = client.post("/", json=envelope)
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"] == "bootstrap decrypt failed"
+
+
+# --------------------------- shape validation (400) ---------------------------
+
+
+def test_missing_field_returns_400(client, keypair):
+    priv, pub = keypair
+
+ succeeded in 334ms:
+        val current = _state.value as? PairingState.PreviewReady ?: return
+
+        // V1.5: classify automated metadata BEFORE /complete.
+        // HardError indicates substitution-attack risk: refuse to
+        // pair at all (do NOT silently fall back to manual).
+        val classification = repository.classifyBootstrap(current.preview)
+        if (classification is BootstrapClassification.HardError) {
+            _state.value = PairingState.BootstrapHardError(
+                preview = current.preview,
+                message = classification.message,
+            )
+            return
+        }
+
+        // If automated metadata is well-formed, verify the
+        // bootstrap_key signature against the sender's Ed25519 pub
+        // key. If verify fails: HARD error (same posture as malformed
+        // metadata ג€” could be syncler-server substitution).
+        if (classification is BootstrapClassification.Automated) {
+            // The senderPublicKey field comes from /preview as a
+            // base64 string; the upstream /complete identity-match
+            // assertion guarantees it survives unchanged through
+            // confirmation. Decode defensively so a malformed value
+            // becomes a HardError state, not a crash (Codex 89 RED).
+            val senderEdPub = runCatching {
+                android.util.Base64.decode(current.preview.senderPublicKey, android.util.Base64.NO_WRAP)
+            }.getOrNull()
+            if (senderEdPub == null || senderEdPub.size != 32) {
+                _state.value = PairingState.BootstrapHardError(
+                    preview = current.preview,
+                    message = "preview senderPublicKey is not a valid 32-byte base64 Ed25519 key",
+                )
+                return
+            }
+            val verified = repository.verifyBootstrapKeySignature(
+                senderPublicKeyEd25519Raw = senderEdPub,
+                bootstrapKeyRaw = classification.bootstrapKeyRaw,
+                bootstrapKeySignatureRaw = classification.bootstrapKeySignatureRaw,
+            )
+            if (!verified) {
+                _state.value = PairingState.BootstrapHardError(
+                    preview = current.preview,
+                    message = "bootstrap_key_signature verification failed ג€” refusing automated pairing",
+                )
+                return
+            }
+        }
+
+        _state.value = PairingState.Confirming(current.preview)
+        viewModelScope.launch {
+            val pairingKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            val placeholder = "syncler-pairing-bootstrap-v1".toByteArray()
+            val confirmResult = repository.confirm(
+                current.candidate, current.preview, pairingKey, placeholder,
+            )
+
+ succeeded in 335ms:
+        if len(nonce_raw) != _EXPECTED_NONCE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"nonce must decode to {_EXPECTED_NONCE_BYTES} bytes",
+            )
+        if len(bootstrap_key_id_raw) != _EXPECTED_KEY_ID_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"bootstrap_key_id must decode to {_EXPECTED_KEY_ID_BYTES} bytes",
+            )
+        if len(ciphertext_raw) < _MIN_CIPHERTEXT_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ciphertext must decode to at least {_MIN_CIPHERTEXT_BYTES} bytes",
+            )
+
+        try:
+            user_id, pairing_key = decrypt_bootstrap_envelope(
+                sender_bootstrap_priv=bootstrap_private_key,
+                sender_bootstrap_pub=bootstrap_public_key_raw,
+                pairing_id=body["pairing_id"],
+                sender_id=body["sender_id"],
+                sender_broker_url_from_trusted_state=sender_broker_url,
+                ephemeral_pubkey=ephemeral_pubkey_raw,
+                nonce=nonce_raw,
+                ciphertext=ciphertext_raw,
+                exp_iso=body["exp"],
+                bootstrap_key_id_b64_from_envelope=body["bootstrap_key_id"],
+            )
+        except BootstrapDecryptError as exc:
+            # OPAQUE 401. We log the cause server-side so the sender's
+            # ops team can debug, but the response body carries no
+            # detail ג€” leaking which field mismatched would help an
+            # attacker probe the envelope (consult 80/82 spec).
+            _log.warning("bootstrap decrypt rejected: %s", exc)
+            raise HTTPException(status_code=401, detail="bootstrap decrypt failed")
+
+        try:
+            was_first = storage.complete(
+                body["pairing_id"],
+                BrokerEntry(user_id=user_id, pairing_key=pairing_key),
+            )
+        except BrokerStorageConflictError as exc:
+            _log.warning("bootstrap CAS conflict: %s", exc)
+            raise HTTPException(status_code=409, detail="pairing_id replay with different values")
+
+ succeeded in 338ms:
+     * Verify the sender's bootstrap_key signature against the sender's
+     * Ed25519 pub key (which the user just confirmed by fingerprint).
+     * The signed input is `"syncler-v1-bootstrap-key:" || raw_x25519_pub`.
+     * Defeats syncler-server bootstrap-key substitution.
+     */
+    fun verifyBootstrapKeySignature(
+        senderPublicKeyEd25519Raw: ByteArray,
+        bootstrapKeyRaw: ByteArray,
+        bootstrapKeySignatureRaw: ByteArray,
+    ): Boolean {
+        val input = BOOTSTRAP_KEY_SIG_PREFIX + bootstrapKeyRaw
+        return Signing.verify(senderPublicKeyEd25519Raw, input, bootstrapKeySignatureRaw)
+    }
+
+    /**
+     * Build + POST the bootstrap envelope to the sender's broker URL.
+     * Retries on transient failures (network, timeout, HTTP 5xx, 429)
+     * up to a total of [maxAttempts] attempts with bounded backoff.
+     * Terminal 4xx (400/401/409/other) goes straight to fallback.
+     *
+     * Returns success on 2xx, failure on any non-retryable error or
+     * after retries exhausted. The caller distinguishes the
+     * "BootstrapSucceeded" state from the "BootstrapFailedFallback"
+     * state from this Result.
+     */
+    suspend fun postBootstrapEnvelope(
+        senderBrokerUrl: String,
+        envelope: BootstrapEnvelopeDto,
+        maxAttempts: Int = 3,
+        backoffMillis: List<Long> = listOf(250L, 750L),
+    ): Result<Unit> {
+        var lastError: Throwable? = null
+        for (attempt in 1..maxAttempts) {
+            try {
+                val response = brokerApi.postBootstrapEnvelope(senderBrokerUrl, envelope)
+                if (response.isSuccessful) {
+                    return Result.success(Unit)
+                }
+                val code = response.code()
+                // V1.5: treat ALL 4xx as terminal (no retry), including
+                // 429. Honoring 429 with Retry-After is a documented V2
+                // refinement ג€” see docs/integration-guide.md ֲ§8.5
+                // "Failure modes" + crypto-spec ֲ§9 deferred work.
+                if (code in 400..499) {
+                    return Result.failure(HttpException(response))
+                }
+                lastError = HttpException(response) // 5xx ג€” will retry
+            } catch (e: IOException) {
+                // Network / DNS / timeout ג€” retryable.
+                lastError = e
+            }
+            if (attempt < maxAttempts) {
+                val delayMs = backoffMillis.getOrNull(attempt - 1) ?: backoffMillis.last()
+                delay(delayMs)
+            }
+        }
+        return Result.failure(lastError ?: IOException("broker POST failed after $maxAttempts attempts"))
+    }
+
+    /**
+     * Build the bootstrap envelope from the validated automated
+     * metadata and locally-known (user_id, pairing_key). Hands the
+     * crypto off to [BootstrapEnvelope.build]; this wrapper just
+     * assembles the wire DTO with base64-encoded fields.
+     */
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content sdk-python\\pyproject.toml" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"def create_pairing_qr|def wait_for_pairing|broker_storage|class Pairing|pairing_key\" sdk-python\\syncler" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content sdk-python\\syncler\\client.py | Select-Object -Skip 50 -First 210" in D:\Projects\syncler
+ succeeded in 261ms:
+sdk-python\syncler\errors.py:22:class PairingExpiredError(SynclerError):
+sdk-python\syncler\errors.py:26:class PairingConflictError(SynclerError):
+sdk-python\syncler\crypto.py:191:    pairing_key: bytes,
+sdk-python\syncler\crypto.py:196:    if len(pairing_key) != 32:
+sdk-python\syncler\crypto.py:197:        raise ValueError("pairing_key must be 32 bytes")
+sdk-python\syncler\crypto.py:199:    ciphertext = AESGCM(pairing_key).encrypt(nonce, plaintext, aad)
+sdk-python\syncler\client.py:27:from syncler.broker_storage import BrokerStorage
+sdk-python\syncler\client.py:51:class Pairing:
+sdk-python\syncler\client.py:82:            # pairing_key produced by the device + sender during the
+sdk-python\syncler\client.py:83:            # bootstrap exchange (M7+; for V1 dev set client.pairing_key
+sdk-python\syncler\client.py:95:        broker_storage: "BrokerStorage | None" = None,
+sdk-python\syncler\client.py:111:        self.pairing_key: bytes | None = None
+sdk-python\syncler\client.py:115:        self._broker_storage: "BrokerStorage | None" = broker_storage
+sdk-python\syncler\client.py:151:    def create_pairing_qr(
+sdk-python\syncler\client.py:188:        if sender_broker_url is not None and self._broker_storage is not None:
+sdk-python\syncler\client.py:189:            self._broker_storage.reserve(self._pending_pairing_id)
+sdk-python\syncler\client.py:226:    def wait_for_pairing(
+sdk-python\syncler\client.py:243:        if self._broker_storage is None:
+sdk-python\syncler\client.py:246:                "Client(broker_storage=InMemoryBrokerStorage()) at construction time.",
+sdk-python\syncler\client.py:254:            entry = self._broker_storage.fetch(self._pending_pairing_id)
+sdk-python\syncler\client.py:261:                self.pairing_key = entry.pairing_key
+sdk-python\syncler\client.py:272:    def set_pairing(self, user_id: str, pairing_key: bytes) -> None:
+sdk-python\syncler\client.py:278:        if len(pairing_key) != 32:
+sdk-python\syncler\client.py:279:            raise ValueError("pairing_key must be 32 bytes")
+sdk-python\syncler\client.py:281:        self.pairing_key = pairing_key
+sdk-python\syncler\client.py:305:        if self.pairing_key is None:
+sdk-python\syncler\client.py:320:            pairing_key=self.pairing_key,
+sdk-python\syncler\broker_storage.py:3:The sender-operated broker persists `(user_id, pairing_key)` keyed on
+sdk-python\syncler\broker_storage.py:26:    pairing_key: bytes  # 32 bytes
+sdk-python\syncler\broker_storage.py:31:    completed with DIFFERENT `(user_id, pairing_key)` values. Indicates
+sdk-python\syncler\broker_storage.py:113:            if existing.user_id == entry.user_id and existing.pairing_key == entry.pairing_key:
+sdk-python\syncler\bootstrap.py:7:and AES-GCM-decrypts to learn `(user_id, pairing_key)`.
+sdk-python\syncler\bootstrap.py:113:    """Decrypt one bootstrap envelope and return ``(user_id, pairing_key)``.
+sdk-python\syncler\bootstrap.py:187:    # Parse plaintext: {"user_id": "...", "pairing_key": "<base64 32>"}
+sdk-python\syncler\bootstrap.py:192:        pairing_key = _b64mod.b64decode(decoded["pairing_key"], validate=True)
+sdk-python\syncler\bootstrap.py:195:            "bootstrap plaintext is not the expected {user_id, pairing_key} shape",
+sdk-python\syncler\bootstrap.py:197:    if len(pairing_key) != 32:
+sdk-python\syncler\bootstrap.py:198:        raise BootstrapDecryptError("decoded pairing_key is not 32 bytes")
+sdk-python\syncler\bootstrap.py:199:    return user_id, pairing_key
+sdk-python\syncler\broker\__init__.py:11:    from syncler.broker_storage import InMemoryBrokerStorage
+sdk-python\syncler\broker\app.py:5:writes ``(user_id, pairing_key)`` into the configured
+sdk-python\syncler\broker\app.py:14:  pairing_key)`` values.
+sdk-python\syncler\broker\app.py:22:  pairing_key)`` values for the same ``pairing_id``. Indicates a
+sdk-python\syncler\broker\app.py:72:from ..broker_storage import (
+sdk-python\syncler\broker\app.py:98:# {"user_id":"...","pairing_key":"..."}, never empty).
+sdk-python\syncler\broker\app.py:228:            user_id, pairing_key = decrypt_bootstrap_envelope(
+sdk-python\syncler\broker\app.py:251:                BrokerEntry(user_id=user_id, pairing_key=pairing_key),
+
+ succeeded in 260ms:
+[project]
+name = "syncler"
+version = "0.1.0"
+description = "Syncler sender SDK (Python)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography==45.0.3",
+    "requests==2.32.3",
+    "qrcode[pil]==8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    # Broker deps included in [dev] so `pip install -e .[dev]` lets a
+    # clean checkout run the broker tests without remembering to also
+    # install [broker]. Production senders that just want the SDK +
+    # broker (no test deps) install [broker] only.
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "httpx>=0.27",
+]
+# V1.5 automated pairing ג€” ready-to-mount FastAPI broker app
+# (`syncler.broker.make_app`). Senders that opt into automated
+# pairing install with `pip install syncler[broker]` and run their
+# own broker behind their `sender_broker_url`. Vanilla
+# `pip install syncler` does NOT pull FastAPI / uvicorn.
+broker = [
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+]
+
+[build-system]
+requires = ["setuptools>=80.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+ succeeded in 321ms:
+class Pairing:
+    pairing_id: str
+    user_id: str  # the recipient's user UUID after pairing completes
+
+
+@dataclass
+class SendResult:
+    message_id: str
+    expires_at: str
+
+
+class Client:
+    """Thin sync wrapper over the Syncler server REST API.
+
+    Usage::
+
+        client = Client(
+            base_url="https://api.syncler.app",
+            sender_name="Trading Bot",
+            private_key_path="~/.syncler/keys/trading.pem",
+        )
+        client.register_if_needed(contact="ops@example.com")
+
+        qr_path = client.create_pairing_qr(ttl_seconds=300)
+        pairing = client.wait_for_pairing(timeout_seconds=300)
+
+        client.send_to(
+            user_uuid=pairing.user_id,
+            plugin_identifier="com.trading.app",
+            payload={"pnl": 1234.56},
+            min_plugin_version="1.0.0",
+            # pairing_key produced by the device + sender during the
+            # bootstrap exchange (M7+; for V1 dev set client.pairing_key
+            # directly with a 32-byte shared secret).
+        )
+    """
+
+    def __init__(
+        self,
+        *,
+        sender_name: str,
+        private_key_path: str,
+        base_url: str = DEFAULT_BASE_URL,
+        session: requests.Session | None = None,
+        broker_storage: "BrokerStorage | None" = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.sender_name = sender_name
+        self.private_key: Ed25519PrivateKey = load_private_key(private_key_path)
+        self.public_key = public_key_raw(self.private_key)
+        self.session = session or requests.Session()
+
+        # State that gets set after register / pairing.
+        self.sender_id: str | None = None
+        self._pending_pairing_token: str | None = None
+        self._pending_pairing_id: str | None = None
+        self._latest_pairing: Pairing | None = None
+        # V1 per-pairing AES-GCM key. Set automatically by
+        # ``wait_for_pairing(...)`` on the V1.5 automated flow; can be
+        # set manually via ``set_pairing(...)`` for the V1 manual flow.
+        self.pairing_key: bytes | None = None
+        # V1.5 Phase 5a-2: broker storage the sender's broker handler
+        # writes to AND ``wait_for_pairing(...)`` polls from. None for
+        # senders sticking with the V1 manual flow.
+        self._broker_storage: "BrokerStorage | None" = broker_storage
+
+    # ---------------------------- Sender lifecycle -------------------------
+
+    def _canonical_sender_id(self) -> str:
+        if self.sender_id is None:
+            raise SynclerError("sender_id not set")
+        return _canon_uuid(self.sender_id)
+
+    def register_if_needed(self, *, contact: str | None = None) -> str:
+        """Register the sender public key once. Returns sender_id.
+
+        Idempotent: if a server-side row already exists for this public key,
+        the server returns 409. The caller is expected to persist
+        ``self.sender_id`` between runs; in dev we cache to a JSON file
+        beside the private key ג€” but the SDK keeps that detail outside its
+        responsibility. For now, the caller catches a 409 themselves.
+        """
+        body = {
+            "public_key": b64(self.public_key),
+            "name": self.sender_name,
+            "contact": contact,
+        }
+        resp = self.session.post(f"{self.base_url}/v1/senders/register", json=body, timeout=10)
+        if resp.status_code == 409:
+            raise SynclerError("sender already registered (use the previously-issued sender_id)")
+        resp.raise_for_status()
+        self.sender_id = resp.json()["sender_id"]
+        return self.sender_id
+
+    def set_sender_id(self, sender_id: str) -> None:
+        """Set sender_id from a persisted location (after first register)."""
+        self.sender_id = sender_id
+
+    # ---------------------------- Pairing ----------------------------------
+
+    def create_pairing_qr(
+        self,
+        *,
+        ttl_seconds: int = 300,
+        metadata: dict[str, Any] | None = None,
+        out_path: str | None = None,
+        sender_broker_url: str | None = None,
+    ) -> str:
+        """Initiate a pairing and write a QR-code PNG of the broker URL.
+
+        Returns the path to the generated PNG. Caller is responsible for
+        showing the QR to the user.
+
+        V1.5 (Phase 5a-2): pass ``sender_broker_url`` to enable the
+        automated pairing flow. The Android app will POST the encrypted
+        bootstrap envelope to that URL after the user confirms; pair
+        ``Client.wait_for_pairing(...)`` against the same broker storage
+        you mounted the broker handler on. Pre-requisite: register the
+        sender's X25519 bootstrap key via
+        ``Client.register_bootstrap_key(...)`` before calling this with
+        ``sender_broker_url`` set ג€” the server rejects otherwise.
+        """
+        self._require_sender_id()
+        body: dict[str, Any] = {
+            "sender_id": self._canonical_sender_id(),
+            "ttl_seconds": ttl_seconds,
+            "metadata": metadata or {},
+        }
+        if sender_broker_url is not None:
+            body["sender_broker_url"] = sender_broker_url
+        body["signature"] = b64(self.private_key.sign(canonical_json(body)))
+        resp = self.session.post(f"{self.base_url}/v1/pairing/initiate", json=body, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        self._pending_pairing_token = data["pairing_token"]
+        self._pending_pairing_id = data["pairing_id"]
+        # Reserve broker storage slot when running the automated flow.
+        if sender_broker_url is not None and self._broker_storage is not None:
+            self._broker_storage.reserve(self._pending_pairing_id)
+
+        broker_url = data["broker_url"]
+        out_path = out_path or f"syncler-pairing-{int(time.time())}.png"
+        _render_qr(broker_url, out_path)
+        return out_path
+
+    def register_bootstrap_key(
+        self,
+        *,
+        bootstrap_public_key_raw: bytes,
+    ) -> str:
+        """V1.5 Phase 5a-2: register (or rotate) the sender's X25519
+        bootstrap public key. Required before calling
+        ``create_pairing_qr(sender_broker_url=...)``.
+
+        Signs the literal ASCII bytes ``"syncler-v1-bootstrap-key:"``
+        (24 bytes) concatenated with the raw 32-byte X25519 public key,
+        per `docs/crypto-spec.md ֲ§9.1`. Returns the base64
+        ``bootstrap_key_id`` (server-computed SHA-256(pub)[:16]).
+        """
+        self._require_sender_id()
+        if len(bootstrap_public_key_raw) != 32:
+            raise ValueError("bootstrap_public_key_raw must be 32 bytes")
+        sig_input = b"syncler-v1-bootstrap-key:" + bootstrap_public_key_raw
+        signature = self.private_key.sign(sig_input)
+        body = {
+            "sender_id": self._canonical_sender_id(),
+            "bootstrap_key": b64(bootstrap_public_key_raw),
+            "bootstrap_key_signature": b64(signature),
+        }
+        resp = self.session.post(
+            f"{self.base_url}/v1/senders/me/bootstrap-key", json=body, timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["bootstrap_key_id"]
+
+    def wait_for_pairing(
+        self,
+        *,
+        timeout_seconds: int = 120,
+        poll_interval_seconds: float = 1.0,
+    ) -> Pairing:
+        """V1.5 Phase 5a-2: poll the broker storage until the device's
+        bootstrap POST lands, then automatically set the pairing on
+        this client.
+
+        Defaults: 120s timeout, 1s poll with ֲ±20% jitter (jitter avoids
+        synchronized polling when multiple pairings are in flight).
+        Raises ``TimeoutError`` on deadline. Caller must have wired a
+        broker storage via ``Client(...)``'s constructor ג€” otherwise
+        there's nothing to poll.
+        """
+        import random
+        if self._broker_storage is None:
+            raise SynclerError(
+                "wait_for_pairing requires a broker storage. Pass one to "
+                "Client(broker_storage=InMemoryBrokerStorage()) at construction time.",
+            )
+        if self._pending_pairing_id is None:
+            raise SynclerError(
+                "no pending pairing ג€” call create_pairing_qr(sender_broker_url=...) first",
+            )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            entry = self._broker_storage.fetch(self._pending_pairing_id)
+            if entry is not None:
+                pairing = Pairing(
+                    pairing_id=self._pending_pairing_id,
+                    user_id=entry.user_id,
+                )
+                self._latest_pairing = pairing
+
+codex
+Per-item verdict:
+1. X25519 ECDH error wrapping: GREEN.
+2. Low-order ephemeral pubkey broker regression: GREEN.
+3. `[dev]` packaging extra includes broker test deps: GREEN.
+4. Integration guide API corrections: GREEN.
+5. Android YELLOWs: YELLOW.
+
+Codex 89 REDs: all addressed.
+
+Anything new / remaining:
+- `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt:187` still says retries include `HTTP 5xx, 429`, while the implementation and later comment treat all 4xx, including 429, as terminal. This is only a comment/docs mismatch, but it means the prior 429-comment YELLOW is not fully closed.
+
+Commit-readiness vote: YELLOW. No blocking RED remains; fix the one contradictory `429` KDoc line before final commit.
+tokens used
+23,477
+Per-item verdict:
+1. X25519 ECDH error wrapping: GREEN.
+2. Low-order ephemeral pubkey broker regression: GREEN.
+3. `[dev]` packaging extra includes broker test deps: GREEN.
+4. Integration guide API corrections: GREEN.
+5. Android YELLOWs: YELLOW.
+
+Codex 89 REDs: all addressed.
+
+Anything new / remaining:
+- `android/feature/pairing/src/main/kotlin/app/syncler/feature/pairing/PairingRepository.kt:187` still says retries include `HTTP 5xx, 429`, while the implementation and later comment treat all 4xx, including 429, as terminal. This is only a comment/docs mismatch, but it means the prior 429-comment YELLOW is not fully closed.
+
+Commit-readiness vote: YELLOW. No blocking RED remains; fix the one contradictory `429` KDoc line before final commit.

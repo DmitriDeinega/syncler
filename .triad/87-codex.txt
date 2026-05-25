@@ -1,0 +1,50 @@
+Verdict: **YELLOW overall**, not RED. The big security holes from consultation 86 are addressed, but there are still a few constraints that should be tightened before implementation.
+
+**Item 1 — Android UX: YELLOW**
+
+Main issue: persistence timing is internally inconsistent.
+
+You say:
+
+- on HTTP 2xx, persist `PairedSender`
+- on broker POST failure, local `PairedSender` is “NOT deleted” because Syncler-side pairing already completed
+
+Those imply different models. After `/complete` succeeds, the Syncler server has consumed/finalized the pairing. The Android app should persist the local `PairedSender` regardless of broker POST outcome, otherwise fallback leaves the sender catch-up path available but the device itself may not have a durable local pairing record.
+
+Recommended constraint: after `/complete` + identity match succeeds, construct and persist the local paired record before or independently of broker POST success. `BootstrapSucceeded` should mean “sender broker also caught up,” not “only then Android becomes paired.”
+
+Also missing/tighten:
+
+- Do not retry all 4xx. Retry network failures, timeout, DNS, 5xx, and possibly 429 with `Retry-After`. Treat 400/401/409 as terminal and go straight to fallback.
+- Explicitly validate automated preview metadata before confirm: `bootstrap_key` base64 decodes to 32 bytes, `bootstrap_key_signature` to 64 bytes, `sender_broker_url` is present and acceptable, `bootstrap_protocol_version == 1`.
+- Add a test for partial automated metadata causing hard refusal before `/complete`.
+- Ensure the unauthenticated broker client also does not inherit logging/interceptors from the main client.
+
+**Item 2 — FastAPI broker: YELLOW**
+
+The app factory and status semantics are good, and changing `BrokerStorage.complete(...) -> bool` is the right clean API change.
+
+Remaining concern: the “unknown `pairing_id` rejected is only defense-in-depth” statement is too strong. With a fixed `sender_broker_url` and no pending-pairing registry, an attacker who knows the public bootstrap key can create a cryptographically valid envelope for an arbitrary `pairing_id`; AEAD does not reject that, because the attacker chooses matching AAD. The UUID unpredictability protects real pending IDs, but the broker can still accept/storage-pollute arbitrary completed entries.
+
+So this is acceptable for V1.5 only if documented more precisely:
+
+- fixed-config broker cannot reject unknown `pairing_id`
+- AEAD prevents tampering/substitution of an existing envelope, but does not authenticate that the pairing ID was previously initiated
+- production deployments should use rate limiting and preferably storage that reserves pending IDs
+- V2 should add pending pairing state or a `pairing_id -> sender_broker_url` map
+
+Also missing:
+
+- Update `docs/crypto-spec.md`, not only `broker_storage.py` and the integration guide, because the current crypto spec says the broker MUST use stored state indexed by `pairing_id`.
+- Specify wire JSON naming. The proposed Kotlin DTO uses camelCase property names unless annotated with Moshi `@Json`. The Python-side tests/helpers currently use snake-ish names like `ephemeral_pubkey` and `bootstrap_key_id_b64`. Pick one wire format explicitly and test it cross-language.
+- For `rate_limiter`, specify that `HTTPException` propagates as-is; unexpected exceptions should probably become 500, not silently converted.
+
+**Item 3 — Docs: GREEN**
+
+The doc additions are directionally right. Add one more required update: `docs/crypto-spec.md §9.3` must describe the V1.5 fixed-config deviation, because otherwise the implementation will intentionally violate the current “MUST use pairing_id-indexed trusted state” language.
+
+**New/Footguns**
+
+The largest remaining footgun is accepting arbitrary valid envelopes when the broker has no pending-pairing registry. It is probably tolerable for V1.5 with UUID entropy, rate limiting, and clear docs, but do not describe AEAD as rejecting unknown pairing IDs.
+
+Second footgun is Android’s post-`/complete` failure state. Once `/complete` succeeds, the pairing is real on the Syncler side. Local persistence should not depend on the sender broker POST succeeding.

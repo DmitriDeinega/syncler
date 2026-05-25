@@ -1,0 +1,29 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+YOLO mode is enabled. All tool calls will be automatically approved.
+YOLO mode is enabled. All tool calls will be automatically approved.
+Ripgrep is not available. Falling back to GrepTool.
+(node:14472) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+The Phase 5a-2.1 revised plan is **GREEN** across all items. It comprehensively addresses the security and architectural refinements requested in Consultation 86.
+
+### Item 1 — Android UX (revised): GREEN
+*   **Security (Auth-header isolation):** The introduction of `BrokerHttpClient` (unauthenticated OkHttp instance) correctly mitigates the risk of leaking the user's bearer token to a sender-controlled broker URL.
+*   **Security (Signature Verification):** Verifying the `bootstrap_key_signature` after fingerprint confirmation ensures the bootstrap public key hasn't been substituted by the Syncler server.
+*   **Correction (Identity Metadata):** The correction regarding `/complete` returning identity metadata (rather than `pairing_key`) aligns the plan with the existing protocol state.
+*   **Robustness:** Hard error on malformed/partial metadata and the retry logic with exponential backoff (250ms/750ms/2s) provide a good balance of security and UX.
+
+### Item 2 — FastAPI broker (revised): GREEN
+*   **Protocol Refinement:** Updating `BrokerStorage.complete` to return a `bool` is the correct way to handle the 200/201 HTTP status semantics for idempotency.
+*   **Security (Defensive Validation):** Explicitly validating base64 lengths before decryption is a strong defensive measure.
+*   **HTTP Semantics:** The use of 201 (Created), 200 (OK/Idempotent), 409 (Conflict), and 401 (Decrypt Error - opaque) follows REST best practices and prevents information leaks.
+*   **Extensibility:** The `rate_limiter` hook allows senders to implement custom protection (e.g., IP-based or per-pairing-id limits) without the SDK dictating a specific implementation.
+
+### Item 3 — Integration Guide: GREEN
+*   **Accuracy:** The warning regarding `InMemoryBrokerStorage` and multi-worker deployments is a critical "anti-footgun" for production users.
+*   **Consistency:** The alignment of terminology (`sender_broker_url`) ensures developers don't get confused by shifting nomenclature.
+
+### Missing/New Constraints
+*   **Broker Error Detail:** Ensure the `401` response on decryption failure is truly opaque (as planned) to prevent an attacker from brute-forcing individual envelope fields or learning about broker wall-clock skew.
+*   **Android Retry Logic:** Ensure the 3 retries are only for transient network errors (DNS, timeout, 5xx) and *not* for `409 Conflict` (which indicates the pairing is already done with different values) or `401` (which indicates a permanent crypto mismatch).
+
+The plan is ready for implementation.
