@@ -620,6 +620,46 @@ async def test_card_delete_rejects_exceeds_ttl_cap(
 
 
 @pytest.mark.asyncio
+async def test_card_delete_rejects_naive_expires_at(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    """A naive (no-tzinfo) expires_at in the body is rejected with 422
+    by Pydantic — NOT by the route's comparison against tz-aware now,
+    which would TypeError → 500 (Codex 111 nit).
+    """
+    sender_id, private_key = await _register_sender(app_client)
+    user_id, bootstrap = await _signup_login(app_client, email="test@example.com")
+    await _enroll_device(app_client, bootstrap)
+    await _seed_pairing_and_live_plugin(
+        db_session, user_id=user_id, sender_id=sender_id,
+    )
+
+    # Submit a delete with a naive datetime string (no Z, no offset).
+    nonce = _b64(uuid.uuid4().bytes[:12])
+    naive_iso = (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    envelope = _canonical(
+        {
+            "sender_id": str(sender_id),
+            "user_id": str(user_id),
+            "card_key": "C",
+            "nonce": nonce,
+            "expires_at": naive_iso,
+        }
+    )
+    body = {
+        "sender_id": str(sender_id),
+        "user_id": str(user_id),
+        "card_key": "C",
+        "nonce": nonce,
+        "expires_at": naive_iso,
+        "envelope_signature": _b64(private_key.sign(envelope)),
+    }
+    r = await app_client.post("/v1/cards/delete", json=body)
+    # 400 (our app's validation_exception_handler downgrades 422 -> 400).
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.asyncio
 async def test_card_delete_records_nonce_even_when_card_missing(
     app_client: AsyncClient, db_session: AsyncSession,
 ) -> None:

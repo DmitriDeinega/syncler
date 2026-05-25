@@ -145,10 +145,23 @@ def assemble_live_card_delete_envelope(
     sender_id: str,
     user_id: str,
     card_key: str,
+    nonce: str,
+    expires_at: str,
 ) -> bytes:
+    """Canonical Ed25519 signing input for ``POST /v1/cards/delete``.
+
+    Phase 12 (Codex 95): the delete envelope now binds ``nonce`` and
+    ``expires_at`` so a captured delete can't be replayed indefinitely
+    against any future card with the same
+    ``(sender_id, user_id, card_key)``. Pass base64 of 12 random
+    bytes for ``nonce`` and an ISO-8601 UTC instant ≤ 48 h ahead for
+    ``expires_at``.
+    """
     return canonical_json(
         {
             "card_key": card_key,
+            "expires_at": expires_at,
+            "nonce": nonce,
             "sender_id": _canon_uuid(sender_id),
             "user_id": _canon_uuid(user_id),
         }

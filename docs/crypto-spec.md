@@ -488,19 +488,19 @@ The user's 32-byte master key (§2) is the root secret for all per-user symmetri
 
 ### 10.1 Rotation modes
 
-| `reason` | Master key | Wrap key | Auth salt | Data re-encrypted | `key_generation` bump | Sessions revoked |
-|---|---|---|---|---|---|---|
-| `password_rewrap` | unchanged | NEW (from new password) | NEW (16 random bytes) | NO | NO | NO |
-| `root_hygiene_rotation` | NEW (32 random bytes) | unchanged | unchanged | YES | YES (+1) | NO |
-| `root_compromise_rotation` | NEW | NEW (from new password) | NEW | YES | YES (+1) | YES — all sessions including the initiating one |
+| `reason` | Master key | Wrap key | Auth salt | Data re-encrypted | `key_generation` bump | Sessions revoked | Pairings revoked |
+|---|---|---|---|---|---|---|---|
+| `password_rewrap` | unchanged | NEW (from new password) | NEW (16 random bytes) | NO | NO | NO | NO |
+| `root_hygiene_rotation` | NEW (32 random bytes) | unchanged | unchanged | YES | YES (+1) | NO | NO |
+| `root_compromise_rotation` | NEW | NEW (from new password) | NEW | YES | YES (+1) | YES — all sessions including the initiating one | YES — every active pairing (§10.8 step 12) |
 
-For `password_rewrap` the master key value stays byte-identical; only its wrapping changes. For `root_compromise_rotation` the initiating session is revoked along with all others — the user must log in again from scratch on every device.
+For `password_rewrap` the master key value stays byte-identical; only its wrapping changes. For `root_compromise_rotation` the initiating session is revoked along with all others — the user must log in again from scratch on every device — AND every active pairing is server-side revoked. The pairing keys themselves remain in the (now revoked) encrypted_user_state blob and an attacker holding the old master key still has plaintext copies, but the next message they sign with any of those keys gets a 410 from the server, and the legitimate user must re-pair every sender from scratch with fresh key material. Phase 13 (Codex consultation 98 follow-up) added the auto-revoke.
 
 ### 10.2 What rotation does NOT protect against
 
 Master-key rotation re-encrypts data stored under the old key. It does NOT revoke:
 
-- **Sender-held pairing keys.** Senders received stable pairing keys at bootstrap and continue to encrypt messages with them. A compromised pairing key needs a separate re-pair protocol (V2 follow-up).
+- **Sender-held pairing key BYTES.** Senders received stable pairing keys at bootstrap and they remain in the encrypted_user_state blob; rotation does not regenerate those byte values. For `root_compromise_rotation` the server auto-revokes every active pairing row (§10.8 step 12) so a sender using a compromised pairing key now gets 410 on the next send and must re-pair from scratch with fresh material. For `root_hygiene_rotation` and `password_rewrap` pairings remain active (the threat model didn't include sender-channel compromise).
 - Messages already delivered to other devices.
 - Data exfiltrated from an unlocked device.
 - Cards encrypted under per-sender pairing keys (the per-pairing keys are unchanged through rotation; cards remain decryptable).
@@ -719,7 +719,18 @@ Inside ONE Postgres transaction:
 
 10. **Apply user-row writes** — `users.encrypted_master_key = :new_blob`. For `password_rewrap` + `root_compromise_rotation`: `users.auth_key_hash = SHA-256(new_auth_key_proof)` and `users.auth_salt = :new_salt`. For `root_*`: `users.key_generation = old + 1`.
 11. **INSERT audit row** — `master_key_rotation_audit` capturing `(user_id, reason, old_generation, new_generation, initiating_session_id, initiating_device_id, ip, user_agent, paired_count)`. NO secret material.
-12. **For `root_compromise_rotation`: revoke sessions** — `DELETE FROM device_sessions WHERE user_id = :u` (ALL sessions including initiating).
+12. **For `root_compromise_rotation`: revoke sessions AND pairings** —
+
+    ```sql
+    UPDATE devices  SET revoked_at = NOW()
+      WHERE user_id = :u AND revoked_at IS NULL;
+    UPDATE pairings SET revoked_at = NOW()
+      WHERE user_id = :u AND revoked_at IS NULL;
+    ```
+
+    Devices: every authenticated call from any of them now 401s.
+
+    Pairings: the attacker who stole the old master key also has every sender's pairing key bytes (they live in `encrypted_user_state`). Re-encrypting the blob under the new MK does NOT change those bytes; the attacker can keep sending messages until each pairing is server-side revoked. After revoke the existing `PairingMissingError` path in the send routes returns 410 and the legitimate sender must re-pair with fresh material. Phase 13 closure of the Codex 98 follow-up.
 13. **Consume the challenge** — `DELETE FROM rotation_challenges WHERE challenge = :c`.
 14. **COMMIT.**
 

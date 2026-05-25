@@ -353,6 +353,66 @@ async def test_root_compromise_rotation_revokes_all_devices(
     assert me.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_root_compromise_rotation_revokes_all_pairings(
+    app_client: AsyncClient, db_session: AsyncSession,
+) -> None:
+    """Phase 13 (Codex 98): root_compromise_rotation auto-revokes every
+    active pairing for the user. Without this, the attacker who stole
+    the pre-rotation master key still holds every sender's pairing
+    key (extracted from the encrypted_user_state blob) and can keep
+    sending messages until each pairing is revoked. Re-encrypting the
+    blob under the new MK preserves the pairing key BYTES, so the
+    server-side revoke is the closing piece.
+    """
+    session, auth_key = await _signup_login_enroll(app_client)
+    await _seed_initial_state(app_client, session)
+    pid_a = await _pair_with_sender(app_client, session, sender_name="A")
+    pid_b = await _pair_with_sender(app_client, session, sender_name="B")
+    challenge = await _get_challenge(app_client, session)
+
+    # Sanity: both pairings active pre-rotation.
+    pre = (await db_session.execute(select(Pairing))).scalars().all()
+    assert {p.id for p in pre} == {pid_a, pid_b}
+    assert all(p.revoked_at is None for p in pre)
+
+    response = await app_client.post(
+        "/v1/account/rotate-master-key",
+        headers={"Authorization": f"Bearer {session}", **PHASE_8_HEADER},
+        json={
+            "reason": "root_compromise_rotation",
+            "key_generation_observed": 1,
+            "rotation_challenge": challenge,
+            "current_password_proof": _b64(auth_key),
+            "new_encrypted_master_key": _b64(b"compromise-mk" + b"\x07" * 51),
+            "new_auth_salt": _b64(b"new-salt-16byte!"),
+            "new_auth_key_proof": _b64(b"shiny-new-auth-key-32-bytes!padd"),
+            "new_encrypted_user_state": {
+                "encrypted_blob": _b64(b"new-state-blob" + b"\x00" * 20),
+                "state_version_observed": 1,
+            },
+            "pairings": [
+                {
+                    "pairing_id": str(pid_a),
+                    "state_version_observed": 1,
+                    "new_encrypted_state": _b64(b"reA" + b"\x00" * 29),
+                },
+                {
+                    "pairing_id": str(pid_b),
+                    "state_version_observed": 1,
+                    "new_encrypted_state": _b64(b"reB" + b"\x00" * 29),
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    # Every pairing flipped to revoked.
+    post = (await db_session.execute(select(Pairing))).scalars().all()
+    assert len(post) == 2
+    assert all(p.revoked_at is not None for p in post)
+
+
 # ---------------------------------------------------------------------------
 # §10.8 step 4 — invalid proof + failed-counter
 # ---------------------------------------------------------------------------

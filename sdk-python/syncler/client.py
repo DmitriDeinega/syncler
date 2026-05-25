@@ -483,8 +483,8 @@ class Client:
         ``nonce`` + ``expires_at`` so a captured delete can't be replayed
         indefinitely against a future card with the same
         ``(sender_id, user_id, card_key)``. Defaults: ``nonce`` =
-        ``os.urandom(12)``, ``expires_at`` = now + 7 days (server caps at
-        48h). Callers can pass either to control the freshness window
+        ``os.urandom(12)``, ``expires_at`` = now + 24 h (server caps at
+        48 h). Callers can pass either to control the freshness window
         explicitly — usually you'll just let the defaults ride.
         """
         import os

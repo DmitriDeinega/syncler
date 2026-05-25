@@ -287,6 +287,19 @@ class LiveCardDeleteRequest(BaseModel):
         decode_base64(value, field_name="nonce", exact=12)
         return value
 
+    @field_validator("expires_at")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        # Codex 111: naive datetimes flow into the route's
+        # `payload.expires_at > now` comparison against a tz-aware
+        # `datetime.now(UTC)` and raise TypeError -> 500. 422 is the
+        # right answer for a malformed field; force tz-aware here.
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                "expires_at must be timezone-aware (ISO-8601 with offset, e.g. ...Z)",
+            )
+        return value
+
 
 class LiveCardItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)

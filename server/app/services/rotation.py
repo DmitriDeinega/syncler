@@ -516,12 +516,32 @@ async def perform_rotation(
     )
     db.add(audit)
 
-    # Step 12 — root_compromise: revoke ALL devices (the next request from
-    # any of them returns 401).
+    # Step 12 — root_compromise: revoke ALL devices AND all active
+    # pairings (Phase 13 — closes the Codex 98 sender-channel
+    # compromise gap).
+    #
+    # Devices: the next authenticated call from any of them returns
+    # 401.
+    #
+    # Pairings: the attacker who stole the pre-rotation master key
+    # also had access to every sender's pairing key (they live in
+    # the encrypted_user_state blob). Re-encrypting the blob under
+    # the new MK does NOT change the underlying pairing key bytes;
+    # the attacker can keep sending messages to the user via those
+    # still-valid keys until each pairing is server-side revoked.
+    # On the next send the server returns 410 (PairingMissingError
+    # already handled in services/messages.py + services/cards.py)
+    # and the legitimate sender must re-pair from scratch with
+    # fresh key material.
     if ctx.reason == "root_compromise_rotation":
         await db.execute(
             update(Device)
             .where(Device.user_id == ctx.user_id, Device.revoked_at.is_(None))
+            .values(revoked_at=now),
+        )
+        await db.execute(
+            update(Pairing)
+            .where(Pairing.user_id == ctx.user_id, Pairing.revoked_at.is_(None))
             .values(revoked_at=now),
         )
 
