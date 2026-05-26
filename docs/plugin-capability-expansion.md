@@ -39,8 +39,30 @@ Each capability lands with:
 3. **Audit log entry per invocation** (codex 137 #8). The
    audit table is the forensic source of truth; retention +
    UI aggregation are separate concerns. Coordinates and file
-   names are NOT logged — only `(plugin_row_id, capability,
-   sandbox_token, outcome)`.
+   names are NOT logged.
+
+   **Schema (triad 138 E, both reviewers):**
+
+   ```sql
+   CREATE TABLE plugin_capability_audit (
+     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+     plugin_row_id   TEXT NOT NULL,
+     capability      TEXT NOT NULL,
+     sandbox_token   INTEGER NOT NULL,
+     call_id         TEXT NOT NULL,
+     at_ms           INTEGER NOT NULL,  -- wall-clock for display
+     duration_ms     INTEGER NOT NULL,  -- elapsedRealtime delta
+     outcome         TEXT NOT NULL,     -- "success" | SDK error code
+     surface         TEXT NOT NULL,     -- "activity_result" | "service_call"
+     size_bytes      INTEGER,           -- staged size for camera/gallery/file
+     item_count      INTEGER,           -- for gallery
+     precision       TEXT,              -- "coarse" | "fine" for location
+     mime_claimed    TEXT,              -- provider-stated MIME
+     mime_detected   TEXT               -- magic-byte sniff result
+   );
+   ```
+
+   No filename, no URI, no coordinates, no handle string.
 4. **Bridge return shape** — handles, not bytes (see "Binary
    transport" below). Plugin's typed Kotlin `Result<...>` or
    JS promise resolves with the handle + metadata; the plugin
@@ -89,10 +111,23 @@ The plugin then reads via a new bridge call:
 ctx.fileBytes(handle, offset = 0L, length = 65536L): Result<ByteArray>
 ```
 
-Chunk size cap: 256 KB per call. The sandbox iterates until
-`length` bytes are read or EOF. Plugin holds the handle until
-it explicitly releases via `ctx.releaseHandle(handle)` or the
-host garbage-collects expired handles.
+**`fileBytes` semantics (triad 138 C — both reviewers
+confirm):** stateless seek-and-read. Each call reads
+`[offset, offset + length)` from the staged file; host opens
+RandomAccessFile, seeks, reads, closes. No cursor / stream
+state is carried between calls.
+
+- `offset < 0` or `length < 0` → `invalid_handle`.
+- `length > 256 * 1024` → `invalid_handle`.
+- `offset >= sizeBytes` → `{bytes: "", eof: true}`.
+- Short read allowed only near EOF (returns whatever fits
+  in `[offset, sizeBytes)` with `eof: true`).
+- Repeated reads at the same offset return identical bytes
+  until release / expiry.
+
+Plugin holds the handle until it explicitly releases via
+`ctx.releaseHandle(handle)` or the host garbage-collects
+expired handles.
 
 Staging file layout under `cacheDir/plugin-capability/`:
 - One subdir per `sandbox_token` so a process-death cleanup
@@ -106,6 +141,13 @@ Caps:
 - Max concurrent handles per plugin: 32.
 - Handle TTL: 5 minutes after creation OR plugin unload,
   whichever first.
+
+**TTL clock (triad 138 B):** TTL enforcement uses
+`SystemClock.elapsedRealtime()` and an internal
+`expiresAtElapsedMs` field. The wall-clock `expiresAtMs`
+returned to the plugin is for display only — host cleanup +
+validity checks never read it. This survives NTP shifts and
+manual timezone changes that would invalidate wall-clock TTLs.
 
 Host cleanup hooks:
 - App start: wipe `plugin-capability/` entirely.
@@ -126,19 +168,66 @@ CREATE TABLE plugin_capability_grants (
 );
 ```
 
-Grant check sequence:
-1. Manifest declares the capability? (existing
-   `PluginPermissionStore::grantedCapabilities` check)
-2. Per-plugin grant row exists?
-3. For OS-mediated capabilities (`location.*`, `camera`):
-   - If a per-plugin grant row exists AND OS permission is
-     granted: dispatch.
-   - If neither: show in-app prompt → if accepted, request OS
-     permission → on OS grant insert the grant row → dispatch.
-4. For UI-consent capabilities (`gallery`, `file`): no in-app
-   prompt; launch the picker directly. Insert the grant row
-   after the picker returns a result (i.e. the user actually
-   chose a file).
+**Two grant-check sequences** keyed on capability category
+(triad 138 codex blocker fix — v2's single sequence
+contradicted itself by re-checking the grant row before it
+existed for first-time gallery/file).
+
+### Category A: UI-consent capabilities (`camera`, `gallery`, `file`)
+
+The OS picker / camera UI itself is the consent surface. No
+in-app prompt; the grant row's purpose is purely "remember
+that the user has consented at least once for this plugin"
+so we can show it in settings + know if it's been revoked.
+
+First invocation:
+1. Manifest declares the capability? (existing check)
+2. Plugin still installed + session alive? (always)
+3. For `camera`: OS permission state.
+   - If denied: launch OS runtime permission request via
+     ActivityResultRegistry. Continue only on grant; on
+     denial return `os_denied`.
+4. Launch the picker / camera intent. The continuation is
+   the "pending consent" — there is no grant row yet.
+5. On result delivery: re-check manifest still declares it
+   AND plugin still installed AND OS permission still
+   granted. (Do NOT re-check the grant row — it doesn't
+   exist yet; that's what we're about to create.)
+6. Stage bytes → return handle.
+7. Insert the grant row.
+
+Subsequent invocation (grant row exists):
+1. Manifest declares + plugin installed (always).
+2. OS permission still granted (camera only).
+3. Launch the picker / camera intent.
+4. On result delivery: re-check manifest + grant row still
+   present + OS permission still granted. (Grant row
+   present means "user previously consented in settings"; a
+   row deletion via the settings sheet between launch and
+   result = user revoked mid-flight → return
+   `capability_denied`.)
+5. Stage bytes → return handle.
+
+### Category B: Service-call capabilities (`location.coarse`, `location.fine`)
+
+No OS picker UI; the host fires a Fused Location Provider
+call directly. The in-app prompt is the consent surface.
+
+First invocation:
+1. Manifest declares + plugin installed (always).
+2. Show in-app `CapabilityGrantDialog`. If denied or
+   timed out: return `capability_denied` /
+   `capability_prompt_rate_limited` per cooldown.
+3. Request OS permission via ActivityResultRegistry. On
+   denial: return `os_denied`. Do NOT insert a grant row.
+4. On OS grant: insert the grant row.
+5. Single-fix the location → return inline result.
+
+Subsequent invocation (grant row exists):
+1. Manifest declares + plugin installed (always).
+2. Grant row present (settings revoke would have removed
+   it) AND OS permission still granted.
+3. Single-fix the location → return inline result.
 
 ## Continuation lifecycle (codex 137 missing item)
 
@@ -206,10 +295,15 @@ callbacks on `onCreate` so a config change re-binds without
 losing the in-flight call.
 
 Mid-flight revocation check (gemini 137 missing item): after
-the Activity result returns but BEFORE staging bytes / inserting
-grant row / returning to sandbox, re-check
-`plugin_capability_grants` and OS permission. If the user
-revoked while the Activity was open, return
+the Activity result returns but BEFORE staging bytes /
+returning to sandbox, re-check the appropriate state for the
+capability's category (see "Two grant-check sequences" above).
+For Category A first-time calls (gallery/file/camera-first),
+re-check manifest declaration + plugin still installed + OS
+permission (camera only); the grant row doesn't exist yet so
+we explicitly DON'T re-check it. For Category A subsequent
+calls + all Category B calls, re-check the grant row + OS
+permission. If any check fails, return
 `{"error":"capability_denied"}` and delete the result without
 exposing it.
 
@@ -260,7 +354,32 @@ data class FileResult(val handle: CapabilityHandle)
 
 This **bumps `NATIVE_SDK_ABI` from 1 to 2** since the SDK
 contract changes shape. Any Phase 11-era native plugins
-need re-publish.
+need re-publish. The existing `unsupported_sdk_abi` load
+failure code already surfaces this; no settings-level
+banner is added (triad 138 F per gemini — no plugins in
+the wild, wasted UI work).
+
+## Server-side capability validation
+
+The `PluginPublishRequest.capabilities` allowed-literal set
+gains `location.coarse` + `location.fine` and drops `location`.
+
+**Both-location rejection (triad 138 G per gemini, codex
+divergence accepted as v0.1-simplicity tiebreak):** a
+manifest declaring BOTH `location.coarse` and
+`location.fine` is rejected at publish with
+`location_double_declaration`. The plugin should declare
+`location.fine` and inspect the returned `precision` field
+to detect OS-downgraded approximate fixes. Re-visit if a
+real progressive-permission use case surfaces later.
+
+Photo Picker max items (triad 138 H, both reviewers):
+`maxItems == 1` uses `PickVisualMedia`; `maxItems > 1` uses
+`PickMultipleVisualMedia`. SDK boundary hard-caps
+`maxItems` at 10. Multi-result staging is **atomic** — if
+ANY selected item exceeds 16 MB or staging fails, the host
+releases all sibling staged files and the whole call
+returns the error.
 
 ## SDK error taxonomy (codex 137 missing item)
 
