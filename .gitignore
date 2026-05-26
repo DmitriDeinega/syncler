@@ -1,6 +1,12 @@
 # Claude Code local state
 .claude/
 
+# Internal design history — local-only
+.triad/
+
+# Local example senders — not part of the published artifact
+examples/
+
 # Python
 __pycache__/
 *.py[cod]

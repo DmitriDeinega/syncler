@@ -1,9 +1,0 @@
-Ship verdict: **no**.
-
-The §12 fixes are partly correct, but two blockers remain:
-
-1. **Webhook envelope encoding mismatch**: [docs/integration-guide.md:843](D:\Projects\syncler\docs\integration-guide.md:843) says webhook `envelope` is JSON verbatim, not base64. But the plugin-side API and snippet use `platform.live.send(channel, envelopeBase64)` and `btoa(envelope)` at [docs/integration-guide.md:862](D:\Projects\syncler\docs\integration-guide.md:862) / [872](D:\Projects\syncler\docs\integration-guide.md:872). `live.py` forwards `frame["payload"]` unchanged into `forward_to_sender(... envelope_json=payload_str)`, so a base64 send becomes a base64 webhook `envelope`.
-
-2. **Plugin-side snippet/hook is not shipped SDK surface**: [docs/integration-guide.md:862](D:\Projects\syncler\docs\integration-guide.md:862) and [884](D:\Projects\syncler\docs\integration-guide.md:884) document `onLiveMessage`, but `sdk-plugin/src/base-plugin.ts` has no `onLiveMessage`, and `sdk-plugin/src/bridge.ts` `DispatchHook` only allows `onMessage | onAction | onDismiss | render`. Also [docs/integration-guide.md:879](D:\Projects\syncler\docs\integration-guide.md:879) calls `registerPlugin(...)` without importing it at [854](D:\Projects\syncler\docs\integration-guide.md:854).
-
-Confirmed accurate: push endpoint body now matches `LivePushRequest.envelope`; server-public-key discovery story is accurate as out-of-band/admin-planned; §11, §13, §14, §15 showed no net-new regression in the skim.

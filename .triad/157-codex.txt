@@ -1,1 +1,0 @@
-ship — No remaining integration-breaking guide drift found against the shipped server, Python/TS SDKs, or Android client surfaces.

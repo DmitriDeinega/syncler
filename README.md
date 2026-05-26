@@ -12,21 +12,9 @@ syncler/
   android/          Kotlin (Compose, multi-module) — host app + secure WebView plugin runtime
   sdk-plugin/       TypeScript SDK plugin authors inherit (BasePlugin) + bundle signer
   sdk-python/       Python sender SDK (the canonical sender impl)
-  examples/         Runnable examples (trading-bot)
   docs/             crypto-spec.md (the canonical crypto contract)
                     integration-guide.md (how any sender integrates with Syncler)
-  .triad/           Design history (planning + reviews) — committed for context
 ```
-
-## The triad
-
-This codebase was designed and built by a three-model triad:
-
-- **Claude** (Anthropic) — orchestrator + builder (after Codex hit a usage limit at M5 the user shifted lead to Claude)
-- **Codex** (OpenAI) — initial build lead for M1–M4b; reviewer thereafter
-- **Gemini** (Google) — reviewer throughout
-
-`.triad/` contains the full design Q&A across 10 rounds, the build plan, and every code-review round (typically Claude + Codex + Gemini each commenting on the same diff). Reviews caught real bugs at every milestone — see `.triad/27-review-synthesis.md` and any `*-review.txt` file.
 
 ## Architecture, briefly
 
@@ -108,16 +96,16 @@ V1 build is complete across all server-side milestones (M1–M9) plus the suppor
 - **Marketplace** for plugin distribution — V1 uses sideload (URL install). Marketplace is V1.5.
 - **iOS** — Android-only V1, per user G2 commitment. iOS deferred until traction.
 
-## Triad protocol notes
+## Review protocol notes
 
-The build proceeded under a "lead-builds-others-review" protocol with formal review rounds after each milestone. Every fix-up commit (`M*.1`, `M*.2`) is the response to one or more reviewer findings; the `.triad/*-review.txt` files record what each reviewer caught. Notable saves:
+The build proceeded under a "lead-builds-others-review" protocol with formal review rounds after each milestone. Every fix-up commit (`M*.1`, `M*.2`) is the response to one or more review findings. Notable saves:
 
-- Codex caught the AAD/envelope contract mismatch at M5 (server-generated fields couldn't be signed by sender). Triggered the V1.1 crypto-spec revision.
-- Codex caught the addressed plugin-row-id vs plugin-identifier conflation at M8 (upgrades were impossible).
-- Codex caught the unauthenticated revoke endpoint at M8 (anyone with a UUID could nuke a plugin).
-- Codex caught the SDK UUID canonicalization gap at M9 (uppercase UUIDs would silently fail signature verification).
-- Gemini consistently flagged data-loss risks in merge strategies (M7 userScopedStorage).
-- The protocol formalized two parallel reviewers because three trained-on-similar-data models share blind spots; Codex+Gemini found different things.
+- A reviewer caught the AAD/envelope contract mismatch at M5 (server-generated fields couldn't be signed by sender). Triggered the V1.1 crypto-spec revision.
+- A reviewer caught the plugin-row-id vs plugin-identifier conflation at M8 (upgrades were impossible).
+- A reviewer caught the unauthenticated revoke endpoint at M8 (anyone with a UUID could nuke a plugin).
+- A reviewer caught the SDK UUID canonicalization gap at M9 (uppercase UUIDs would silently fail signature verification).
+- Review consistently flagged data-loss risks in merge strategies (M7 userScopedStorage).
+- The protocol formalized two parallel reviewers because reviewers with overlapping experience share blind spots; independent reviewers found different things.
 
 ## License
 

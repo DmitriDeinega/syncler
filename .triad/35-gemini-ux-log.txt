@@ -1,7 +1,0 @@
-Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
-YOLO mode is enabled. All tool calls will be automatically approved.
-YOLO mode is enabled. All tool calls will be automatically approved.
-Ripgrep is not available. Falling back to GrepTool.
-Error executing tool list_directory: Error: Failed to list directory.
-(node:37812) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
-(Use `node --trace-deprecation ...` to show where the warning was created)

@@ -1,4 +1,0 @@
-Not ship.
-
-- `docs/integration-guide.md:416-421`: `client.upsert_card(...)` uses removed `encrypted_payload`/`nonce` args and omits required `card_type`/`payload`; current SDK will raise `TypeError`.
-- `docs/integration-guide.md:444-446`: `client.delete_card(...)` omits required `plugin_id`; current SDK will raise `TypeError`.

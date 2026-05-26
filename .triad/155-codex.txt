@@ -1,3 +1,0 @@
-Not ship.
-
-- `docs/integration-guide.md:40`, `753-764`, `842-872`: guide presents `platform.live.connect/send` as usable, but Android production wiring still throws `no_session` from the LiveBridge `deviceJwtProvider` placeholder, so plugin-side live channel integration cannot actually connect. This would break any integrator following §12 today.
