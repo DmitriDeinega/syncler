@@ -50,7 +50,33 @@ interface PluginContext {
      * messages it didn't handle.
      */
     suspend fun messageRespond(actionId: String, payload: ByteArray): Result<Unit>
+
+    /**
+     * Phase 12 (ABI 2): read bytes from a capability handle.
+     * Stateless seek-and-read — each call independently seeks
+     * `offset` bytes in and reads up to `length` (max 256 KB).
+     * Returns the bytes plus an `eof` flag once the end of the
+     * staged file is reached. Repeated reads at the same offset
+     * return identical bytes until the handle is released or
+     * expires.
+     */
+    suspend fun fileBytes(
+        handle: String,
+        offset: Long = 0L,
+        length: Int = 65_536,
+    ): Result<FileBytesChunk>
+
+    /**
+     * Phase 12 (ABI 2): release a capability handle and its
+     * underlying staging file. Idempotent — releasing an unknown
+     * or already-released handle succeeds. The host also wipes
+     * handles on plugin unload + 5-minute TTL, but explicit
+     * release is faster.
+     */
+    suspend fun releaseHandle(handle: String): Result<Unit>
 }
+
+data class FileBytesChunk(val bytes: ByteArray, val eof: Boolean)
 
 /**
  * Host-owned key/value store scoped to the plugin's
@@ -85,18 +111,53 @@ data class Notification(
     val actionId: String? = null,
 )
 
+/**
+ * Phase 12 (V2 #10, ABI 2): capability-handle metadata. The
+ * bridge returns ONE of these per camera capture / file pick /
+ * gallery item — the plugin reads bytes via
+ * [PluginContext.fileBytes] and releases via
+ * [PluginContext.releaseHandle].
+ *
+ * Inline byte transfer (the ABI 1 shape with `bytes: ByteArray`
+ * directly on the result) is gone because realistic image / file
+ * results easily exceed Binder's ~1 MB transaction limit.
+ *
+ * `expiresAtMs` is a wall-clock value for display only. The host
+ * enforces validity via SystemClock.elapsedRealtime so a system
+ * time change can't extend a handle's life.
+ */
+data class CapabilityHandle(
+    val handle: String,
+    val name: String,
+    val mime: String,
+    val sizeBytes: Long,
+    val expiresAtMs: Long,
+)
+
 data class CameraOptions(val front: Boolean = false)
-data class CameraResult(val bytes: ByteArray, val mime: String)
+data class CameraResult(val handle: CapabilityHandle)
 
 data class GalleryOptions(val maxItems: Int = 1, val mimeFilter: String? = null)
-data class GalleryResult(val items: List<GalleryItem>)
-data class GalleryItem(val bytes: ByteArray, val mime: String)
+data class GalleryResult(val items: List<CapabilityHandle>)
 
 data class FileOptions(val mimeFilter: String? = null)
-data class FileResult(val bytes: ByteArray, val name: String, val mime: String)
+data class FileResult(val handle: CapabilityHandle)
 
 data class LocationOptions(val fineAccuracy: Boolean = false, val timeoutMillis: Long = 10_000L)
-data class LocationResult(val latitude: Double, val longitude: Double, val accuracyMeters: Float)
+
+/**
+ * Phase 12 (ABI 2): `precision` reflects what the OS actually
+ * granted, not what the plugin asked for. A plugin requesting
+ * `fine` whose user chose "approximate location" sees
+ * `precision = "coarse"` here. Plugins SHOULD branch on this
+ * field rather than assuming their requested accuracy.
+ */
+data class LocationResult(
+    val latitude: Double,
+    val longitude: Double,
+    val accuracyMeters: Float,
+    val precision: String, // "coarse" or "fine"
+)
 
 data class InboxEvent(
     val messageId: String,

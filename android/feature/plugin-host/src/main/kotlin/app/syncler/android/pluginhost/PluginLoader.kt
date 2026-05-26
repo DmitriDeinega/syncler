@@ -196,6 +196,7 @@ class PluginLoader(
                         auditLogger = capAuditDao,
                     ),
                     messageBridge = MessageBridge(auditLogger),
+                    capabilityHandleStore = capHandleStore,
                 ),
                 auditLogger = auditLogger,
             )
@@ -263,6 +264,7 @@ class SandboxedPluginInstanceFactory(
     private val fileBridge: FileBridge,
     private val locationBridge: LocationBridge,
     private val messageBridge: MessageBridge,
+    private val capabilityHandleStore: app.syncler.android.pluginhost.capabilities.CapabilityHandleStore? = null,
 ) : PluginInstanceFactory {
 
     override suspend fun create(
@@ -295,6 +297,7 @@ class SandboxedPluginInstanceFactory(
             fileBridge = fileBridge,
             locationBridge = locationBridge,
             messageBridge = messageBridge,
+            capabilityHandleStore = capabilityHandleStore,
             auditLogger = auditLogger,
         )
         bridgeDispatcher.registerBridge(sandboxToken, bridge)

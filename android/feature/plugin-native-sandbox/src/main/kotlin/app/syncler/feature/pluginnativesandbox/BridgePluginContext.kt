@@ -3,6 +3,8 @@ package app.syncler.feature.pluginnativesandbox
 import app.syncler.core.pluginaidl.IPluginHostCallback
 import app.syncler.plugin.runtime.CameraOptions
 import app.syncler.plugin.runtime.CameraResult
+import app.syncler.plugin.runtime.CapabilityHandle
+import app.syncler.plugin.runtime.FileBytesChunk
 import app.syncler.plugin.runtime.FileOptions
 import app.syncler.plugin.runtime.FileResult
 import app.syncler.plugin.runtime.GalleryOptions
@@ -129,6 +131,36 @@ internal class BridgePluginContext(
         ) { Result.success(Unit) }
 
     /**
+     * Phase 12 (ABI 2): stateless seek-and-read for capability
+     * staged bytes. Marshals via the same bridgeCall path; host
+     * returns `{bytes: base64, eof: boolean}`.
+     */
+    override suspend fun fileBytes(
+        handle: String,
+        offset: Long,
+        length: Int,
+    ): Result<FileBytesChunk> =
+        bridgeRoundTrip(
+            "platform.fileBytes",
+            "{\"handle\":${escape(handle)},\"offset\":$offset,\"length\":$length}",
+        ) { json ->
+            if (isError(json)) {
+                Result.failure(IllegalStateException(extractError(json)))
+            } else {
+                val bytes = pickBase64(json, "bytes") ?: ByteArray(0)
+                val eof = json.contains("\"eof\":true")
+                Result.success(FileBytesChunk(bytes, eof))
+            }
+        }
+
+    /** Phase 12 (ABI 2): explicit handle release. Idempotent. */
+    override suspend fun releaseHandle(handle: String): Result<Unit> =
+        bridgeRoundTrip(
+            "platform.releaseHandle",
+            "{\"handle\":${escape(handle)}}",
+        ) { Result.success(Unit) }
+
+    /**
      * Suspends until the host delivers a bridge result for the
      * generated callbackId. Cancellation removes the pending
      * entry so a late result doesn't try to resume a dead
@@ -244,26 +276,27 @@ internal class BridgePluginContext(
 
     private fun decodeCameraResult(json: String): Result<CameraResult> {
         if (isError(json)) return Result.failure(IllegalStateException(extractError(json)))
-        val bytes = pickBase64(json, "bytes") ?: return Result.failure(
+        val handle = decodeHandle(json) ?: return Result.failure(
             IllegalStateException("malformed cameraCapture result"),
         )
-        val mime = pickString(json, "mime") ?: "application/octet-stream"
-        return Result.success(CameraResult(bytes, mime))
+        return Result.success(CameraResult(handle))
     }
 
     private fun decodeGalleryResult(json: String): Result<GalleryResult> {
         if (isError(json)) return Result.failure(IllegalStateException(extractError(json)))
-        // Minimal: empty list. Real gallery decode is V2; this
-        // keeps the shape compileable.
-        return Result.success(GalleryResult(emptyList()))
+        // Phase 12 (ABI 2): items is an array of handle objects.
+        // Minimal V0.1 decode — single-item case for now; multi-
+        // item decode pending a real JSON parser.
+        val single = decodeHandle(json)
+        return Result.success(GalleryResult(if (single != null) listOf(single) else emptyList()))
     }
 
     private fun decodeFileResult(json: String): Result<FileResult> {
         if (isError(json)) return Result.failure(IllegalStateException(extractError(json)))
-        val bytes = pickBase64(json, "bytes") ?: ByteArray(0)
-        val name = pickString(json, "name") ?: ""
-        val mime = pickString(json, "mime") ?: "application/octet-stream"
-        return Result.success(FileResult(bytes, name, mime))
+        val handle = decodeHandle(json) ?: return Result.failure(
+            IllegalStateException("malformed filePick result"),
+        )
+        return Result.success(FileResult(handle))
     }
 
     private fun decodeLocationResult(json: String): Result<LocationResult> {
@@ -275,7 +308,24 @@ internal class BridgePluginContext(
             IllegalStateException("malformed location result"),
         )
         val acc = pickDouble(json, "accuracyMeters")?.toFloat() ?: 0f
-        return Result.success(LocationResult(lat, lon, acc))
+        val precision = pickString(json, "precision") ?: "coarse"
+        return Result.success(LocationResult(lat, lon, acc, precision))
+    }
+
+    /** Phase 12 ABI 2 capability-handle decode. */
+    private fun decodeHandle(json: String): CapabilityHandle? {
+        val handle = pickString(json, "handle") ?: return null
+        val name = pickString(json, "name") ?: ""
+        val mime = pickString(json, "mime") ?: "application/octet-stream"
+        val sizeBytes = (pickInt(json, "sizeBytes")?.toLong()) ?: 0L
+        val expiresAtMs = (pickInt(json, "expiresAtMs")?.toLong()) ?: 0L
+        return CapabilityHandle(
+            handle = handle,
+            name = name,
+            mime = mime,
+            sizeBytes = sizeBytes,
+            expiresAtMs = expiresAtMs,
+        )
     }
 
     // ---- JSON micro-helpers ----

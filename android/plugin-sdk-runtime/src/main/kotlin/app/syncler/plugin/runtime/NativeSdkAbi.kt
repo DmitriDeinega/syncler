@@ -11,8 +11,15 @@ package app.syncler.plugin.runtime
  *
  * No compatibility shims — plugin re-publish is the upgrade path.
  *
- * V1.5 ships ABI 1. The spec is locked at
- * docs/plugin-host-native-kotlin.md "SDK runtime API" / "Manifest
- * fields".
+ * V1.5 shipped ABI 1. Phase 12 (V2 #10) bumped to ABI 2 to swap
+ * camera/gallery/file return types from byte-bearing data classes
+ * to handle-bearing ones (binary results too large for Binder
+ * inline transfer). Spec:
+ *  - docs/plugin-host-native-kotlin.md "SDK runtime API"
+ *  - docs/plugin-capability-expansion.md "Binary transport"
+ *
+ * Phase 11-era plugins built against ABI 1 fail load with
+ * `unsupported_sdk_abi` on Phase 12+ hosts — V0.1 has no
+ * shipped native plugins yet.
  */
-const val NATIVE_SDK_ABI: Int = 1
+const val NATIVE_SDK_ABI: Int = 2

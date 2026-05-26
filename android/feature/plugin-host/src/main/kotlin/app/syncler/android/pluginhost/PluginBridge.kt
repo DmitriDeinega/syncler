@@ -1,8 +1,10 @@
 package app.syncler.android.pluginhost
 
 import app.syncler.android.pluginhost.capabilities.CameraBridge
+import app.syncler.android.pluginhost.capabilities.CapabilityHandleStore
 import app.syncler.android.pluginhost.capabilities.FileBridge
 import app.syncler.android.pluginhost.capabilities.GalleryBridge
+import app.syncler.android.pluginhost.capabilities.JsonBridgeCodec
 import app.syncler.android.pluginhost.capabilities.LocationBridge
 import app.syncler.android.pluginhost.capabilities.MessageBridge
 import app.syncler.android.pluginhost.capabilities.NetworkBridge
@@ -34,6 +36,14 @@ class PluginBridge(
     private val fileBridge: FileBridge,
     private val locationBridge: LocationBridge,
     private val messageBridge: MessageBridge,
+    /**
+     * Phase 12 (V2 #10): the handle store backing
+     * `platform.fileBytes` + `platform.releaseHandle`. Nullable
+     * for backwards compat with older instance-factory call sites
+     * that haven't been updated; calls return invalid_handle if
+     * null.
+     */
+    private val capabilityHandleStore: CapabilityHandleStore? = null,
     private val auditLogger: AuditLogger,
 ) {
     fun call(method: String, argsJson: String, callbackId: String) {
@@ -74,11 +84,50 @@ class PluginBridge(
             "platform.location.current" -> locationBridge.current(plugin, argsJson)
             "platform.message.respond" -> messageBridge.respond(plugin, argsJson)
             "platform.message.dismissBehavior" -> messageBridge.dismissBehavior(plugin, argsJson)
+            "platform.fileBytes" -> readHandleBytes(argsJson)
+            "platform.releaseHandle" -> releaseCapHandle(argsJson)
             else -> {
                 auditLogger.denied(plugin.manifest.id, "unknown_method", method)
                 throw PluginBridgeException("unknown_method", "Unknown bridge method: $method")
             }
         }
+    }
+
+    /**
+     * Phase 12 step 13: stateless seek-and-read for capability
+     * staged bytes. `platform.fileBytes(handle, offset, length)`.
+     * Returns `{bytes: base64, eof: boolean}` on success.
+     */
+    private fun readHandleBytes(argsJson: String): String {
+        val store = capabilityHandleStore ?: return JsonBridgeCodec.error("invalid_handle")
+        val args = JsonBridgeCodec.objectFrom(argsJson)
+        val handle = args["handle"] as? String
+            ?: return JsonBridgeCodec.error("invalid_handle")
+        val offset = (args["offset"] as? Number)?.toLong() ?: 0L
+        val length = (args["length"] as? Number)?.toInt() ?: CapabilityHandleStore.MAX_CHUNK_BYTES
+        val result = store.read(plugin.manifest.id, handle, offset, length)
+            ?: return JsonBridgeCodec.error("invalid_handle")
+        return JsonBridgeCodec.toJson(
+            mapOf(
+                "bytes" to android.util.Base64.encodeToString(
+                    result.bytes,
+                    android.util.Base64.NO_WRAP,
+                ),
+                "eof" to result.eof,
+            ),
+        )
+    }
+
+    /**
+     * Phase 12 step 13: explicit handle release. Returns `{}` on
+     * success (or already-released — idempotent).
+     */
+    private suspend fun releaseCapHandle(argsJson: String): String {
+        val store = capabilityHandleStore ?: return "{}"
+        val args = JsonBridgeCodec.objectFrom(argsJson)
+        val handle = args["handle"] as? String ?: return "{}"
+        store.release(plugin.manifest.id, handle)
+        return "{}"
     }
 
     companion object {
