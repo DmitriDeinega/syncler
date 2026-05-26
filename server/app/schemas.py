@@ -1479,6 +1479,23 @@ class MessageInboxItemV2(BaseModel):
         return value.isoformat().replace("+00:00", "Z")
 
 
+class LiveCardPatchInboxItem(BaseModel):
+    """V3 #16 — patch entry attached to a live-card inbox item
+    for catch-up. The inbox response inlines every persisted
+    patch with `base_seq == current card_seq` and `patch_seq
+    > device_last_patch_seq`; devices apply in order before
+    rendering.
+
+    Spec: docs/live-card-patch.md "Catch-up surface". The
+    envelope_json is OPAQUE — the inbox just forwards the
+    V2-shape bytes the patch publisher signed.
+    """
+
+    base_seq: int
+    patch_seq: int
+    envelope_json: str
+
+
 class LiveCardInboxItemV2(BaseModel):
     """V2 live-card inbox item. Mirrors MessageInboxItemV2 plus
     card-specific fields. Device verifies signature, picks its own
@@ -1503,6 +1520,10 @@ class LiveCardInboxItemV2(BaseModel):
     envelope_signature: str
     updated_at: datetime
     expires_at: datetime
+    # V3 #16 catch-up: ordered patches the device missed
+    # while disconnected. Empty for plugins that don't use
+    # patches.
+    patches: list[LiveCardPatchInboxItem] = []
 
     @field_serializer("updated_at")
     def _serialize_updated_at(self, value: datetime) -> str:

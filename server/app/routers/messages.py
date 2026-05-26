@@ -204,8 +204,39 @@ async def inbox(
     for m in messages:
         items.append(_message_to_inbox_item_v2(m, identifier_by_id.get(m.plugin_id, "")))
 
+    # V3 #16: fetch persisted patches for the live cards in
+    # this response so devices can apply them in order before
+    # rendering. Bulk query keyed by (plugin_row_id, card_id,
+    # base_seq) — patches with base_seq != current card_seq
+    # are obsolete and intentionally filtered out (the next
+    # cards.upsert purges them too).
+    patches_by_card: dict = {}
+    if live_cards:
+        from app.models import CardPatch
+        from sqlalchemy import select as sql_select, and_, or_
+        ors = [
+            and_(
+                CardPatch.plugin_row_id == c.plugin_id,
+                CardPatch.card_id == c.id,
+                CardPatch.base_seq == c.sequence_number,
+            )
+            for c in live_cards
+        ]
+        patches_query = sql_select(CardPatch).where(or_(*ors)).order_by(
+            CardPatch.card_id, CardPatch.patch_seq
+        )
+        patch_rows = (await db.execute(patches_query)).scalars().all()
+        for p in patch_rows:
+            patches_by_card.setdefault(p.card_id, []).append(p)
+
     for c in live_cards:
-        items.append(_live_card_to_inbox_item_v2(c, identifier_by_id.get(c.plugin_id, "")))
+        items.append(
+            _live_card_to_inbox_item_v2(
+                c,
+                identifier_by_id.get(c.plugin_id, ""),
+                patches=patches_by_card.get(c.id, []),
+            )
+        )
 
     return InboxFeedResponseV2(items=items, next_since=next_since)
 
@@ -288,9 +319,28 @@ def _message_to_inbox_item_v2(message, plugin_identifier: str) -> MessageInboxIt
     )
 
 
-def _live_card_to_inbox_item_v2(card, plugin_identifier: str) -> LiveCardInboxItemV2:  # noqa: ANN001
-    """Phase 9b V2 live-card projection (spec §11.5)."""
+def _live_card_to_inbox_item_v2(
+    card,  # noqa: ANN001
+    plugin_identifier: str,
+    patches: list | None = None,  # noqa: ANN001
+) -> LiveCardInboxItemV2:
+    """Phase 9b V2 live-card projection (spec §11.5).
+
+    V3 #16: optional `patches` argument carries CardPatch rows
+    for the current card_seq so the device can catch up after
+    being offline during the live broadcast. Spec:
+    docs/live-card-patch.md "Catch-up surface".
+    """
     fields = parse_v2_pointer(card.encrypted_body_pointer)
+    from app.schemas import LiveCardPatchInboxItem
+    patch_items = [
+        LiveCardPatchInboxItem(
+            base_seq=p.base_seq,
+            patch_seq=p.patch_seq,
+            envelope_json=p.envelope_json,
+        )
+        for p in (patches or [])
+    ]
     return LiveCardInboxItemV2(
         id=card.id,
         sender_id=card.sender_id,
@@ -309,4 +359,5 @@ def _live_card_to_inbox_item_v2(card, plugin_identifier: str) -> LiveCardInboxIt
         envelope_signature=fields.envelope_signature,
         updated_at=card.updated_at,
         expires_at=card.expires_at,
+        patches=patch_items,
     )
