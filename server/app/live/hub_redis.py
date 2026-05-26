@@ -155,16 +155,27 @@ class RedisBroadcastHub:
 
     async def subscribe_ephemeral(self, topic: str) -> _PubSubSubscription:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=EPHEMERAL_QUEUE_CAP)
+        ready: asyncio.Event | None = None
         async with self._lock:
             need_task = topic not in self._eph_queues
             self._eph_queues.setdefault(topic, set()).add(queue)
             if need_task:
+                # Triad 148 codex FIX — return ONLY after the Redis
+                # SUBSCRIBE is actually active. Otherwise a caller can
+                # subscribe + immediately publish and lose the message.
+                ready = asyncio.Event()
                 self._eph_tasks[topic] = asyncio.create_task(
                     self._reader_loop_pubsub(
-                        _eph_channel(topic), self._eph_queues, topic
+                        _eph_channel(topic),
+                        self._eph_queues,
+                        self._eph_tasks,
+                        topic,
+                        ready,
                     ),
                     name=f"hub-redis-eph-{topic}",
                 )
+        if ready is not None:
+            await ready.wait()
         return _PubSubSubscription(self, topic, queue, is_control=False)
 
     # --- Control lane (Redis PUB/SUB) ---
@@ -175,18 +186,24 @@ class RedisBroadcastHub:
 
     async def subscribe_control(self, control_topic: str) -> _PubSubSubscription:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=EPHEMERAL_QUEUE_CAP)
+        ready: asyncio.Event | None = None
         async with self._lock:
             need_task = control_topic not in self._ctrl_queues
             self._ctrl_queues.setdefault(control_topic, set()).add(queue)
             if need_task:
+                ready = asyncio.Event()
                 self._ctrl_tasks[control_topic] = asyncio.create_task(
                     self._reader_loop_pubsub(
                         _ctrl_channel(control_topic),
                         self._ctrl_queues,
+                        self._ctrl_tasks,
                         control_topic,
+                        ready,
                     ),
                     name=f"hub-redis-ctrl-{control_topic}",
                 )
+        if ready is not None:
+            await ready.wait()
         return _PubSubSubscription(self, control_topic, queue, is_control=True)
 
     async def _unsubscribe_pubsub(
@@ -209,12 +226,15 @@ class RedisBroadcastHub:
         self,
         redis_channel: str,
         local_registry: dict[str, set[asyncio.Queue[str]]],
+        task_registry: dict[str, asyncio.Task[None]],
         topic: str,
+        ready: asyncio.Event,
     ) -> None:
         client = get_redis()
         pubsub = client.pubsub()
         try:
             await pubsub.subscribe(redis_channel)
+            ready.set()  # Triad 148 FIX — unblock subscribe()
             while True:
                 msg = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=None
@@ -237,6 +257,20 @@ class RedisBroadcastHub:
                 "hub(redis): reader loop died channel=%s", redis_channel
             )
         finally:
+            # Triad 148 codex FIX #3 — clear registry state so a
+            # later subscribe() restarts the reader. Without this,
+            # a crashed reader leaves the task registry populated
+            # and the next subscribe() thinks the reader is still
+            # running (need_task=False) -> permanently dead lane.
+            ready.set()  # belt + suspenders: unblock waiters
+            async with self._lock:
+                if task_registry.get(topic) is asyncio.current_task():
+                    task_registry.pop(topic, None)
+                # Local queues stay; subscribers will see no
+                # incoming until the next subscribe() spawns a
+                # fresh reader. Fail-closed-ish (no silent
+                # success), and a new subscribe rehydrates the
+                # lane.
             try:
                 await pubsub.unsubscribe(redis_channel)
             except Exception:
@@ -264,8 +298,28 @@ class RedisBroadcastHub:
         queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(
             maxsize=ORDERED_QUEUE_CAP
         )
+        # Triad 148 codex FIX #2 — capture the stream tail at
+        # subscribe-time so we don't miss messages published
+        # between this call returning and the reader hitting
+        # XREAD. `$` means "after XREAD starts", which is
+        # wrong for a fresh live-only subscription.
+        client = get_redis()
+        stream = _ord_stream(topic)
+        start_id: str
+        if since_cursor is None:
+            # Get the current last ID; XREAD from there will
+            # only deliver messages published AFTER this call
+            # returned, but no earlier than we observed.
+            info = await client.xinfo_stream(stream) if await client.exists(stream) else None
+            if info is None:
+                start_id = "0"  # empty stream — start from the beginning of any future XADD
+            else:
+                last_id = info.get(b"last-generated-id") or info.get("last-generated-id")
+                start_id = _maybe_decode(last_id) if last_id else "0"
+        else:
+            start_id = ""  # resolved inside the reader loop
         reader_task = asyncio.create_task(
-            self._reader_loop_ordered(topic, queue, since_cursor),
+            self._reader_loop_ordered(topic, queue, since_cursor, start_id),
             name=f"hub-redis-ord-{topic}",
         )
         return _StreamSubscription(self, topic, queue, reader_task)
@@ -275,23 +329,28 @@ class RedisBroadcastHub:
         topic: str,
         queue: asyncio.Queue[tuple[str, str]],
         since_cursor: str | None,
+        start_id: str,
     ) -> None:
         """Walk the Redis Stream for [topic].
 
         Cursor mapping (spec docs/live-backplane.md "Lane
         mapping — ordered with replay"):
-          1. If [since_cursor] is None → XREAD from $ (live only).
+          1. If [since_cursor] is None → XREAD from the
+             stream's tail captured at subscribe time (NOT
+             `$`, which would race the reader's first XREAD —
+             triad 148 codex FIX #2).
           2. Else → XRANGE the recent entries; find the one
              whose ``cursor_id`` field == [since_cursor];
              capture its stream ID S*; replay entries with
              stream ID > S* then transition to live XREAD.
           3. If [since_cursor] is not in the retained window,
-             log a warning and start live only. Postgres is
-             authoritative for durable catch-up.
+             log a warning and start live only from the
+             current tail. Postgres is authoritative for
+             durable catch-up.
         """
         client = get_redis()
         stream = _ord_stream(topic)
-        last_id = "$"
+        last_id = start_id or "0"
         try:
             if since_cursor is not None:
                 resolved = await self._resolve_since_cursor(stream, since_cursor)
@@ -300,6 +359,17 @@ class RedisBroadcastHub:
                         "hub(redis): ordered cursor %s not found for topic=%s; live only",
                         since_cursor, topic,
                     )
+                    # Tail-capture for live-only fallback too.
+                    info = (
+                        await client.xinfo_stream(stream)
+                        if await client.exists(stream)
+                        else None
+                    )
+                    if info is not None:
+                        tail = info.get(b"last-generated-id") or info.get(
+                            "last-generated-id"
+                        )
+                        last_id = _maybe_decode(tail) if tail else "0"
                 else:
                     # Replay entries strictly after the
                     # resolved stream ID, then continue live.

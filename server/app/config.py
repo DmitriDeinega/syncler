@@ -32,7 +32,12 @@ class Settings(BaseSettings):
 
     # V3 #17: Redis connection URL. Required when
     # live_backplane=="redis"; ignored when "memory".
-    redis_url: str = "redis://localhost:6379/0"
+    # Default points at the docker-compose-published port
+    # (6380 → 6379 inside the container) so `LIVE_BACKPLANE=
+    # redis` works out of the box with `docker compose up`.
+    # Production deployments override via env var.
+    # Triad 148 codex FIX #10 (port mismatch).
+    redis_url: str = "redis://localhost:6380/0"
 
     # V3 #17: ordered-lane Redis Streams trim cap (XADD
     # MAXLEN ~). Independent of the in-process backend's

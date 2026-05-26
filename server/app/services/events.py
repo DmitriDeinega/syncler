@@ -258,20 +258,32 @@ class RedisEventBus:
         self, user_id: uuid.UUID, device_id: uuid.UUID
     ) -> _Subscriber:
         sub = _Subscriber(user_id=user_id, device_id=device_id)
+        # Triad 148 codex FIX — return only after each newly-
+        # started reader's Redis SUBSCRIBE is actually active.
+        # Otherwise a caller can subscribe + immediately
+        # publish and silently lose the message.
+        user_ready: asyncio.Event | None = None
+        device_close_ready: asyncio.Event | None = None
         async with self._lock:
             need_user_task = user_id not in self._local_subs_by_user
             self._local_subs_by_user.setdefault(user_id, set()).add(sub)
             self._local_subs_by_device.setdefault(device_id, set()).add(sub)
             if need_user_task:
+                user_ready = asyncio.Event()
                 self._user_subscription_tasks[user_id] = asyncio.create_task(
-                    self._reader_loop_user(user_id),
+                    self._reader_loop_user(user_id, user_ready),
                     name=f"sse-redis-user-{user_id}",
                 )
             if self._device_close_task is None:
+                device_close_ready = asyncio.Event()
                 self._device_close_task = asyncio.create_task(
-                    self._reader_loop_device_close(),
+                    self._reader_loop_device_close(device_close_ready),
                     name="sse-redis-device-close",
                 )
+        if user_ready is not None:
+            await user_ready.wait()
+        if device_close_ready is not None:
+            await device_close_ready.wait()
         logger.info("sse(redis): subscribed user=%s device=%s", user_id, device_id)
         return sub
 
@@ -316,12 +328,15 @@ class RedisEventBus:
         await client.publish(_sse_device_close_channel(), payload)
         logger.info("sse(redis): published device-close for %s", device_id)
 
-    async def _reader_loop_user(self, user_id: uuid.UUID) -> None:
+    async def _reader_loop_user(
+        self, user_id: uuid.UUID, ready: asyncio.Event
+    ) -> None:
         from app.redis_client import get_redis
         client = get_redis()
         pubsub = client.pubsub()
         try:
             await pubsub.subscribe(_sse_user_channel(user_id))
+            ready.set()  # Triad 148 FIX — unblock subscribe()
             while True:
                 msg = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=None
@@ -347,18 +362,27 @@ class RedisEventBus:
         except Exception:
             logger.exception("sse(redis): user reader loop died user=%s", user_id)
         finally:
+            # Triad 148 codex FIX #3 — clear registry state so a
+            # later subscribe() rehydrates the lane. Otherwise a
+            # crashed reader leaves the task registry populated
+            # and subsequent subscribes think the reader is alive.
+            ready.set()
+            async with self._lock:
+                if self._user_subscription_tasks.get(user_id) is asyncio.current_task():
+                    self._user_subscription_tasks.pop(user_id, None)
             try:
                 await pubsub.unsubscribe(_sse_user_channel(user_id))
             except Exception:
                 pass
             await pubsub.aclose()
 
-    async def _reader_loop_device_close(self) -> None:
+    async def _reader_loop_device_close(self, ready: asyncio.Event) -> None:
         from app.redis_client import get_redis
         client = get_redis()
         pubsub = client.pubsub()
         try:
             await pubsub.subscribe(_sse_device_close_channel())
+            ready.set()
             while True:
                 msg = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=None
@@ -380,6 +404,12 @@ class RedisEventBus:
         except Exception:
             logger.exception("sse(redis): device-close reader died")
         finally:
+            ready.set()
+            # Triad 148 codex FIX #3 — clear so the next
+            # subscriber starts a fresh reader.
+            async with self._lock:
+                if self._device_close_task is asyncio.current_task():
+                    self._device_close_task = None
             try:
                 await pubsub.unsubscribe(_sse_device_close_channel())
             except Exception:
