@@ -45,12 +45,21 @@ internal class BoundedPluginDispatcher private constructor(
         private const val KEEP_ALIVE_SECONDS = 30L
 
         /**
-         * Caller-runs rejection: when the pool + queue saturate,
-         * dispatching falls back to the calling thread instead of
-         * dropping work silently. Keeps the host's Binder thread
-         * responsive (it'll just take longer to deliver the next
-         * hook) and surfaces saturation as latency rather than
-         * dropped events.
+         * Abort-on-saturation policy. Triad 136 fix (codex): the
+         * previous CallerRunsPolicy could execute plugin coroutine
+         * work on the calling Binder thread when the pool +
+         * queue saturated — i.e. untrusted plugin code on the
+         * host's IPC callback thread, which the sandbox boundary
+         * exists specifically to prevent.
+         *
+         * AbortPolicy throws RejectedExecutionException at the
+         * dispatcher; in coroutine terms the launch fails and
+         * surfaces as a CancellationException on the caller's
+         * scope. The surrounding host code treats this as a
+         * plugin failure and proceeds to unload the saturated
+         * token. Latency-degrade-then-recover loses to die-then-
+         * recover here because the saturated plugin is buggy or
+         * adversarial either way.
          */
         fun create(tokenLabel: String): BoundedPluginDispatcher {
             val counter = AtomicInteger(0)
@@ -66,7 +75,7 @@ internal class BoundedPluginDispatcher private constructor(
                 TimeUnit.SECONDS,
                 java.util.concurrent.LinkedBlockingQueue(64),
                 tf,
-                ThreadPoolExecutor.CallerRunsPolicy(),
+                ThreadPoolExecutor.AbortPolicy(),
             )
             return BoundedPluginDispatcher(executor, executor.asCoroutineDispatcher())
         }

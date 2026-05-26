@@ -195,16 +195,51 @@ internal class BridgePluginContext(
     }
 
     private fun decodeStringList(json: String): List<String> {
-        // Naive: matches `"items":["a","b"]` for the host's
-        // canonical shape. The host owns the canonical encoding.
+        // Triad 136 fix (gemini): walk the array respecting JSON
+        // string escapes. Naive split(',') shreds strings that
+        // contain commas (file paths, user-defined prefixes, etc.).
+        // Format expected: `"items":["a","b\"with quotes",...]`.
         val key = "\"items\":["
         val start = json.indexOf(key)
         if (start < 0) return emptyList()
-        val end = json.indexOf(']', start)
-        if (end < 0) return emptyList()
-        val body = json.substring(start + key.length, end)
-        if (body.isBlank()) return emptyList()
-        return body.split(',').map { it.trim().trim('"') }
+        var i = start + key.length
+        val items = mutableListOf<String>()
+        while (i < json.length) {
+            // Skip whitespace / commas between items.
+            while (i < json.length && (json[i] == ' ' || json[i] == ',')) i++
+            if (i < json.length && json[i] == ']') return items
+            if (i >= json.length || json[i] != '"') return items
+            i++ // consume opening quote
+            val sb = StringBuilder()
+            while (i < json.length) {
+                val c = json[i]
+                if (c == '"') {
+                    items.add(sb.toString())
+                    i++
+                    break
+                }
+                if (c == '\\' && i + 1 < json.length) {
+                    when (val n = json[i + 1]) {
+                        '"' -> sb.append('"')
+                        '\\' -> sb.append('\\')
+                        '/' -> sb.append('/')
+                        'n' -> sb.append('\n')
+                        'r' -> sb.append('\r')
+                        't' -> sb.append('\t')
+                        'b' -> sb.append('\b')
+                        'f' -> sb.append('')
+                        else -> {
+                            sb.append(c); sb.append(n)
+                        }
+                    }
+                    i += 2
+                    continue
+                }
+                sb.append(c)
+                i++
+            }
+        }
+        return items
     }
 
     private fun decodeCameraResult(json: String): Result<CameraResult> {
@@ -251,13 +286,41 @@ internal class BridgePluginContext(
         pickString(json, "error") ?: "unknown error"
 
     private fun pickString(json: String, key: String): String? {
+        // Triad 136 fix (gemini): respect JSON escapes. Previous
+        // impl stopped at the first `"` it found, which truncated
+        // strings containing `\"`. Walks the value respecting `\"`,
+        // `\\`, and the common `\X` letter escapes. \uXXXX is left
+        // as literal bytes (host doesn't currently emit them).
         val k = "\"$key\":\""
         val start = json.indexOf(k)
         if (start < 0) return null
-        val from = start + k.length
-        val end = json.indexOf('"', from)
-        if (end < 0) return null
-        return json.substring(from, end)
+        var i = start + k.length
+        val out = StringBuilder()
+        while (i < json.length) {
+            val c = json[i]
+            if (c == '"') return out.toString()
+            if (c == '\\' && i + 1 < json.length) {
+                when (val n = json[i + 1]) {
+                    '"' -> out.append('"')
+                    '\\' -> out.append('\\')
+                    '/' -> out.append('/')
+                    'n' -> out.append('\n')
+                    'r' -> out.append('\r')
+                    't' -> out.append('\t')
+                    'b' -> out.append('\b')
+                    'f' -> out.append('')
+                    else -> {
+                        out.append(c)
+                        out.append(n)
+                    }
+                }
+                i += 2
+                continue
+            }
+            out.append(c)
+            i++
+        }
+        return null
     }
 
     private fun pickInt(json: String, key: String): Int? {
@@ -289,6 +352,13 @@ internal class BridgePluginContext(
     }
 
     private fun escape(s: String): String {
+        // Triad 136 fix (codex + gemini): escape ALL control chars
+        // (U+0000..U+001F). Plugin-supplied strings reach this
+        // function via PluginContext.storage.set(key=...),
+        // showNotification(title=...), etc. A `\b` / `\f` / NUL
+        // in plugin input would emit invalid JSON the host's
+        // parser would reject — at best a Result.failure, at worst
+        // a malformed request the host had to defend against.
         val out = StringBuilder(s.length + 2)
         out.append('"')
         for (c in s) when (c) {
@@ -297,7 +367,13 @@ internal class BridgePluginContext(
             '\n' -> out.append("\\n")
             '\r' -> out.append("\\r")
             '\t' -> out.append("\\t")
-            else -> out.append(c)
+            '\b' -> out.append("\\b")
+            '' -> out.append("\\f")
+            else -> if (c.code < 0x20) {
+                out.append("\\u").append("%04x".format(c.code))
+            } else {
+                out.append(c)
+            }
         }
         out.append('"')
         return out.toString()

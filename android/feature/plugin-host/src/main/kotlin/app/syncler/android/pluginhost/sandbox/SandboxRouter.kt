@@ -135,10 +135,10 @@ class SandboxRouter(
             // still works as a hard process separation, but we
             // can't get per-token isolation, which is the whole
             // point. Reject the load loudly.
-            throw IllegalStateException("native_only_api_29")
+            throw IllegalStateException(NATIVE_ONLY_API_29)
         }
         val native = nativeConnection
-            ?: throw IllegalStateException("native_only_api_29")
+            ?: throw IllegalStateException(NATIVE_ONLY_API_29)
 
         // The isolated sandbox UID can't read host /data/data/...,
         // so the host opens the staged DEX file here (host UID has
@@ -171,17 +171,18 @@ class SandboxRouter(
         } catch (exc: Throwable) {
             handles.remove(parcel.sandboxToken)
             nativeSandboxes.remove(parcel.sandboxToken)
-            runCatching { bundleFd.close() }
             native.unbindForToken(parcel.sandboxToken)
             throw exc
+        } finally {
+            // Triad 136 fix (codex + gemini): close host FD in both
+            // paths. Binder dup'd it into the sandbox process at IPC
+            // time, and loadPlugin is synchronous — the sandbox has
+            // already read its dup before returning. Leaving the host
+            // dup to GC was an FD-table-pressure footgun under
+            // moderate plugin churn.
+            runCatching { bundleFd.close() }
+                .onFailure { Timber.tag(TAG).w(it, "host bundleFd close failed") }
         }
-        // bundleFd ownership: once successfully sent across Binder,
-        // Android dup'd a copy in the sandbox process; closing here
-        // on the success path would race the sandbox's read. The
-        // sandbox closes its dup after reading; we let our handle
-        // fall out of scope so the host's dup closes naturally on
-        // GC. (Explicit close on the success path is left out
-        // intentionally to avoid the race.)
     }
 
     /**
@@ -406,6 +407,15 @@ class SandboxRouter(
 
     companion object {
         private const val TAG = "SandboxRouter"
+
+        /**
+         * Phase 11 host-side error code: native_kotlin renderer
+         * needs API 29+ (bindIsolatedService instanceName overload).
+         * This is host-emitted only — the sandbox never returns it.
+         * Lives in the host module so callers can match on the
+         * constant rather than the literal.
+         */
+        const val NATIVE_ONLY_API_29: String = "native_only_api_29"
     }
 }
 

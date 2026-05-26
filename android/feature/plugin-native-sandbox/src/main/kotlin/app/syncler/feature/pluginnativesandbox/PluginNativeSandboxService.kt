@@ -59,22 +59,36 @@ class PluginNativeSandboxService : Service() {
             callback: IPluginHostCallback,
             bundleFd: ParcelFileDescriptor?,
         ): Int {
-            validateParcel(request)
+            // Triad 136 fix (codex): close orphan FD on every
+            // early-exit path so a buggy host doesn't leak FDs into
+            // the isolated process's table. Each `throw` below
+            // means RealNativePluginHost never gets ownership, so
+            // we close here. (Helper closes silently if bundleFd
+            // is already null.)
+            try {
+                validateParcel(request)
+                if (request.renderer != "native_kotlin") {
+                    throw IllegalStateException(NativeLoadFailureCodes.UNSUPPORTED_RENDERER)
+                }
+                if (bundleFd == null) {
+                    throw IllegalStateException(NativeLoadFailureCodes.MISSING_BUNDLE_FD)
+                }
+                if (loadedToken != null) {
+                    // Same isolated process is meant to host exactly
+                    // one plugin (per Phase 11a v4). A second
+                    // loadPlugin into the same process is a host bug.
+                    throw IllegalStateException(NativeLoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS)
+                }
+            } catch (exc: Throwable) {
+                closeFdSilently(bundleFd)
+                throw exc
+            }
 
-            if (request.renderer != "native_kotlin") {
-                throw IllegalStateException(NativeLoadFailureCodes.UNSUPPORTED_RENDERER)
-            }
-            if (bundleFd == null) {
-                throw IllegalStateException(NativeLoadFailureCodes.MISSING_BUNDLE_FD)
-            }
-            if (loadedToken != null) {
-                // Same isolated process is meant to host exactly
-                // one plugin (per Phase 11a v4). A second
-                // loadPlugin into the same process is a host bug.
-                throw IllegalStateException(NativeLoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS)
-            }
-
-            val newHost = RealNativePluginHost(request, bundleFd, callback)
+            // Bundle FD non-null after validation block above —
+            // smart-cast doesn't reach across the try boundary so we
+            // assert explicitly.
+            val verifiedFd = requireNotNull(bundleFd)
+            val newHost = RealNativePluginHost(request, verifiedFd, callback)
             host = newHost
             loadedToken = request.sandboxToken
             try {
@@ -175,6 +189,12 @@ class PluginNativeSandboxService : Service() {
         if (request.diagnosticManifestJson.length > PluginLoadParcel.DIAGNOSTIC_MANIFEST_BYTES_CAP) {
             throw IllegalStateException(NativeLoadFailureCodes.DIAGNOSTIC_FIELD_OVERSIZE)
         }
+    }
+
+    private fun closeFdSilently(fd: ParcelFileDescriptor?) {
+        if (fd == null) return
+        runCatching { fd.close() }
+            .onFailure { Timber.tag(TAG).w(it, "orphan bundleFd close failed") }
     }
 
     companion object {

@@ -36,6 +36,8 @@ The synthesized isolated UID is the security boundary. Everything inside the plu
 
 **Cross-plugin isolation:** each native plugin runs in its OWN isolated process via `Context.bindIsolatedService(instanceName=sandboxToken.toString())`. Two native plugins NEVER share heap, ClassLoader, or coroutine scopes. Plugin A crashing/being malicious affects only Plugin A.
 
+**Parent ClassLoader (triad 136 clarification):** `InMemoryDexClassLoader` is constructed with `SynclerPlugin::class.java.classLoader` as parent, which is the isolated process's `PathClassLoader` — i.e. the host APK's main classloader. The plugin DEX can therefore resolve, via the parent chain, any class packaged in the host APK (SDK runtime contract classes, but also incidentally: kotlin stdlib, androidx libraries, host modules' classes). This is NOT a security regression — the isolated UID is the real boundary, and what a plugin can NAME from its own DEX is not the same as what it can DO with the named class. A plugin can't call `host.PluginRegistry.someMethod()` to bypass the bridge because (a) it doesn't have a `PluginRegistry` instance and (b) the AIDL Binder is the only way to reach host state. ClassLoader isolation is organizational; UID + Binder is enforcement. Future hardening (V2+) may switch to a strict delegating classloader that whitelists `app.syncler.plugin.runtime.*` + stdlib only.
+
 ## Bundle format
 
 DEX (Dalvik Executable) bytes only. No AAR (resources/manifests/native libs are V2+ scope). The published bundle is the DEX file; SHA-256 of the bytes is the manifest's `bundleHash`.

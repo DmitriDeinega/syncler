@@ -68,14 +68,20 @@ internal class RealNativePluginHost(
      * propagates to the host via [IPluginHostCallback].
      */
     fun startLoad() {
-        if (parcel.nativeSdkAbi != NATIVE_SDK_ABI) {
-            throw IllegalStateException(NativeLoadFailureCodes.UNSUPPORTED_SDK_ABI)
+        // Triad 136 fix (codex): close the sandbox-side FD on ALL
+        // exit paths, not just the success path. ABI mismatch
+        // throws BEFORE the read; readDex throws DEX_TOO_LARGE
+        // mid-read; either way the FD would have leaked. try/finally
+        // around the entire ownership window guarantees release.
+        val dexBytes = try {
+            if (parcel.nativeSdkAbi != NATIVE_SDK_ABI) {
+                throw IllegalStateException(NativeLoadFailureCodes.UNSUPPORTED_SDK_ABI)
+            }
+            readDex(bundleFd)
+        } finally {
+            runCatching { bundleFd.close() }
+                .onFailure { Timber.tag(TAG).w(it, "bundleFd close failed") }
         }
-
-        val dexBytes = readDex(bundleFd)
-        // ParcelFileDescriptor returns its own fd; close once read.
-        runCatching { bundleFd.close() }
-            .onFailure { Timber.tag(TAG).w(it, "bundleFd close failed") }
 
         if (dexBytes.size > DEX_MAX_BYTES) {
             throw IllegalStateException(NativeLoadFailureCodes.DEX_TOO_LARGE)
@@ -129,21 +135,40 @@ internal class RealNativePluginHost(
         // will see onPluginReady / onWebViewError asynchronously
         // via the callback.
         initJob = scope.launch {
-            val result = withTimeoutOrNull(ON_INIT_TIMEOUT_MILLIS) {
-                runCatching { instance.onInit(ctx) }
-            }
-            when {
-                result == null -> {
-                    // Triad 135 order: report FIRST, then cancel.
-                    reportError(NativeLoadFailureCodes.INIT_TIMEOUT, "onInit exceeded $ON_INIT_TIMEOUT_MILLIS ms")
-                    initJob?.cancel()
+            // Triad 136 fix (codex): runCatching INSIDE
+            // withTimeoutOrNull would swallow the
+            // TimeoutCancellationException as Result.failure and
+            // misreport the structured code as onInit_threw
+            // instead of init_timeout. Move runCatching OUTSIDE
+            // and re-throw CancellationException so the timeout
+            // signal propagates as the null result.
+            //
+            // Also: the previous `initJob?.cancel()` after report
+            // was redundant — withTimeoutOrNull already cancelled
+            // the inner block. The whole init flow is just THIS
+            // child job; on timeout we let it finish reporting and
+            // then return. (Gemini 136 NIT.)
+            val callResult: Result<Result<Unit>>? = try {
+                withTimeoutOrNull(ON_INIT_TIMEOUT_MILLIS) {
+                    runCatching { instance.onInit(ctx) }
                 }
-                result.isFailure -> {
-                    val exc = result.exceptionOrNull()
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            }
+
+            when {
+                callResult == null -> {
+                    reportError(
+                        NativeLoadFailureCodes.INIT_TIMEOUT,
+                        "onInit exceeded $ON_INIT_TIMEOUT_MILLIS ms",
+                    )
+                }
+                callResult.isFailure -> {
+                    val exc = callResult.exceptionOrNull()
                     reportError("onInit_threw", exc?.message ?: "(no message)")
                 }
-                result.getOrNull()?.isFailure == true -> {
-                    val exc = result.getOrNull()?.exceptionOrNull()
+                callResult.getOrNull()?.isFailure == true -> {
+                    val exc = callResult.getOrNull()?.exceptionOrNull()
                     reportError("onInit_failed", exc?.message ?: "(no message)")
                 }
                 else -> {
