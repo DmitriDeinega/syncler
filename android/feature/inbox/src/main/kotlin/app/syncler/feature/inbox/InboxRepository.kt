@@ -639,65 +639,8 @@ class InboxRepository @Inject constructor(
         )
     }
 
-    /**
-     * V3 #16 — replace-ops applier. Parses the decrypted patch
-     * batch (`{"patches": [...]}`), walks each op, and mutates
-     * a DEEP CLONE of payloadJson. Returns the new JSON string
-     * on success.
-     *
-     * Throws on:
-     *   - missing/invalid `patches` array
-     *   - op != "replace" (V0.1 supports replace only)
-     *   - path doesn't match `$.foo(.bar)*` syntax
-     *   - any path segment doesn't exist in the target
-     *
-     * The caller's runCatching turns the throw into a clean
-     * "discard the whole batch" rejection.
-     */
-    private fun applyReplaceOpsOrThrow(payloadJson: String, patchPlaintext: String): String {
-        val root = org.json.JSONObject(payloadJson)
-        // Deep clone so a mid-batch failure can't mutate root.
-        val clone = org.json.JSONObject(root.toString())
-        val ops = org.json.JSONObject(patchPlaintext).optJSONArray("patches")
-            ?: error("patch batch missing 'patches' array")
-        for (i in 0 until ops.length()) {
-            val op = ops.optJSONObject(i) ?: error("op[$i] not an object")
-            val kind = op.optString("op")
-            require(kind == "replace") { "op[$i] unsupported kind=$kind" }
-            val path = op.optString("path")
-            val value = op.opt("value") ?: error("op[$i] missing value")
-            applyReplaceOrThrow(clone, path, value)
-        }
-        return clone.toString()
-    }
-
-    /**
-     * Walk `$.a.b.c` against [target], require every segment to
-     * exist, then overwrite the leaf. Throws on any malformed
-     * input — caller treats the throw as "discard the batch".
-     */
-    private fun applyReplaceOrThrow(
-        target: org.json.JSONObject,
-        path: String,
-        value: Any,
-    ) {
-        require(path.startsWith("$.")) { "path must start with \$.; got $path" }
-        val segments = path.substring(2).split('.')
-        require(segments.isNotEmpty() && segments.none { it.isEmpty() }) {
-            "malformed path $path"
-        }
-        var current: org.json.JSONObject = target
-        for (i in 0 until segments.size - 1) {
-            val seg = segments[i]
-            require(current.has(seg)) { "path $path missing segment $seg" }
-            val next = current.opt(seg)
-            require(next is org.json.JSONObject) { "path $path segment $seg not an object" }
-            current = next
-        }
-        val leaf = segments.last()
-        require(current.has(leaf)) { "path $path missing leaf $leaf" }
-        current.put(leaf, value)
-    }
+    private fun applyReplaceOpsOrThrow(payloadJson: String, patchPlaintext: String): String =
+        applyReplaceOps(payloadJson, patchPlaintext)
 
     /**
      * Fetches the historical manifest for `pluginRowId` via the by-id
@@ -1066,6 +1009,62 @@ class InboxRepository @Inject constructor(
     companion object {
         const val TAG = "InboxRepo"
     }
+}
+
+/**
+ * V3 #16 — top-level testable applier for `card.patch` ops.
+ * Exposed `internal` so unit tests can exercise the JSONPath
+ * walk + deep-clone semantics directly without faking the
+ * surrounding decrypt path.
+ *
+ * Returns the mutated payload JSON. Throws on:
+ *  - missing/invalid `patches` array
+ *  - any op with kind != "replace" (V0.1 supports replace only)
+ *  - path that doesn't match `$.foo(.bar)*` syntax
+ *  - any path segment that doesn't exist in the target
+ *
+ * Atomic: the function clones [payloadJson] before applying;
+ * a throw mid-batch leaves the input untouched, so the caller
+ * can discard the whole patch on any failure (codex privacy
+ * invariant).
+ */
+internal fun applyReplaceOps(payloadJson: String, patchPlaintext: String): String {
+    val root = org.json.JSONObject(payloadJson)
+    val clone = org.json.JSONObject(root.toString())
+    val ops = org.json.JSONObject(patchPlaintext).optJSONArray("patches")
+        ?: error("patch batch missing 'patches' array")
+    for (i in 0 until ops.length()) {
+        val op = ops.optJSONObject(i) ?: error("op[$i] not an object")
+        val kind = op.optString("op")
+        require(kind == "replace") { "op[$i] unsupported kind=$kind" }
+        val path = op.optString("path")
+        val value = op.opt("value") ?: error("op[$i] missing value")
+        applyReplaceOne(clone, path, value)
+    }
+    return clone.toString()
+}
+
+private fun applyReplaceOne(
+    target: org.json.JSONObject,
+    path: String,
+    value: Any,
+) {
+    require(path.startsWith("\$.")) { "path must start with \$.; got $path" }
+    val segments = path.substring(2).split('.')
+    require(segments.isNotEmpty() && segments.none { it.isEmpty() }) {
+        "malformed path $path"
+    }
+    var current: org.json.JSONObject = target
+    for (i in 0 until segments.size - 1) {
+        val seg = segments[i]
+        require(current.has(seg)) { "path $path missing segment $seg" }
+        val next = current.opt(seg)
+        require(next is org.json.JSONObject) { "path $path segment $seg not an object" }
+        current = next
+    }
+    val leaf = segments.last()
+    require(current.has(leaf)) { "path $path missing leaf $leaf" }
+    current.put(leaf, value)
 }
 
 data class InboxItem(
