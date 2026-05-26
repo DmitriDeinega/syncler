@@ -36,4 +36,5 @@ include(
     ":feature:plugin-host",
     ":feature:plugin-sandbox",
     ":feature:settings",
+    ":plugin-sdk-runtime",
 )
