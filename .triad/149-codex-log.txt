@@ -1,0 +1,417 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e65ea-6575-7023-b5ce-af53e3276c61
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 149 — V4 design pre-work
+
+V3 closed (V3 #14 live channel, V3 #15 SDK sugar, V3 #16
+card.patch, V3 #17 Redis backplane). The roadmap's last
+tier is V4 — UX polish — with two items:
+
+> 18. **Guided lost-device rotation flow.** Click-through UX
+>     for: revoke lost device → re-pair on trusted devices →
+>     rotate master key (depends on V1.5 #3). Today the user
+>     does steps 1–2 by hand; this automates the sequence.
+>
+> 19. **Per-plugin user preferences.** Notification cadence,
+>     label overrides, delivery-window scheduling, do-not-
+>     disturb integration — all surfaced from the host's
+>     settings sheet without plugin-side code.
+
+Both are device-side UX work primarily. Server-side touch
+is light: #18 reuses the existing rotation endpoints, #19
+adds a per-plugin prefs blob (most likely inside the
+already-encrypted user-state).
+
+v0.1 dev posture preserved.
+
+## What's already in place
+
+**Master-key rotation (V1.5 #3) shipped Phase 8d.**
+- `server/app/routers/rotation.py` — POST /v1/account/rotate-
+  master-key/challenge → POST .../commit
+- `server/app/models.py`: RotationChallenge table (single-
+  use, ~5 min TTL)
+- `docs/crypto-spec.md §10` — full protocol spec
+- Android: the rotation UX exists but is currently a
+  technical settings screen; #18 is the wrapping flow that
+  starts from "I lost a device".
+
+**Device revocation already works.**
+- POST /v1/auth/devices/{device_id}/revoke (admin-side)
+- Settings UI has a "Sign out other devices" path.
+- Triad 144 #7 closes WS sockets on revoke via the
+  control-lane revocation event.
+
+**Sender mute + pairing revoke also exist.**
+- Per-sender mute lives in the host UI (settings sheet per
+  paired sender). Persists in the device-local SQLCipher
+  inbox DB.
+- Pairing revoke is in the same sheet.
+
+**Encrypted user-state blob is the per-user sync substrate.**
+- `users.encrypted_state` (Postgres) + the V1.5 #3 lockstep
+  master-key-rotation protocol.
+- Already carries paired sender records (`paired_senders`)
+  and recently-dismissed message IDs. Adding plugin prefs
+  here means they sync cross-device automatically.
+
+**No plugin-level prefs surface today.**
+- `Plugin` model has no per-user-prefs column. Per-(user,
+  plugin_row_id) prefs would be new state.
+
+## V4 #18 — Guided lost-device rotation
+
+Goal: today a user who loses a phone does:
+1. Sign in on another trusted device.
+2. Go to Settings → Devices → tap "Revoke" on the lost row.
+3. Separately, navigate to "Rotate master key" because the
+   lost device might have leaked key material.
+4. Re-pair the lost device's senders on a replacement.
+
+We want a single guided flow that orchestrates 1-3 (and
+flags 4 as a follow-up).
+
+### Open design questions
+
+**1. Entry point.** Settings → Security → "I lost a device".
+Or a top-level "Lost a device?" banner that appears after
+N days of one device being inactive? V0.1: explicit
+Settings entry. Confirm?
+
+**2. State machine.** Proposed states:
+- `pick_lost_device` — list of enrolled devices except this
+  one; user taps the lost row.
+- `confirm_revoke` — full-screen "This will revoke device
+  X. Continue?" with the device label + last-seen.
+- `revoking` — calling /v1/auth/devices/{device_id}/revoke;
+  short.
+- `rotation_recommended` — explain why rotation is the
+  right move (the lost device had key material); two
+  buttons: "Rotate now" / "Skip for now".
+- `rotating` — invokes the existing rotation UX; user
+  re-enters their master password (the wrap key derivation
+  needs it).
+- `done` — summary card listing what was done + a
+  "Re-pair senders" CTA pointing into the existing pairing
+  flow.
+
+Is there anything missing? Skip-for-now should be discoverable but
+discouraged.
+
+**3. Interruption + resume.** If the user kills the app
+between revoke and rotate, do we resume the flow on next
+launch? V0.1: the revoke is atomic at the server, so the
+rotation can be a separate re-entry point. Banner on home
+screen "You revoked a device but didn't rotate; rotate
+now?" — accept or dismiss-forever.
+
+**4. Concurrent flows on multiple trusted devices.** Two
+remaining devices race the "I lost a device" flow at the
+same time. The server-side revoke is idempotent
+(second call returns 200 with already-revoked).
+Rotation is single-shot via challenge nonce — the second
+device gets a stale-challenge 409. Surface "Rotation already
+in progress / completed on device X" cleanly.
+
+**5. Re-pair handoff.** After rotation, the user's senders
+that lived on the lost device need to be re-paired on a
+new device. The flow surfaces this as a follow-up but
+doesn't actually initiate it (the user opens each sender
+individually). Acceptable, or worth more guidance?
+
+### Risks
+- The rotation flow already requires the user's master
+  password. We MUST NOT prompt for it any other way (no
+  biometric shortcut); shoulder-surfing risk during a
+  high-stakes "I lost my phone" moment is real.
+- We MUST NOT auto-revoke based on device "inactivity" —
+  that's a different policy decision that the user might
+  not want.
+- The "skip rotation" banner must time out at some point
+  (after N days, hide automatically) so a user who really
+  doesn't want to rotate doesn't see it forever.
+
+## V4 #19 — Per-plugin user preferences
+
+Goal: surface a per-plugin settings sheet (notification
+cadence, label override, quiet hours) the user controls.
+**Plugin code is not involved** — pure host policy.
+
+### Open design questions
+
+**6. Storage location.**
+
+Options:
+- (a) Inside the encrypted user-state blob alongside
+  paired_senders → syncs cross-device automatically via
+  the existing M7 CAS state.
+- (b) New Postgres `plugin_prefs` table (user_id,
+  plugin_row_id, prefs_json) — needs a sync endpoint.
+- (c) Device-local SQLCipher only — no cross-device sync.
+
+Recommendation: (a). The encrypted state blob is already
+designed for low-frequency per-user settings, and we want
+cross-device sync.
+
+Trade-off: blob size grows with active plugin count.
+Currently small (paired_senders + dismissed_ids). For
+v0.1 acceptable. Long-term: split into shards if it
+balloons.
+
+**7. Prefs schema.**
+
+```json
+{
+  "plugin_prefs": {
+    "<plugin_row_id>": {
+      "label_override": "Optional Name",
+      "notification_cadence": "realtime|batched_15m|batched_1h|digest_daily",
+      "quiet_hours": {
+        "enabled": true,
+        "start_local_hour": 22,
+        "end_local_hour": 7,
+        "timezone": "America/New_York"
+      },
+      "muted": false
+    }
+  }
+}
+```
+
+Per-field decisions:
+- `label_override`: free-form, 64 char cap. Falls back to
+  the plugin manifest's `name` field.
+- `notification_cadence`: enum of 4 values for v0.1.
+- `quiet_hours`: optional. When set, the host's SSE
+  consumer (`InboxRepository`) drops/queues
+  `inbox.changed` hints during the window; the inbox row
+  still updates on next foreground pull.
+- `muted`: already exists today as a per-sender setting;
+  per-plugin mute is similar but per-row.
+
+Is the cadence enum too coarse? Should batched windows
+align to wall-clock 15m/1h boundaries or rolling from
+each receipt? Rolling is what most users expect
+intuitively.
+
+**8. Quiet-hours implementation.**
+
+Three places it can intercept:
+- Server: the SSE / live-channel publish path checks
+  prefs before fan-out. NO — server doesn't see user
+  prefs in plaintext, the encrypted-state blob is
+  device-side.
+- Device, between SSE and notification: the
+  `EventStreamManager` / `InboxRepository` discards
+  notifications during quiet hours but still updates the
+  inbox row. ✓
+- Device, between notification and OS: rely on Android's
+  Do Not Disturb. ✗ — that's user-OS-level, doesn't
+  reflect per-plugin policy.
+
+V0.1: device-side intercept in the Android notification
+adapter. Confirm?
+
+**9. Discoverability.**
+
+Settings sheet per plugin: today the host UI has a
+"Settings" sheet for each PAIRED SENDER (with mute,
+revoke pairing). Plugins are not the same thing as
+senders — a sender publishes multiple plugins. Do we
+add a "Plugins" subsection inside the sender sheet?
+Or a separate "Plugins" tab in Settings? Recommendation:
+new "Plugins" tab top-level — keeps the sender sheet
+focused on the trust relationship.
+
+**10. Migration / first-launch.**
+
+Existing users have no prefs blob. The plugin_prefs key
+is absent from their encrypted state on first launch
+of v0.1. Default = empty dict; settings sheet shows
+"use defaults" until the user changes anything. Trivial
+forward-compat.
+
+### Anti-requirements
+
+- **NOT** giving the plugin code access to user prefs. A
+  plugin must not learn that the user prefers a different
+  label or has quiet hours — that's a leak vector.
+- **NOT** introducing a new server-side encrypted blob
+  for prefs. The user-state blob is the established
+  pattern.
+- **NOT** federating prefs across users (no "shared
+  plugin defaults"). Each user owns their own.
+
+## Implementation order — proposed slicing
+
+For #18:
+1. Spec digest at `docs/lost-device-flow.md`.
+2. Android: settings entry point + state machine model.
+3. Android: Compose screens for each state.
+4. Android: revoke + rotation orchestration.
+5. Android: home-screen banner for "rotation skipped".
+6. Tests: state-machine unit tests, mocked rotation
+   integration test.
+7. Post-work triad.
+
+For #19:
+1. Spec digest at `docs/plugin-prefs.md`.
+2. Android: extend user-state schema with `plugin_prefs`
+   map.
+3. Android: Compose screens — plugins list + per-plugin
+   sheet.
+4. Android: quiet-hours intercept in the notification
+   adapter.
+5. Android: cadence batching logic.
+6. Tests: schema round-trip, quiet-hours interval check,
+   cadence batching.
+7. Post-work triad.
+
+Both items can ship independently (#19 has no #18
+dependency).
+
+## What I'm asking for
+
+Per-numbered-concern verdict (OK / NIT / FIX / DESIGN).
+Plus anything you'd reshape entirely (e.g. "store prefs
+per-device, not in the synced blob", "don't bundle
+cadence + quiet hours in one sheet", "do
+re-pair-handoff inside the lost-device flow not as a
+follow-up").
+
+Format: numbered verdicts + a bigger-picture take at the
+end. Goal: a focused spec digest I can write for each.
+
+codex
+1. **OK** — Explicit `Settings -> Security -> I lost a device` is the right v0.1 entry point. Do not add inactivity-driven banners yet. Inactivity is ambiguous and risks nudging users toward a destructive security action.
+
+2. **NIT** — State machine is good. I would add one explicit preflight/guard state before `confirm_revoke`:
+
+   `check_rotation_ready`
+
+   Purpose: confirm this device can actually complete rotation before revoking the lost one, or at least warn if rotation prerequisites are unavailable. If rotation requires current encrypted state, account auth freshness, or master password availability, the user should know before the irreversible revoke step.
+
+   Also rename `rotation_recommended` to something stronger in copy, even if the state name stays neutral. This is not just hygiene; after device loss, rotation is the security completion step.
+
+3. **OK** — Revoke atomic, rotation resumable later is acceptable for v0.1. The banner should be tied to a concrete local marker like:
+
+   `revoked_device_without_rotation_at`
+
+   It should clear when rotation succeeds, when dismissed forever, or after the timeout. I would use a timeout measured in days, not app launches.
+
+4. **OK** — Idempotent revoke plus stale-challenge handling is the right shape. The UX copy should avoid implying failure when the desired security state was already reached. For rotation 409s, distinguish:
+
+   - already completed: “Master key was already rotated on another device”
+   - currently in progress: “Rotation is already in progress on another device”
+   - stale local challenge: “This rotation session expired; start again”
+
+5. **NIT** — Follow-up CTA is acceptable for v0.1, but make it more concrete than “Re-pair senders.” The user may not understand which senders were affected. If the app can infer sender/plugin relationships associated with the revoked device, show a checklist or count. If it cannot, say “Review paired senders” and deep-link to the existing sender/pairing surface.
+
+6. **OK** — Store `plugin_prefs` inside encrypted user-state. That matches the privacy model and gets cross-device sync without new server-visible state. Add a soft size budget to the spec now, even if enforcement waits: e.g. label caps, known enum values, no unbounded per-plugin history in this blob.
+
+7. **FIX** — Schema is mostly right, but keying by `plugin_row_id` is fragile if row IDs are server-local lifecycle artifacts or can be recreated. Prefer a stable plugin identity if one exists, such as sender identity plus plugin manifest ID/version namespace.
+
+   If `plugin_row_id` is truly stable across devices and account lifetime, document that invariant explicitly.
+
+   Cadence enum is fine for v0.1. For batching, use wall-clock aligned windows for predictability and power efficiency, not rolling from each receipt. Rolling sounds intuitive until users get inconsistent notification times and every plugin maintains its own timer.
+
+8. **OK** — Device-side intercept is correct. The server cannot inspect encrypted prefs, and OS DND is too coarse.
+
+   One important distinction: quiet hours should suppress notifications, not data ingestion. The SSE/live hint can still trigger local sync if the app is active or the repository policy wants freshness. The notification adapter should decide whether to notify, queue a summary, or remain silent.
+
+9. **OK** — Top-level `Plugins` tab is the cleaner model. Sender settings are trust/pairing controls; plugin settings are host policy. Mixing them will get confusing as soon as one sender exposes multiple plugins.
+
+10. **OK** — Missing key defaults to empty dict. Add forward-compatible parsing rules: ignore unknown cadence values by falling back to default, preserve unknown fields when possible during encrypted-state writeback, and avoid deleting prefs for plugins that are temporarily unavailable.
+
+**Bigger Picture**
+
+The overall V4 split is sound. #18 should be treated as a security recovery wizard, not just a convenience wrapper. The main thing I would tighten is the revoke-before-rotate edge: either preflight rotation readiness before revoke, or make the copy explicit that revoke is immediate and rotation may need to be resumed.
+
+For #19, encrypted user-state is the right storage location, but the identity key matters. I would not ship the schema until the plugin preference key is stable across reinstall, re-pair, server migration, and plugin row recreation scenarios. Everything else can evolve behind that.
+
+Implementation order looks good. I would slightly adjust #19 tests to include cross-device merge/CAS behavior, because prefs living in encrypted user-state means stale writes are the main regression risk.
+tokens used
+4,982
+1. **OK** — Explicit `Settings -> Security -> I lost a device` is the right v0.1 entry point. Do not add inactivity-driven banners yet. Inactivity is ambiguous and risks nudging users toward a destructive security action.
+
+2. **NIT** — State machine is good. I would add one explicit preflight/guard state before `confirm_revoke`:
+
+   `check_rotation_ready`
+
+   Purpose: confirm this device can actually complete rotation before revoking the lost one, or at least warn if rotation prerequisites are unavailable. If rotation requires current encrypted state, account auth freshness, or master password availability, the user should know before the irreversible revoke step.
+
+   Also rename `rotation_recommended` to something stronger in copy, even if the state name stays neutral. This is not just hygiene; after device loss, rotation is the security completion step.
+
+3. **OK** — Revoke atomic, rotation resumable later is acceptable for v0.1. The banner should be tied to a concrete local marker like:
+
+   `revoked_device_without_rotation_at`
+
+   It should clear when rotation succeeds, when dismissed forever, or after the timeout. I would use a timeout measured in days, not app launches.
+
+4. **OK** — Idempotent revoke plus stale-challenge handling is the right shape. The UX copy should avoid implying failure when the desired security state was already reached. For rotation 409s, distinguish:
+
+   - already completed: “Master key was already rotated on another device”
+   - currently in progress: “Rotation is already in progress on another device”
+   - stale local challenge: “This rotation session expired; start again”
+
+5. **NIT** — Follow-up CTA is acceptable for v0.1, but make it more concrete than “Re-pair senders.” The user may not understand which senders were affected. If the app can infer sender/plugin relationships associated with the revoked device, show a checklist or count. If it cannot, say “Review paired senders” and deep-link to the existing sender/pairing surface.
+
+6. **OK** — Store `plugin_prefs` inside encrypted user-state. That matches the privacy model and gets cross-device sync without new server-visible state. Add a soft size budget to the spec now, even if enforcement waits: e.g. label caps, known enum values, no unbounded per-plugin history in this blob.
+
+7. **FIX** — Schema is mostly right, but keying by `plugin_row_id` is fragile if row IDs are server-local lifecycle artifacts or can be recreated. Prefer a stable plugin identity if one exists, such as sender identity plus plugin manifest ID/version namespace.
+
+   If `plugin_row_id` is truly stable across devices and account lifetime, document that invariant explicitly.
+
+   Cadence enum is fine for v0.1. For batching, use wall-clock aligned windows for predictability and power efficiency, not rolling from each receipt. Rolling sounds intuitive until users get inconsistent notification times and every plugin maintains its own timer.
+
+8. **OK** — Device-side intercept is correct. The server cannot inspect encrypted prefs, and OS DND is too coarse.
+
+   One important distinction: quiet hours should suppress notifications, not data ingestion. The SSE/live hint can still trigger local sync if the app is active or the repository policy wants freshness. The notification adapter should decide whether to notify, queue a summary, or remain silent.
+
+9. **OK** — Top-level `Plugins` tab is the cleaner model. Sender settings are trust/pairing controls; plugin settings are host policy. Mixing them will get confusing as soon as one sender exposes multiple plugins.
+
+10. **OK** — Missing key defaults to empty dict. Add forward-compatible parsing rules: ignore unknown cadence values by falling back to default, preserve unknown fields when possible during encrypted-state writeback, and avoid deleting prefs for plugins that are temporarily unavailable.
+
+**Bigger Picture**
+
+The overall V4 split is sound. #18 should be treated as a security recovery wizard, not just a convenience wrapper. The main thing I would tighten is the revoke-before-rotate edge: either preflight rotation readiness before revoke, or make the copy explicit that revoke is immediate and rotation may need to be resumed.
+
+For #19, encrypted user-state is the right storage location, but the identity key matters. I would not ship the schema until the plugin preference key is stable across reinstall, re-pair, server migration, and plugin row recreation scenarios. Everything else can evolve behind that.
+
+Implementation order looks good. I would slightly adjust #19 tests to include cross-device merge/CAS behavior, because prefs living in encrypted user-state means stale writes are the main regression risk.
+sentation and notification policy. Mixing them will confuse ownership.
+
+   NIT: from a sender detail sheet, it is still useful to deep-link to that sender’s plugins, but the canonical home should be the top-level Plugins tab.
+
+10. **OK** — Absent `plugin_prefs` means empty map/defaults. Good forward-compat path.
+
+   NIT: make writes sparse. Do not materialize a prefs object for every plugin on first launch. Only write entries for changed settings.
+
+**Bigger Picture**
+
+The overall split is sound: #18 is an Android-side safety wizard over existing revoke/rotation primitives; #19 is host-owned device UX backed by encrypted synced state. I would not move plugin prefs server-side or device-local-only.
+
+The biggest spec changes I would make are:
+
+1. For #18, persist only “revoked-without-rotation” as durable state, not the whole flow.
+2. For #18, keep re-pairing as a post-flow CTA, but make the consequence explicit.
+3. For #19, make prefs sparse, versioned, and keyed by a stable plugin identity.
+4. For #19, define quiet hours in local minutes and suppress notifications without suppressing inbox sync.
+5. For #19 cadence, use rolling windows from the first queued event and prevent indefinite postponement.
+
+Implementation order looks right. I would probably ship #19 before #18 only if the plugin settings surface is already nearby in Android UI work; otherwise #18 has the stronger safety value and reuses more existing backend behavior.
