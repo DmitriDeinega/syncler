@@ -1,0 +1,2796 @@
+OpenAI Codex v0.133.0
+--------
+workdir: D:\Projects\syncler
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 019e6647-e93c-7c01-9cb7-a859833ae2fb
+--------
+user
+=================================================================
+ABSOLUTE INSTRUCTION — REVIEW MODE.
+No write/mutation tool. Reply text only.
+Do NOT commit, edit, write, or stage anything. Read freely.
+=================================================================
+
+# Consultation 159 — V3 #14 bugfix post-work review
+
+Triad 158 captured three V3 #14 inbound-path bugs +
+codex added a fourth (onLiveError / onLiveClosed also
+dead-end on the TS side). All four shipped at:
+
+- ab41a5c — V3 #14 inbound: three bugs fixed (triad 158)
+- d6b4d6a — docs: integration guide folds the bugfix surfaces
+
+This is the post-work triad: was the implementation
+correct, and is the V3 #14 inbound path now actually
+usable end-to-end?
+
+## Files in primary review scope
+
+### Server (bug 1)
+- `server/app/routers/live.py` —
+  `LivePushRequest` gained `channel: str` (validated
+  against the WS-side regex `^[a-zA-Z0-9._-]+$`, ≤64).
+  `push_live` now wraps the envelope in a `{type:
+  "message", channel, id: uuid.hex, payload: base64}`
+  frame before publishing to the user-scoped hub topic.
+  Inner-envelope cap reduced to `(MAX_FRAME_BYTES * 3 //
+  4) - 64` so the base64-inflated outer frame stays
+  under the wire ceiling.
+
+### Android (bug 2)
+- `android/feature/plugin-host/build.gradle.kts` —
+  added `implementation(project(":core:auth"))`.
+- `android/feature/plugin-host/.../PluginLoader.kt` —
+  `android(...)` factory gained `session: Session? = null`.
+  The `deviceJwtProvider` lambda now calls
+  `session.currentToken()` (the existing `AuthTokenProvider`
+  method); throws `LiveChannelException("no_session", ...)`
+  honestly when locked / signed out, or when no Session
+  was wired by the caller. Audit-log reason was updated
+  to "no Session wired" so the placeholder path doesn't
+  silently masquerade.
+
+### SDK (bugs 3 + 4)
+- `sdk-plugin/src/bridge.ts` — DispatchHook union
+  extended with `onLiveMessage | onLiveError | onLiveClosed`.
+  The dispatch switch parses the single JSON-string
+  positional arg Android sends (`{channel, envelope}`
+  for message, `{channel, code}` for error,
+  `{channel}` for closed) and fans out as positional
+  args to the registered plugin. Added a small
+  `parseLivePayload` helper.
+- `sdk-plugin/src/base-plugin.ts` — three new methods
+  with no-op default bodies (`onLiveMessage`,
+  `onLiveError`, `onLiveClosed`) so existing plugins
+  don't need to override.
+- `sdk-plugin/test/base-plugin.test.ts` — 3 new tests:
+  default hooks return undefined; dispatcher parses
+  JSON payload + fans out as positional args;
+  malformed payloads (non-JSON, missing required
+  field) reject with TypeError;
+  onLiveError + onLiveClosed full routing.
+
+### Docs
+- `docs/integration-guide.md` — §12 "V0.1 wiring caveat"
+  box removed; push body example updated with `channel`
+  field; plugin snippet shows `onLiveMessage` /
+  `onLiveError` / `onLiveClosed` overrides; top-of-file
+  "host does for you" bullet updated.
+
+## Privacy / contract claims
+
+1. **Server stays content-blind.** The push handler
+   wraps the envelope as `payload: base64(envelope_json)`
+   inside a routing frame, but the envelope itself stays
+   opaque — server doesn't decode or inspect. Devices
+   base64-decode + open as before.
+2. **Channel name regex enforced at both ends.** The push
+   handler rejects bad channel names with 400, mirroring
+   the WS frame parser's `_valid_channel_name`. No way
+   for a server-side push to inject a frame on a channel
+   shape devices wouldn't have opened.
+3. **Auth pipeline unchanged.** `Session.currentToken()`
+   was already the device JWT used by every authenticated
+   request; the live channel now uses the same auth
+   source, NOT a new one.
+4. **TS dispatch parses + asserts string types.** The
+   `parseLivePayload` helper rejects non-JSON or
+   non-object payloads with TypeError; downstream
+   `asString` calls reject when expected fields are
+   missing or wrong-typed. Tests cover both paths.
+5. **Plugin's existing hooks unchanged.** Adding cases
+   to the DispatchHook union is additive; the four
+   existing hooks (onMessage / onAction / onDismiss /
+   render) have identical dispatch behavior. 62 SDK
+   tests green including the 8 base-plugin tests.
+
+## Specific concerns I'd like flagged
+
+1. **Inner-envelope cap math.** `(MAX_FRAME_BYTES * 3 //
+   4) - 64` reserves 64 bytes for the frame's structural
+   overhead (`type`, `channel`, `id`, key names, quotes,
+   commas). At MAX_FRAME_BYTES=65536 the inner cap is
+   ~48944 bytes. Is that the right reservation? A long
+   channel name eats into it but channels are capped at
+   64 chars and the overhead is dominated by the field
+   keys.
+
+2. **Frame `id` is server-generated.** Every push frame
+   gets `uuid.uuid4().hex`. Senders that want to
+   correlate ack frames to their pushes can't today —
+   they don't see the id. Acceptable v0.1 (the push
+   endpoint already returns its own response synchronously
+   so senders don't need ack correlation) or worth
+   accepting an optional client-provided id?
+
+3. **Session is nullable on the factory.** The factory
+   `android(context, scope, livePatchSink = NoOp,
+   session = null)` keeps the throwing placeholder when
+   the caller didn't pass a session. Acceptable for tests
+   + minimal builds but a production composition root
+   that forgets the `session=` arg silently loses live
+   channel. Worth making it required, or accept the
+   warn-loud default?
+
+4. **TS payload parsing rejects via TypeError.** A
+   malformed frame from a misbehaving host bridge throws
+   inside `dispatch`, which propagates up to the Android
+   side as a Promise rejection. The Android `dispatchHook`
+   call swallows the failure with a warn log
+   (PluginInstance.dispatchHook line 60 — `runCatching`).
+   Net: malformed frames are dropped silently from the
+   plugin's perspective. Acceptable, or should the SDK
+   side log too?
+
+5. **No new server tests.** The bug 1 server change is
+   logic-only (frame wrapping + cap reduction); the
+   existing `test_v3_14_ws_endpoint.py` smoke tests
+   don't cover `push_live` because they don't have a
+   live socket to verify delivery against. A new test
+   would need either a real WebSocket client or the
+   hub's in-process pubsub. PG still blocks pytest end-
+   to-end. Worth writing the unit test that asserts the
+   frame shape produced by `push_live` against the hub
+   even without PG?
+
+6. **No Android unit tests for the JWT-provider plumbing.**
+   The behavior is "wired Session returns the token /
+   null Session keeps the throwing placeholder". A
+   single-file factory unit test would be valuable but
+   the existing PluginLoaderTest is integration-shaped.
+   Worth adding now or accept "wiring is small enough
+   to spot-check"?
+
+## Test status
+
+```
+sdk-plugin: vitest run → 62/62 green
+:feature:plugin-host:testDebugUnitTest → green
+:core:storage:testDebugUnitTest → green (unchanged surface)
+:core:push:testDebugUnitTest → green (unchanged surface)
+:feature:inbox:testDebugUnitTest → green (unchanged surface)
+server pytest → still PG-blocked (no new tests added)
+```
+
+## What I'm asking for
+
+Per-numbered-concern verdict (OK / NIT / FIX / DESIGN).
+Plus: did I close the V3 #14 inbound gap fully, or is
+there a 5th thing? Was the implementation correct vs
+the spec?
+
+Skip cosmetics; flag substance. Cap at 500 words.
+
+codex
+I’ll stay in review mode only. I’m going to inspect the two commits and the named files/tests, then give per-concern verdicts and any blocking findings.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "LivePushRequest|push_live|MAX_FRAME_BYTES|_valid_channel_name|onLiveMessage|onLiveError|onLiveClosed|parseLivePayload|deviceJwtProvider|currentToken|no Session wired|dispatchHook" server android sdk-plugin docs' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git status --short' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'git show --stat --oneline --decorate --no-renames ab41a5c d6b4d6a' in D:\Projects\syncler
+ succeeded in 357ms:
+?? .triad/158-codex-log.txt
+?? .triad/158-codex.txt
+?? .triad/158-gemini-log.txt
+?? .triad/158-v3-14-bugfix-prompt.md
+?? .triad/159-codex-log.txt
+?? .triad/159-v3-14-bugfix-postwork-prompt.md
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+warning: could not open directory 'server/pytest-cache-files-5efb56o2/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-8df_kv15/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-cdbefd61/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-fml_3af1/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-jwwxrdb0/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-kwg_1k_5/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-lz6wexoj/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-nq97_mnb/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-o8_fgyky/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-ouv85g96/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-svyb4y17/': Permission denied
+warning: could not open directory 'server/pytest-cache-files-zt4rnlzh/': Permission denied
+
+ exited 1 in 356ms:
+docs\integration-guide.md:40:- **Live channel.** Plugins can open a long-lived authenticated WebSocket via `platform.live.connect(channel)` for sub-second push from the sender to the device + outbound `send` from the device. The host owns the WS lifecycle (heartbeat, reconnect, rate limit, revocation-driven close); the server is a routing pipe — frames carry your V2-encrypted envelopes opaquely. Plugins receive incoming frames via the `onLiveMessage(channel, envelopeBase64)` hook on `BasePlugin`. See §12.
+docs\integration-guide.md:755:The app composition root must pass the host's `Session` into `PluginLoader.android(context, scope, session = ...)` so the bridge's `deviceJwtProvider` resolves to a real device JWT. If `Session` isn't wired, `platform.live.connect(...)` returns `no_session`. The standard Hilt-wired app does this; tests + minimal builds default to the throwing placeholder.
+docs\integration-guide.md:858:  async onLiveMessage(channel: string, envelopeBase64: string) {
+docs\integration-guide.md:867:  async onLiveError(channel: string, code: string) {
+docs\integration-guide.md:873:  async onLiveClosed(channel: string) {
+docs\integration-guide.md:895:- Incoming frames arrive at your `onLiveMessage(channel, envelopeBase64)` hook on `BasePlugin`. The hook is plugin-global — switch on `channel` if you've connected to more than one. Errors and channel-close events arrive at `onLiveError` / `onLiveClosed` respectively.
+docs\plugin-host-multi-process.md:137:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+docs\plugin-host-multi-process.md:301:- **`dispatchHook` `payloadJson`**: capped at 256 KB. Plugins that
+docs\plugin-host-multi-process.md:361:| State | `loadPlugin` (same `pluginId`) | `dispatchHook` | `deliverBridgeResult` | `unloadPlugin` | `querySandboxState` |
+docs\plugin-host-multi-process.md:498:- **Serial queue**: 100 concurrent `dispatchHook` calls from
+sdk-plugin\test\base-plugin.test.ts:73:    await expect(plugin.onLiveMessage('ch', 'b64')).resolves.toBeUndefined();
+sdk-plugin\test\base-plugin.test.ts:74:    await expect(plugin.onLiveError('ch', 'rate_limit_exceeded')).resolves.toBeUndefined();
+sdk-plugin\test\base-plugin.test.ts:75:    await expect(plugin.onLiveClosed('ch')).resolves.toBeUndefined();
+sdk-plugin\test\base-plugin.test.ts:131:      async onLiveMessage(channel: string, envelope: string): Promise<void> {
+sdk-plugin\test\base-plugin.test.ts:137:    await dispatchPluginHook('onLiveMessage', [
+sdk-plugin\test\base-plugin.test.ts:154:      dispatchPluginHook('onLiveMessage', ['not-json'])
+sdk-plugin\test\base-plugin.test.ts:160:      dispatchPluginHook('onLiveMessage', [JSON.stringify({ channel: 42 })])
+sdk-plugin\test\base-plugin.test.ts:164:  it('dispatcher routes onLiveError + onLiveClosed', async () => {
+sdk-plugin\test\base-plugin.test.ts:171:      async onLiveError(channel: string, code: string): Promise<void> {
+sdk-plugin\test\base-plugin.test.ts:174:      async onLiveClosed(channel: string): Promise<void> {
+sdk-plugin\test\base-plugin.test.ts:180:    await dispatchPluginHook('onLiveError', [
+sdk-plugin\test\base-plugin.test.ts:183:    await dispatchPluginHook('onLiveClosed', [
+sdk-plugin\src\base-plugin.ts:74:  async onLiveMessage(_channel: string, _envelopeBase64: string): Promise<void> {
+sdk-plugin\src\base-plugin.ts:84:  async onLiveError(_channel: string, _code: string): Promise<void> {
+sdk-plugin\src\base-plugin.ts:94:  async onLiveClosed(_channel: string): Promise<void> {
+sdk-plugin\src\index.ts:137:   * the plugin's `onLiveMessage` hook (NOT this handle) — the
+sdk-plugin\src\bridge.ts:11: * `LiveBridge` dispatches `onLiveMessage` / `onLiveError` / `onLiveClosed`
+sdk-plugin\src\bridge.ts:20:  | 'onLiveMessage'
+sdk-plugin\src\bridge.ts:21:  | 'onLiveError'
+sdk-plugin\src\bridge.ts:22:  | 'onLiveClosed';
+sdk-plugin\src\bridge.ts:83:    case 'onLiveMessage': {
+sdk-plugin\src\bridge.ts:87:      const payload = parseLivePayload(args[0], 'onLiveMessage');
+sdk-plugin\src\bridge.ts:88:      return await registeredPlugin.onLiveMessage(
+sdk-plugin\src\bridge.ts:93:    case 'onLiveError': {
+sdk-plugin\src\bridge.ts:95:      const payload = parseLivePayload(args[0], 'onLiveError');
+sdk-plugin\src\bridge.ts:96:      return await registeredPlugin.onLiveError(
+sdk-plugin\src\bridge.ts:101:    case 'onLiveClosed': {
+sdk-plugin\src\bridge.ts:102:      const payload = parseLivePayload(args[0], 'onLiveClosed');
+sdk-plugin\src\bridge.ts:103:      return await registeredPlugin.onLiveClosed(
+sdk-plugin\src\bridge.ts:138:function parseLivePayload(value: unknown, hookName: string): Record<string, unknown> {
+android\plugin-sdk-runtime\src\main\kotlin\app\syncler\plugin\runtime\PluginContext.kt:113:     * onLiveMessage hook (NOT on the handle), per spec.
+server\app\routers\live.py:56:MAX_FRAME_BYTES = 64 * 1024
+server\app\routers\live.py:160:class LivePushRequest(BaseModel):
+server\app\routers\live.py:196:async def push_live(
+server\app\routers\live.py:198:    body: LivePushRequest,
+server\app\routers\live.py:222:    if not _valid_channel_name(body.channel):
+server\app\routers\live.py:237:    # the wire stays under MAX_FRAME_BYTES.
+server\app\routers\live.py:238:    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
+server\app\routers\live.py:370:def _valid_channel_name(name: str) -> bool:
+server\app\routers\live.py:470:            if len(msg) > MAX_FRAME_BYTES:
+server\app\routers\live.py:603:        if not _valid_channel_name(channel):
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:135:        override fun dispatchHook(
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:143:                Timber.tag(TAG).w("dispatchHook token=%d not loaded", sandboxToken)
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\BridgePluginContext.kt:509: * Incoming messages arrive via the plugin's `onLiveMessage`
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\BridgePluginContext.kt:513: * `onLiveMessage` to receive them.
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:25: *   [loadPlugin] / [unload] / [dispatchHook] /
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:223:    suspend fun dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:231:            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:236:            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:458:    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:459:        router.dispatchHook(this, hook, payloadJson, callbackId)
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:34:                "dispatchHook(inbox.changed, {\"v\":1}, cb-1)",
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:64:            webView.calls.none { it.startsWith("dispatchHook(late.hook") },
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:189:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:190:        calls.add("dispatchHook($hook, $payloadJson, $callbackId)")
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:29: * the plugin's `onLiveMessage` hook via [PluginInstance
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:30: * .dispatchHook] — closes V3 #15 step (SDK sugar over
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:93:        // to the plugin's onLiveMessage hook).
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:185:        // onLiveMessage hook via dispatchHook. The hook
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:197:                        // the plugin's onLiveMessage hook
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:224:                        plugin.dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:225:                            "onLiveMessage", payload, channel.name,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:229:                        plugin.dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:230:                            "onLiveError",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:239:                        plugin.dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:240:                            "onLiveClosed",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:75:        instance.dispatchHook("onAction", payloadJson, actionId)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:133:            // Session so the LiveBridge's deviceJwtProvider
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:250:                                    deviceJwtProvider = {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:255:                                                "no Session wired into PluginLoader.android(); live disabled",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:258:                                                "deviceJwtProvider: no Session wired — live channel unusable",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:265:                                        session.currentToken()
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:57:    fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:60:            runCatching { handle.dispatchHook(hook, payloadJson, callbackId) }
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:61:                .onFailure { Timber.tag(TAG).w(it, "dispatchHook threw (token=%d)", handle.sandboxToken) }
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginBridge.kt:136:            // plugin's onLiveMessage hook (V3 #15 wiring).
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:58:    private val deviceJwtProvider: suspend () -> String,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:105:        if (envelope.size > MAX_FRAME_BYTES) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:108:                "envelope size ${envelope.size} > $MAX_FRAME_BYTES",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:154:        val deviceJwt = deviceJwtProvider()
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:312:        const val MAX_FRAME_BYTES: Int = 64 * 1024
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:128:        override fun dispatchHook(
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:135:                Timber.tag(TAG).w("dispatchHook unknown token %d", sandboxToken)
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:256:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:60:                is Event.Hook -> webViewHost.dispatchHook(
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:134:     * Host called `dispatchHook`. Enqueue for the pump unless the
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:144:                "dispatchHook dropped in state %s (token=%d hook=%s)",
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:152:                "dispatchHook channel full (token=%d hook=%s) — dropping",
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:27:     * [dispatchHook] calls are safe to queue. The real readiness
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:41:    fun dispatchHook(hook: String, payloadJson: String, callbackId: String)
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:111:     *   the next `dispatchHook` is safe to queue.
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:229:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\core\network\src\test\kotlin\app\syncler\core\network\SynclerApiTest.kt:81:                override fun currentToken(): String? = token
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:37:        assertEquals("device-bound-token-1", session.currentToken())
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:69:        assertEquals("device-bound-token-1", session.currentToken())
+android\core\network\src\main\kotlin\app\syncler\core\network\EventStreamManager.kt:162:        val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+android\core\network\src\main\kotlin\app\syncler\core\network\AuthTokenProvider.kt:4:    fun currentToken(): String?
+android\core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:43:                val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:64:            val currentToken = session.currentToken()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:65:            if (currentToken != failedToken) {
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:53:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:57:    override fun currentToken(): String? = state.value.token
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+ succeeded in 355ms:
+ab41a5c V3 #14 inbound: three bugs fixed (triad 158)
+ android/feature/plugin-host/build.gradle.kts       |  1 +
+ .../app/syncler/android/pluginhost/PluginLoader.kt | 50 +++++++++-----
+ sdk-plugin/src/base-plugin.ts                      | 35 ++++++++++
+ sdk-plugin/src/bridge.ts                           | 61 ++++++++++++++++-
+ sdk-plugin/test/base-plugin.test.ts                | 77 ++++++++++++++++++++++
+ server/app/routers/live.py                         | 59 +++++++++++++----
+ 6 files changed, 249 insertions(+), 34 deletions(-)
+d6b4d6a (HEAD -> master) docs: integration guide — fold triad 158 bugfix surfaces
+ docs/integration-guide.md | 39 +++++++++++++++++++++++++++------------
+ 1 file changed, 27 insertions(+), 12 deletions(-)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+2026-05-26T21:54:17.850113Z ERROR codex_core::tools::router: error=Exit code: 1
+Wall time: 0.4 seconds
+Output:
+docs\integration-guide.md:40:- **Live channel.** Plugins can open a long-lived authenticated WebSocket via `platform.live.connect(channel)` for sub-second push from the sender to the device + outbound `send` from the device. The host owns the WS lifecycle (heartbeat, reconnect, rate limit, revocation-driven close); the server is a routing pipe — frames carry your V2-encrypted envelopes opaquely. Plugins receive incoming frames via the `onLiveMessage(channel, envelopeBase64)` hook on `BasePlugin`. See §12.
+docs\integration-guide.md:755:The app composition root must pass the host's `Session` into `PluginLoader.android(context, scope, session = ...)` so the bridge's `deviceJwtProvider` resolves to a real device JWT. If `Session` isn't wired, `platform.live.connect(...)` returns `no_session`. The standard Hilt-wired app does this; tests + minimal builds default to the throwing placeholder.
+docs\integration-guide.md:858:  async onLiveMessage(channel: string, envelopeBase64: string) {
+docs\integration-guide.md:867:  async onLiveError(channel: string, code: string) {
+docs\integration-guide.md:873:  async onLiveClosed(channel: string) {
+docs\integration-guide.md:895:- Incoming frames arrive at your `onLiveMessage(channel, envelopeBase64)` hook on `BasePlugin`. The hook is plugin-global — switch on `channel` if you've connected to more than one. Errors and channel-close events arrive at `onLiveError` / `onLiveClosed` respectively.
+docs\plugin-host-multi-process.md:137:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+docs\plugin-host-multi-process.md:301:- **`dispatchHook` `payloadJson`**: capped at 256 KB. Plugins that
+docs\plugin-host-multi-process.md:361:| State | `loadPlugin` (same `pluginId`) | `dispatchHook` | `deliverBridgeResult` | `unloadPlugin` | `querySandboxState` |
+docs\plugin-host-multi-process.md:498:- **Serial queue**: 100 concurrent `dispatchHook` calls from
+sdk-plugin\test\base-plugin.test.ts:73:    await expect(plugin.onLiveMessage('ch', 'b64')).resolves.toBeUndefined();
+sdk-plugin\test\base-plugin.test.ts:74:    await expect(plugin.onLiveError('ch', 'rate_limit_exceeded')).resolves.toBeUndefined();
+sdk-plugin\test\base-plugin.test.ts:75:    await expect(plugin.onLiveClosed('ch')).resolves.toBeUndefined();
+sdk-plugin\test\base-plugin.test.ts:131:      async onLiveMessage(channel: string, envelope: string): Promise<void> {
+sdk-plugin\test\base-plugin.test.ts:137:    await dispatchPluginHook('onLiveMessage', [
+sdk-plugin\test\base-plugin.test.ts:154:      dispatchPluginHook('onLiveMessage', ['not-json'])
+sdk-plugin\test\base-plugin.test.ts:160:      dispatchPluginHook('onLiveMessage', [JSON.stringify({ channel: 42 })])
+sdk-plugin\test\base-plugin.test.ts:164:  it('dispatcher routes onLiveError + onLiveClosed', async () => {
+sdk-plugin\test\base-plugin.test.ts:171:      async onLiveError(channel: string, code: string): Promise<void> {
+sdk-plugin\test\base-plugin.test.ts:174:      async onLiveClosed(channel: string): Promise<void> {
+sdk-plugin\test\base-plugin.test.ts:180:    await dispatchPluginHook('onLiveError', [
+sdk-plugin\test\base-plugin.test.ts:183:    await dispatchPluginHook('onLiveClosed', [
+sdk-plugin\src\base-plugin.ts:74:  async onLiveMessage(_channel: string, _envelopeBase64: string): Promise<void> {
+sdk-plugin\src\base-plugin.ts:84:  async onLiveError(_channel: string, _code: string): Promise<void> {
+sdk-plugin\src\base-plugin.ts:94:  async onLiveClosed(_channel: string): Promise<void> {
+sdk-plugin\src\index.ts:137:   * the plugin's `onLiveMessage` hook (NOT this handle) — the
+sdk-plugin\src\bridge.ts:11: * `LiveBridge` dispatches `onLiveMessage` / `onLiveError` / `onLiveClosed`
+sdk-plugin\src\bridge.ts:20:  | 'onLiveMessage'
+sdk-plugin\src\bridge.ts:21:  | 'onLiveError'
+sdk-plugin\src\bridge.ts:22:  | 'onLiveClosed';
+sdk-plugin\src\bridge.ts:83:    case 'onLiveMessage': {
+sdk-plugin\src\bridge.ts:87:      const payload = parseLivePayload(args[0], 'onLiveMessage');
+sdk-plugin\src\bridge.ts:88:      return await registeredPlugin.onLiveMessage(
+sdk-plugin\src\bridge.ts:93:    case 'onLiveError': {
+sdk-plugin\src\bridge.ts:95:      const payload = parseLivePayload(args[0], 'onLiveError');
+sdk-plugin\src\bridge.ts:96:      return await registeredPlugin.onLiveError(
+sdk-plugin\src\bridge.ts:101:    case 'onLiveClosed': {
+sdk-plugin\src\bridge.ts:102:      const payload = parseLivePayload(args[0], 'onLiveClosed');
+sdk-plugin\src\bridge.ts:103:      return await registeredPlugin.onLiveClosed(
+sdk-plugin\src\bridge.ts:138:function parseLivePayload(value: unknown, hookName: string): Record<string, unknown> {
+android\plugin-sdk-runtime\src\main\kotlin\app\syncler\plugin\runtime\PluginContext.kt:113:     * onLiveMessage hook (NOT on the handle), per spec.
+server\app\routers\live.py:56:MAX_FRAME_BYTES = 64 * 1024
+server\app\routers\live.py:160:class LivePushRequest(BaseModel):
+server\app\routers\live.py:196:async def push_live(
+server\app\routers\live.py:198:    body: LivePushRequest,
+server\app\routers\live.py:222:    if not _valid_channel_name(body.channel):
+server\app\routers\live.py:237:    # the wire stays under MAX_FRAME_BYTES.
+server\app\routers\live.py:238:    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
+server\app\routers\live.py:370:def _valid_channel_name(name: str) -> bool:
+server\app\routers\live.py:470:            if len(msg) > MAX_FRAME_BYTES:
+server\app\routers\live.py:603:        if not _valid_channel_name(channel):
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:135:        override fun dispatchHook(
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:143:                Timber.tag(TAG).w("dispatchHook token=%d not loaded", sandboxToken)
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\BridgePluginContext.kt:509: * Incoming messages arrive via the plugin's `onLiveMessage`
+android\feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\BridgePluginContext.kt:513: * `onLiveMessage` to receive them.
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:25: *   [loadPlugin] / [unload] / [dispatchHook] /
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:223:    suspend fun dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:231:            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:236:            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:458:    suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:459:        router.dispatchHook(this, hook, payloadJson, callbackId)
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:34:                "dispatchHook(inbox.changed, {\"v\":1}, cb-1)",
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:64:            webView.calls.none { it.startsWith("dispatchHook(late.hook") },
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:189:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-sandbox\src\test\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinatorTest.kt:190:        calls.add("dispatchHook($hook, $payloadJson, $callbackId)")
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:29: * the plugin's `onLiveMessage` hook via [PluginInstance
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:30: * .dispatchHook] — closes V3 #15 step (SDK sugar over
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:93:        // to the plugin's onLiveMessage hook).
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:185:        // onLiveMessage hook via dispatchHook. The hook
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:197:                        // the plugin's onLiveMessage hook
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:224:                        plugin.dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:225:                            "onLiveMessage", payload, channel.name,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:229:                        plugin.dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:230:                            "onLiveError",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:239:                        plugin.dispatchHook(
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:240:                            "onLiveClosed",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:75:        instance.dispatchHook("onAction", payloadJson, actionId)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:133:            // Session so the LiveBridge's deviceJwtProvider
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:250:                                    deviceJwtProvider = {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:255:                                                "no Session wired into PluginLoader.android(); live disabled",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:258:                                                "deviceJwtProvider: no Session wired — live channel unusable",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:265:                                        session.currentToken()
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:57:    fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:60:            runCatching { handle.dispatchHook(hook, payloadJson, callbackId) }
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginInstance.kt:61:                .onFailure { Timber.tag(TAG).w(it, "dispatchHook threw (token=%d)", handle.sandboxToken) }
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginBridge.kt:136:            // plugin's onLiveMessage hook (V3 #15 wiring).
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:58:    private val deviceJwtProvider: suspend () -> String,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:105:        if (envelope.size > MAX_FRAME_BYTES) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:108:                "envelope size ${envelope.size} > $MAX_FRAME_BYTES",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:154:        val deviceJwt = deviceJwtProvider()
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:312:        const val MAX_FRAME_BYTES: Int = 64 * 1024
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:128:        override fun dispatchHook(
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:135:                Timber.tag(TAG).w("dispatchHook unknown token %d", sandboxToken)
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:256:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:60:                is Event.Hook -> webViewHost.dispatchHook(
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:134:     * Host called `dispatchHook`. Enqueue for the pump unless the
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:144:                "dispatchHook dropped in state %s (token=%d hook=%s)",
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:152:                "dispatchHook channel full (token=%d hook=%s) — dropping",
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:27:     * [dispatchHook] calls are safe to queue. The real readiness
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginWebViewHost.kt:41:    fun dispatchHook(hook: String, payloadJson: String, callbackId: String)
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:111:     *   the next `dispatchHook` is safe to queue.
+android\feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:229:    override fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {
+android\core\network\src\test\kotlin\app\syncler\core\network\SynclerApiTest.kt:81:                override fun currentToken(): String? = token
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:37:        assertEquals("device-bound-token-1", session.currentToken())
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:69:        assertEquals("device-bound-token-1", session.currentToken())
+android\core\network\src\main\kotlin\app\syncler\core\network\EventStreamManager.kt:162:        val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+android\core\network\src\main\kotlin\app\syncler\core\network\AuthTokenProvider.kt:4:    fun currentToken(): String?
+android\core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:43:                val token = tokenProviders.firstNotNullOfOrNull { it.currentToken() }
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:64:            val currentToken = session.currentToken()
+android\core\auth\src\main\kotlin\app\syncler\core\auth\AuthRepository.kt:65:            if (currentToken != failedToken) {
+android\core\plugin-aidl\src\main\aidl\app\syncler\core\pluginaidl\IPluginSandbox.aidl:53:    oneway void dispatchHook(int sandboxToken, String hook, String payloadJson, String callbackId);
+android\core\auth\src\main\kotlin\app\syncler\core\auth\Session.kt:57:    override fun currentToken(): String? = state.value.token
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+rg: server\pytest-cache-files-5efb56o2: Access is denied. (os error 5)
+rg: server\pytest-cache-files-8df_kv15: Access is denied. (os error 5)
+rg: server\pytest-cache-files-cdbefd61: Access is denied. (os error 5)
+rg: server\pytest-cache-files-fml_3af1: Access is denied. (os error 5)
+rg: server\pytest-cache-files-jwwxrdb0: Access is denied. (os error 5)
+rg: server\pytest-cache-files-kwg_1k_5: Access is denied. (os error 5)
+rg: server\pytest-cache-files-lz6wexoj: Access is denied. (os error 5)
+rg: server\pytest-cache-files-nq97_mnb: Access is denied. (os error 5)
+rg: server\pytest-cache-files-o8_fgyky: Access is denied. (os error 5)
+rg: server\pytest-cache-files-ouv85g96: Access is denied. (os error 5)
+rg: server\pytest-cache-files-svyb4y17: Access is denied. (os error 5)
+rg: server\pytest-cache-files-zt4rnlzh: Access is denied. (os error 5)
+
+codex
+I found only untracked triad notes in the worktree, so I’m treating the reviewed code as the committed state. Next I’m checking the actual frame shape and bridge contracts against both sides.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/routers/live.py | Select-Object -Skip 360 -First 260' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/src/bridge.ts' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/routers/live.py | Select-Object -Skip 150 -First 110' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/capabilities/LiveBridge.kt | Select-Object -Skip 180 -First 80' in D:\Projects\syncler
+ succeeded in 355ms:
+import { BasePlugin } from './base-plugin';
+import { assertPluginManifest, setRegisteredManifest } from './manifest';
+
+/**
+ * Hooks the native host may dispatch into a loaded plugin.
+ *
+ * 'render' returns the HTML string the host should inject into the card view.
+ * The other lifecycle hooks the plugin implements on the BasePlugin subclass.
+ *
+ * V3 #14 live-channel hooks (triad 158 bug 3 + bug 4 FIX): the Android
+ * `LiveBridge` dispatches `onLiveMessage` / `onLiveError` / `onLiveClosed`
+ * per incoming live frame. Prior to triad 158 these dispatches dead-ended
+ * because the bridge here had no case for them.
+ */
+export type DispatchHook =
+  | 'onMessage'
+  | 'onAction'
+  | 'onDismiss'
+  | 'render'
+  | 'onLiveMessage'
+  | 'onLiveError'
+  | 'onLiveClosed';
+
+let registeredPlugin: BasePlugin | undefined;
+
+/**
+ * Registers the plugin instance that should receive native bridge dispatches.
+ *
+ * The in-bundle source manifest cannot know its own bundleHash/signature
+ * (those are produced by `tools/sign-bundle.ts` post-build and stored in
+ * `manifest.signed.json`, not back into the JS source). The host has the
+ * authoritative signed values from the server, so the runtime check here
+ * accepts placeholder values. Publish-side validation (server, sign tool,
+ * SDK helpers) keeps the strict 64/128-hex check.
+ */
+export function registerPlugin(plugin: BasePlugin): void {
+  const manifest = (plugin.constructor as typeof BasePlugin).manifest;
+  assertPluginManifest(manifest, { allowUnsignedPlaceholders: true });
+  registeredPlugin = plugin;
+  setRegisteredManifest(manifest);
+}
+
+/**
+ * Returns the registered plugin instance, if any.
+ */
+export function getRegisteredPlugin(): BasePlugin | undefined {
+  return registeredPlugin;
+}
+
+/**
+ * Clears plugin registration. Intended for tests.
+ *
+ * @internal
+ */
+export function clearRegisteredPlugin(): void {
+  registeredPlugin = undefined;
+  setRegisteredManifest(undefined);
+}
+
+/**
+ * Dispatches a host bridge hook into the registered plugin.
+ */
+export async function dispatchPluginHook(
+  hook: DispatchHook,
+  args: unknown[]
+): Promise<unknown> {
+  if (!registeredPlugin) {
+    throw new Error('No Syncler plugin has been registered');
+  }
+
+  switch (hook) {
+    case 'onMessage':
+      return await registeredPlugin.onMessage(args[0]);
+    case 'onAction':
+      return await registeredPlugin.onAction(
+        asString(args[0], 'actionName'),
+        args[1]
+      );
+    case 'onDismiss':
+      return await registeredPlugin.onDismiss(asString(args[0], 'deviceId'));
+    case 'render':
+      return await registeredPlugin.render(args[0]);
+    case 'onLiveMessage': {
+      // Triad 158 bug 3 FIX: Android dispatches a single JSON
+      // payload `{"channel": "...", "envelope": "<base64>"}`
+      // ‚?" parse + fan out as positional args to the plugin.
+      const payload = parseLivePayload(args[0], 'onLiveMessage');
+      return await registeredPlugin.onLiveMessage(
+        asString(payload.channel, 'channel'),
+        asString(payload.envelope, 'envelope')
+      );
+    }
+    case 'onLiveError': {
+      // Triad 158 bug 4 FIX: same envelope shape (channel + code).
+      const payload = parseLivePayload(args[0], 'onLiveError');
+      return await registeredPlugin.onLiveError(
+        asString(payload.channel, 'channel'),
+        asString(payload.code, 'code')
+      );
+    }
+    case 'onLiveClosed': {
+      const payload = parseLivePayload(args[0], 'onLiveClosed');
+      return await registeredPlugin.onLiveClosed(
+        asString(payload.channel, 'channel')
+      );
+    }
+    default:
+      return assertNever(hook);
+  }
+}
+
+/**
+ * Installs `__syncler_internal_dispatch` on `window`/`globalThis` for the native host.
+ */
+export function installBridgeDispatcher(): void {
+  const dispatch = (hook: DispatchHook, args: unknown[]): Promise<unknown> =>
+    dispatchPluginHook(hook, args);
+  globalThis.__syncler_internal_dispatch = dispatch;
+  if (globalThis.window) {
+    globalThis.window.__syncler_internal_dispatch = dispatch;
+  }
+}
+
+installBridgeDispatcher();
+
+function asString(value: unknown, name: string): string {
+  if (typeof value !== 'string') {
+    throw new TypeError(`${name} must be a string`);
+  }
+  return value;
+}
+
+/**
+ * Triad 158 ‚?" parses the Android-side single-argument JSON
+ * payload for the live-channel hooks. Returns a record of the
+ * extracted fields; callers `asString` the ones they need.
+ */
+function parseLivePayload(value: unknown, hookName: string): Record<string, unknown> {
+  if (typeof value !== 'string') {
+    throw new TypeError(`${hookName} payload must be a JSON string`);
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('not an object');
+    }
+    return parsed as Record<string, unknown>;
+  } catch (err) {
+    throw new TypeError(`${hookName} payload is not valid JSON: ${String(err)}`);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported dispatch hook: ${String(value)}`);
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 419ms:
+    }
+
+    private fun wireIncoming(plugin: PluginInstance, channel: LiveChannel) {
+        // Forward each incoming event to the plugin's
+        // onLiveMessage hook via dispatchHook. The hook
+        // payload carries the channel name + base64'd
+        // envelope bytes so the plugin can open it on its
+        // own side using the V2 envelope helpers.
+        scope.launch {
+            channel.incoming.collect { event ->
+                when (event) {
+                    is ChannelEvent.Message -> {
+                        // V3 #16: card.patch envelopes are
+                        // host-routed (InboxRepository owns
+                        // the InboxItem the patch mutates).
+                        // Other envelope_kinds keep going to
+                        // the plugin's onLiveMessage hook
+                        // unchanged.
+                        val envelopeJson = event.envelopeBytes.toString(Charsets.UTF_8)
+                        val kind = peekEnvelopeKindOrNull(envelopeJson)
+                        if (kind == "card_patch") {
+                            runCatching {
+                                livePatchSink.acceptCardPatch(envelopeJson)
+                            }.onFailure { exc ->
+                                Timber.tag(TAG).w(exc, "card_patch sink threw")
+                                auditLogger.record(
+                                    plugin.manifest.id,
+                                    "live_patch_sink_error",
+                                    channel.name,
+                                )
+                            }
+                            return@collect
+                        }
+                        val payload = JSONObject().apply {
+                            put("channel", channel.name)
+                            put(
+                                "envelope",
+                                android.util.Base64.encodeToString(
+                                    event.envelopeBytes,
+                                    android.util.Base64.NO_WRAP,
+                                ),
+                            )
+                        }.toString()
+                        plugin.dispatchHook(
+                            "onLiveMessage", payload, channel.name,
+                        )
+                    }
+                    is ChannelEvent.Error -> {
+                        plugin.dispatchHook(
+                            "onLiveError",
+                            JSONObject().apply {
+                                put("channel", channel.name)
+                                put("code", event.code)
+                            }.toString(),
+                            channel.name,
+                        )
+                    }
+                    ChannelEvent.Closed -> {
+                        plugin.dispatchHook(
+                            "onLiveClosed",
+                            JSONObject().apply {
+                                put("channel", channel.name)
+                            }.toString(),
+                            channel.name,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // Currently the LiveChannelClient holds channels internally;
+    // exposing a getter would widen its API surface. Walk the
+    // client via the existing openChannel re-call (idempotent ‚?"
+    // returns the cached LiveChannel if already open).
+    private suspend fun clientChannelHandle(
+        client: LiveChannelClient, channelName: String,
+    ): LiveChannel? = runCatching { client.openChannel(channelName) }.getOrNull()
+
+    /**
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 421ms:
+        token=token_str,
+        expires_at_epoch_ms=int(entry.expires_at_epoch_s * 1000),
+        ttl_seconds=int(CONNECT_TOKEN_TTL_SECONDS),
+    )
+
+
+# --- Sender push endpoint (step 4) ---
+
+
+class LivePushRequest(BaseModel):
+    """Sender posts a live update for an active plugin row.
+
+    Triad 158 bug 1 FIX: gained `channel` because the server
+    must wrap the envelope into a multiplex `message` frame
+    before publishing (devices parse by frame.type ‚?" without
+    the wrap, devices dropped pushes silently).
+
+    V0.1 trusts the sender_id in the envelope's signed
+    canonical bytes; V0.2 will add a POST-level Ed25519
+    signature mirroring /v1/messages/send. Until then, the
+    envelope's own recipient_envelopes are the auth boundary
+    ‚?" the server is a routing pipe.
+
+    `channel` matches the WS multiplex channel name the plugin
+    `connect()`'d to. Spec: docs/live-channel.md ?"Outer
+    envelope (all frames)".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: str
+    envelope: dict[str, Any]
+
+
+class LivePushResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivered: int
+
+
+@router.post(
+    "/plugin/{plugin_row_id}/push",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=LivePushResponse,
+)
+async def push_live(
+    plugin_row_id: str,
+    body: LivePushRequest,
+    db: AsyncSession = Depends(get_db),
+) -> LivePushResponse:
+    """Sender ‚+' device fan-out. Posts an opaque V2 envelope to
+    every currently-connected device for this plugin row.
+
+    V0.1: no signature verification on the sender side ‚?" the
+    payload is opaque to the server and the recipient_envelopes
+    are the actual auth boundary. V0.2 adds an Ed25519 signature
+    over the canonical envelope, mirroring `/v1/messages/send`.
+
+    Devices that aren't currently connected do NOT receive a
+    backfill on next connect; the inbox pull is the
+    authoritative catch-up path (spec).
+    """
+    try:
+        plugin_row_uuid = uuid.UUID(plugin_row_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid plugin_row_id")
+
+    # Triad 158 bug 1 FIX: validate channel name against the
+    # same regex the WS endpoint applies to device frames so
+    # invalid pushes are rejected at the API boundary instead
+    # of producing a dead-on-arrival frame.
+    if not _valid_channel_name(body.channel):
+        raise HTTPException(
+            status_code=400, detail="invalid channel name"
+        )
+
+    plugin_result = await db.execute(
+        select(Plugin).where(Plugin.id == plugin_row_uuid)
+    )
+    plugin = plugin_result.scalar_one_or_none()
+    if plugin is None or plugin.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="plugin not found")
+
+    envelope_json = json.dumps(body.envelope, separators=(",", ":"))
+    # Triad 158 bug 1 FIX: cap the inner envelope BEFORE
+    # wrapping ‚?" base64 inflates ~33% so the outer frame on
+    # the wire stays under MAX_FRAME_BYTES.
+    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
+    if len(envelope_json) > inner_cap:
+        raise HTTPException(status_code=413, detail="envelope too large")
+
+    # Triad 158 bug 1 FIX: wrap the V2 envelope in a multiplex
+    # `message` frame so the device's LiveChannelClient
+    # dispatches it by `frame.type == "message"` (spec
+    # docs/live-channel.md ?"Message"). Pre-fix the raw
+    # envelope JSON was published unwrapped and silently
+    # ignored on the device side.
+    import base64 as _b64
+    frame = {
+        "type": "message",
+        "channel": body.channel,
+        "id": uuid.uuid4().hex,
+        "payload": _b64.b64encode(envelope_json.encode()).decode(),
+    }
+    frame_json = json.dumps(frame, separators=(",", ":"))
+
+    # Triad 144 gemini CRITICAL fix: fan out to (user, plugin)
+    # topics only. Each paired user gets the envelope on its
+    # own scoped topic; devices for OTHER paired users (User B
+    # vs User A) never see the frame even at the metadata layer.
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 429ms:
+            if self.violation_started_s is None:
+                self.violation_started_s = now_s
+            elif now_s - self.violation_started_s >= SUSTAINED_VIOLATION_S:
+                return True
+        else:
+            self.violation_started_s = None
+        return False
+
+
+def _valid_channel_name(name: str) -> bool:
+    """Per spec: `^[a-zA-Z0-9._-]+$`, max 64 chars."""
+    if not name or len(name) > MAX_CHANNEL_NAME_LEN:
+        return False
+    return all(
+        c.isalnum() or c in "._-" for c in name
+    )
+
+
+def _build_error_frame(channel: str, frame_id: str | None, code: str) -> str:
+    payload: dict[str, Any] = {"channel": channel, "type": "error", "payload": code}
+    if frame_id is not None:
+        payload["id"] = frame_id
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _build_ack_frame(channel: str, frame_id: str) -> str:
+    return json.dumps(
+        {"channel": channel, "type": "ack", "id": frame_id},
+        separators=(",", ":"),
+    )
+
+
+@router.websocket("/plugin/{plugin_row_id}")
+async def plugin_socket(
+    websocket: WebSocket,
+    plugin_row_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """V3 #14 step 3: device-side WS endpoint.
+
+    Multiplexes channels over a single socket per
+    (device, plugin_row). Sender-pushed frames arrive via the
+    BroadcastHub's ephemeral lane; device-originated frames
+    are validated, rate-limited, and (step 5) forwarded to the
+    sender's webhook.
+
+    Auth: `Sec-WebSocket-Protocol: syncler.v1, bearer.<token>`
+    where token is a short-lived connect token minted by
+    `/v1/live/connect-token` and bound to (user_id, device_id).
+    """
+    bearer = _extract_bearer_from_subprotocol(websocket)
+    if bearer is None:
+        await websocket.close(code=CLOSE_BAD_AUTH)
+        return
+    binding = await redeem_connect_token(bearer)
+    if binding is None:
+        await websocket.close(code=CLOSE_BAD_AUTH)
+        return
+
+    # Parse + validate plugin_row_id.
+    try:
+        plugin_row_uuid = uuid.UUID(plugin_row_id)
+    except ValueError:
+        await websocket.close(code=CLOSE_BAD_AUTH)
+        return
+
+    # Pairing + active-plugin check. Returns the cached
+    # Plugin row so the inbound message handler can look up
+    # the webhook URL without a second DB hit per frame.
+    plugin_for_session = await _verify_plugin_paired_to_user(
+        db, plugin_row_uuid, binding.user_id
+    )
+    if plugin_for_session is None:
+        await websocket.close(code=CLOSE_BAD_AUTH)
+        return
+
+    # Accept the WS with the negotiated subprotocol echoed back.
+    await websocket.accept(subprotocol="syncler.v1")
+
+    state = _SocketState()
+    hub = get_hub()
+    # Triad 144 gemini CRITICAL fix: subscribe to the
+    # (user, plugin) scoped topic only. Even with cross-user
+    # pairings on the same sender, this socket never sees
+    # frames addressed to a different user.
+    push_sub = await hub.subscribe_ephemeral(
+        plugin_topic(str(binding.user_id), plugin_row_id)
+    )
+    revoke_sub = await hub.subscribe_control(pairing_revocation_topic())
+
+    inbound_task: asyncio.Task[Any] | None = None
+    push_task: asyncio.Task[Any] | None = None
+    revoke_task: asyncio.Task[Any] | None = None
+    heartbeat_task: asyncio.Task[Any] | None = None
+    closing = asyncio.Event()
+    close_code = {"value": 1000}
+
+    async def pump_inbound() -> None:
+        """Read frames from the device; validate + audit-log."""
+        while not closing.is_set():
+            try:
+                msg = await websocket.receive_text()
+            except WebSocketDisconnect:
+                closing.set()
+                return
+            # Triad 144 gemini FIX: enforce size + rate-limit
+            # BEFORE any frame parsing so a 10MB malicious
+            # frame doesn't get base64'd / JSON-parsed before
+            # we close the socket.
+            if len(msg) > MAX_FRAME_BYTES:
+                await websocket.send_text(
+                    _build_error_frame("", None, "payload_too_large")
+                )
+                continue
+            now = time.monotonic()
+            if state.consume(len(msg), now):
+                close_code["value"] = CLOSE_RATE_LIMIT_EXCEEDED
+                closing.set()
+                return
+            await _handle_inbound_frame(
+                websocket=websocket,
+                state=state,
+                raw=msg,
+                plugin_row_id=plugin_row_id,
+                plugin=plugin_for_session,
+                binding=binding,
+                db=db,
+            )
+            state.last_pong_s = time.monotonic()  # ANY frame counts
+
+    async def pump_pushes() -> None:
+        """Forward server‚+'device fan-outs from the hub."""
+        async for payload in push_sub.messages():
+            if closing.is_set():
+                break
+            await websocket.send_text(payload)
+
+    async def watch_revocation() -> None:
+        """Listen on the pairing-revocation control topic.
+        Each event is JSON ``{"user_id":..., "device_id":...}``;
+        close if it matches THIS socket's binding."""
+        async for raw in revoke_sub.messages():
+            if closing.is_set():
+                break
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if event.get("user_id") == str(binding.user_id) and (
+                event.get("device_id") in (None, str(binding.device_id))
+            ):
+                close_code["value"] = CLOSE_PAIRING_REVOKED
+                closing.set()
+                return
+
+    async def heartbeat() -> None:
+        """Ping the client every HEARTBEAT_PING_INTERVAL_S; if
+        no inbound frame arrives within HEARTBEAT_PONG_DEADLINE_S,
+        close."""
+        while not closing.is_set():
+            await asyncio.sleep(HEARTBEAT_PING_INTERVAL_S)
+            if closing.is_set():
+                return
+            since = time.monotonic() - state.last_pong_s
+            if since > HEARTBEAT_PONG_DEADLINE_S:
+                close_code["value"] = CLOSE_HEARTBEAT_TIMEOUT
+                closing.set()
+                return
+            try:
+                await websocket.send_text(
+                    json.dumps({"channel": "", "type": "ping"}, separators=(",", ":"))
+                )
+            except Exception:
+                closing.set()
+                return
+
+    try:
+        inbound_task = asyncio.create_task(pump_inbound())
+        push_task = asyncio.create_task(pump_pushes())
+        revoke_task = asyncio.create_task(watch_revocation())
+        heartbeat_task = asyncio.create_task(heartbeat())
+        # Wait until any of the lifecycle paths flips `closing`.
+        await closing.wait()
+    finally:
+        closing.set()
+        for task in (inbound_task, push_task, revoke_task, heartbeat_task):
+            if task is not None:
+                task.cancel()
+        for task in (inbound_task, push_task, revoke_task, heartbeat_task):
+            if task is not None:
+                try:
+                    await task
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
+                except Exception:
+                    logger.exception("live ws task errored")
+        await push_sub.unsubscribe()
+        await revoke_sub.unsubscribe()
+        try:
+            await websocket.close(code=close_code["value"])
+        except Exception:
+            pass
+
+
+async def _handle_inbound_frame(
+    websocket: WebSocket,
+    state: _SocketState,
+    raw: str,
+    plugin_row_id: str,
+    plugin: Plugin,
+    binding: ConnectToken,
+    db: AsyncSession,
+) -> None:
+    """Parse a device‚+'server frame and act on its type:
+
+    - `open` ‚?" register a new channel (cap-checked).
+    - `close` ‚?" release a channel.
+    - `message` ‚?" payload forwarded to sender via the webhook
+      forwarder (triad 144 BOTH FIX ‚?" was ack-only before).
+      Server posts a signed envelope to `plugin.live_inbound_url`
+      with 3 retries; ack on 2xx, error frame back to the
+      device on failure.
+    - `pong` ‚?" just rolls the heartbeat deadline.
+
+    Any unrecognized type or malformed shape sends an `error`
+    frame back."""
+    try:
+        frame = json.loads(raw)
+    except json.JSONDecodeError:
+        await websocket.send_text(_build_error_frame("", None, "invalid_frame"))
+        return
+    if not isinstance(frame, dict):
+        await websocket.send_text(_build_error_frame("", None, "invalid_frame"))
+        return
+    channel = frame.get("channel")
+    ftype = frame.get("type")
+    frame_id = frame.get("id")
+    if not isinstance(channel, str) or not isinstance(ftype, str):
+        await websocket.send_text(_build_error_frame("", None, "invalid_frame"))
+        return
+
+    if ftype == "open":
+        if not _valid_channel_name(channel):
+            await websocket.send_text(
+                _build_error_frame(channel, frame_id, "channel_name_invalid")
+            )
+            return
+        if channel in state.channels:
+            # Idempotent re-open: just ack.
+            await websocket.send_text(
+                json.dumps(
+                    {"channel": channel, "type": "open"},
+                    separators=(",", ":"),
+                )
+            )
+            return
+        if len(state.channels) >= MAX_CHANNELS_PER_SOCKET:
+            await websocket.send_text(
+                _build_error_frame(channel, frame_id, "channel_limit_exceeded")
+            )
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/test/base-plugin.test.ts | Select-Object -Skip 115 -First 85' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/PluginLoader.kt | Select-Object -Skip 100 -First 190' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path sdk-plugin/src/base-plugin.ts | Select-Object -Skip 1 -First 130' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt | Select-Object -Skip 1 -First 360' in D:\Projects\syncler
+ succeeded in 435ms:
+import type { PluginManifest } from './manifest';
+
+/**
+ * Notification returned by `onMessage` for display by the host.
+ */
+export interface NotificationDescriptor {
+  /** Notification title. */
+  title: string;
+  /** Notification body. */
+  body: string;
+  /** Optional host importance value. */
+  importance?: 'low' | 'default' | 'high';
+  /** Optional host grouping key. */
+  groupId?: string;
+}
+
+/**
+ * Dismiss action returned by a custom dismiss callback.
+ */
+export interface DismissAction {
+  /** Dismiss behavior the host should apply after the callback. */
+  behavior: DismissBehavior;
+  /** Optional callback payload returned to the host. */
+  payload?: unknown;
+}
+
+/**
+ * Base class all Syncler plugins extend.
+ */
+export abstract class BasePlugin {
+  /** Manifest for the plugin bundle. Subclasses must provide this static property. */
+  static manifest: PluginManifest;
+
+  /**
+   * Renders card-view HTML for an inbound payload.
+   */
+  abstract render(data: unknown): string | Promise<string>;
+
+  /**
+   * Handles an inbound decrypted message. Defaults to no notification.
+   */
+  async onMessage(
+    _decryptedPayload: unknown
+  ): Promise<NotificationDescriptor | void> {
+    return undefined;
+  }
+
+  /**
+   * Handles a user action emitted by the rendered card. Defaults to no-op.
+   */
+  async onAction(_actionName: string, _payload: unknown): Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * Handles notification dismissal when the manifest uses `CUSTOM_CALLBACK`. Defaults to no-op.
+   */
+  async onDismiss(_deviceId: string): Promise<DismissAction | void> {
+    return undefined;
+  }
+
+  /**
+   * V3 #14 ‚?" fires per inbound live-channel `message` frame
+   * the host received on this plugin row. `envelopeBase64`
+   * is the opaque V2-style envelope sealed for this device;
+   * decode + open it with the V2 helpers in
+   * `@syncler/plugin-sdk`. Override to react; defaults to
+   * no-op so plugins that only use the inbox path don't
+   * need to implement it.
+   *
+   * Spec: docs/live-channel.md "Message" frame.
+   */
+  async onLiveMessage(_channel: string, _envelopeBase64: string): Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * V3 #14 ‚?" fires when the host receives an `error` frame
+   * for a live channel (rate-limit, channel_name_invalid,
+   * etc.). `code` is the error string from the server.
+   * Defaults to no-op; override to surface diagnostics.
+   */
+  async onLiveError(_channel: string, _code: string): Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * V3 #14 ‚?" fires when the host closes a live channel
+   * (either side initiated; not the same as the WebSocket
+   * closing). Override to clear local state; defaults to
+   * no-op.
+   */
+  async onLiveClosed(_channel: string): Promise<void> {
+    return undefined;
+  }
+}
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 448ms:
+      'dismiss boom'
+    );
+  });
+
+  it('dispatcher parses live-channel JSON payload into positional args', async () => {
+    // Triad 158 bug 3 FIX ‚?" Android dispatches the live frame
+    // as a single JSON-string positional arg containing
+    // {channel, envelope}. The bridge parses + fans out as
+    // (channel, envelope) to the plugin's hook.
+    const received: Array<[string, string]> = [];
+    class LiveSubscriberPlugin extends BasePlugin {
+      static manifest = manifestFor('com.example.live-sub');
+      render(): string {
+        return '<div>live</div>';
+      }
+      async onLiveMessage(channel: string, envelope: string): Promise<void> {
+        received.push([channel, envelope]);
+      }
+    }
+    registerPlugin(new LiveSubscriberPlugin());
+
+    await dispatchPluginHook('onLiveMessage', [
+      JSON.stringify({ channel: 'ticker', envelope: 'b64-of-envelope' }),
+    ]);
+    expect(received).toEqual([['ticker', 'b64-of-envelope']]);
+  });
+
+  it('dispatcher rejects malformed live-channel payloads', async () => {
+    class LivePlugin extends BasePlugin {
+      static manifest = manifestFor('com.example.live-bad');
+      render(): string {
+        return '';
+      }
+    }
+    registerPlugin(new LivePlugin());
+
+    // Non-JSON string ‚+' TypeError.
+    await expect(
+      dispatchPluginHook('onLiveMessage', ['not-json'])
+    ).rejects.toThrow(/not valid JSON/);
+
+    // Valid JSON but missing the required string fields ‚+'
+    // asString TypeError downstream.
+    await expect(
+      dispatchPluginHook('onLiveMessage', [JSON.stringify({ channel: 42 })])
+    ).rejects.toThrow(/must be a string/);
+  });
+
+  it('dispatcher routes onLiveError + onLiveClosed', async () => {
+    const events: Array<string> = [];
+    class LiveLifecyclePlugin extends BasePlugin {
+      static manifest = manifestFor('com.example.live-lc');
+      render(): string {
+        return '';
+      }
+      async onLiveError(channel: string, code: string): Promise<void> {
+        events.push(`error:${channel}:${code}`);
+      }
+      async onLiveClosed(channel: string): Promise<void> {
+        events.push(`closed:${channel}`);
+      }
+    }
+    registerPlugin(new LiveLifecyclePlugin());
+
+    await dispatchPluginHook('onLiveError', [
+      JSON.stringify({ channel: 'ticker', code: 'rate_limit_exceeded' }),
+    ]);
+    await dispatchPluginHook('onLiveClosed', [
+      JSON.stringify({ channel: 'ticker' }),
+    ]);
+    expect(events).toEqual([
+      'error:ticker:rate_limit_exceeded',
+      'closed:ticker',
+    ]);
+  });
+
+  it('registerPlugin accepts the unsigned placeholder hash/signature (Phase 5b)', () => {
+    class PlaceholderPlugin extends BasePlugin {
+      static manifest = {
+        id: 'com.example.placeholder',
+        name: 'Placeholder',
+        version: '1.0.0',
+        senderId: 'com.example.sender',
+        // The in-bundle source manifest can't know the bundle's own hash /
+        // signature. sign-bundle.ts produces them post-build into
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 453ms:
+
+import app.syncler.android.pluginhost.AuditLogger
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
+import kotlin.random.Random
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONObject
+import timber.log.Timber
+
+/**
+ * V3 #14 step 9 ‚?" Android-side live-channel WebSocket client.
+ *
+ * One [LiveChannelClient] per (device, plugin_row_id) pair.
+ * Manages:
+ *  - Single OkHttp WebSocket connection
+ *  - Two-step auth (mint connect-token via REST ‚+' open WS with
+ *    `Sec-WebSocket-Protocol: syncler.v1, bearer.<token>`)
+ *  - Channel multiplex via the spec's outer frame envelope
+ *  - Reconnect with jittered exponential backoff
+ *  - Heartbeat tracking (server pings; we just respond to
+ *    "ping" frames with "pong")
+ *
+ * Plugin code interacts via [openChannel] ‚+' [LiveChannel],
+ * which exposes a hot Flow of incoming envelope payloads and
+ * a suspending [LiveChannel.send] for outbound frames.
+ *
+ * Per the spec at `docs/live-channel.md`:
+ *  - Frame payloads are OPAQUE V2-shape envelopes ‚?" this
+ *    class doesn't seal / open them; that's the plugin's job
+ *    via the SDK runtime's V2 envelope helpers.
+ *  - Server delivery is best-effort + ephemeral; the inbox
+ *    pull is the authoritative catch-up path.
+ *  - Plugins targeting CRDT-safe ordering MUST use a separate
+ *    durable channel (V3 #17 work).
+ */
+class LiveChannelClient(
+    private val baseUrl: String,
+    private val pluginRowId: String,
+    private val deviceJwtProvider: suspend () -> String,
+    private val httpClient: OkHttpClient,
+    private val auditLogger: AuditLogger,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+) : AutoCloseable {
+
+    private val channels = ConcurrentHashMap<String, LiveChannel>()
+    private val socketMutex = Mutex()
+    @Volatile
+    private var socket: WebSocket? = null
+    @Volatile
+    private var connectJob: Job? = null
+    private val closed = AtomicBoolean(false)
+
+    /**
+     * Open a channel for [channelName]. Returns a [LiveChannel]
+     * the plugin reads/writes. Suspends until the WS is
+     * connected and the channel-open ack arrives.
+     */
+    suspend fun openChannel(channelName: String): LiveChannel {
+        require(channelName.isNotBlank() && channelName.length <= 64) {
+            "channel name must be 1..64 chars"
+        }
+        val existing = channels[channelName]
+        if (existing != null) return existing
+
+        ensureConnected()
+
+        val channel = LiveChannel(channelName, this)
+        channels[channelName] = channel
+        val deferred = CompletableDeferred<Unit>()
+        channel._openDeferred = deferred
+        sendFrame(JSONObject().apply {
+            put("channel", channelName)
+            put("type", "open")
+        }.toString())
+        deferred.await()
+        return channel
+    }
+
+    /** Called by [LiveChannel.send]. */
+    internal suspend fun sendMessageFrame(channelName: String, envelope: ByteArray) {
+        // Triad 144 BOTH FIX: client-side 64 KB frame cap. The
+        // server enforces this too (closing 4429 on sustained
+        // violation) but failing fast in the client avoids the
+        // base64+JSON encode work and gives the plugin a clean
+        // error before any bytes leave the device.
+        if (envelope.size > MAX_FRAME_BYTES) {
+            throw LiveChannelException(
+                "payload_too_large",
+                "envelope size ${envelope.size} > $MAX_FRAME_BYTES",
+            )
+        }
+        ensureConnected()
+        val payloadB64 = android.util.Base64.encodeToString(
+            envelope, android.util.Base64.NO_WRAP,
+        )
+        val frameId = java.util.UUID.randomUUID().toString().substring(0, 8)
+        val frame = JSONObject().apply {
+            put("channel", channelName)
+            put("type", "message")
+            put("id", frameId)
+            put("payload", payloadB64)
+        }.toString()
+        sendFrame(frame)
+    }
+
+    /** Called by [LiveChannel.close]. */
+    internal suspend fun sendCloseFrame(channelName: String) {
+        val s = socket ?: return
+        val frame = JSONObject().apply {
+            put("channel", channelName)
+            put("type", "close")
+        }.toString()
+        s.send(frame)
+        channels.remove(channelName)
+    }
+
+    private suspend fun sendFrame(frame: String) {
+        val s = socket
+        if (s == null) {
+            Timber.tag(TAG).w("sendFrame with no socket")
+            return
+        }
+        s.send(frame)
+    }
+
+    private suspend fun ensureConnected(): Unit = socketMutex.withLock {
+        if (socket != null) return
+        if (closed.get()) error("LiveChannelClient is closed")
+        connectInternal()
+    }
+
+    private suspend fun connectInternal() {
+        // Step 1 of the two-step handshake ‚?" mint the connect
+        // token via the standard REST surface.
+        val deviceJwt = deviceJwtProvider()
+        val mintReq = Request.Builder()
+            .url("$baseUrl/v1/live/connect-token")
+            .header("Authorization", "Bearer $deviceJwt")
+            .post(okhttp3.RequestBody.create(null, ByteArray(0)))
+            .build()
+        val tokenJson = withCallSafe {
+            httpClient.newCall(mintReq).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    throw LiveChannelException(
+                        "mint_token_failed_${resp.code}",
+                        "connect-token mint failed: HTTP ${resp.code}",
+                    )
+                }
+                resp.body?.string() ?: throw LiveChannelException(
+                    "mint_token_empty", "connect-token response empty",
+                )
+            }
+        }
+        val connectToken = JSONObject(tokenJson).getString("token")
+
+        // Step 2 ‚?" open the WS with the connect token.
+        val wsUrl = baseUrl
+            .replaceFirst("https://", "wss://")
+            .replaceFirst("http://", "ws://")
+            .trimEnd('/') + "/v1/live/plugin/$pluginRowId"
+        val wsReq = Request.Builder()
+            .url(wsUrl)
+            .header("Sec-WebSocket-Protocol", "syncler.v1, bearer.$connectToken")
+            .build()
+
+        val ready = CompletableDeferred<Unit>()
+        val listener = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Timber.tag(TAG).i("ws open %s", pluginRowId)
+                socket = webSocket
+                ready.complete(Unit)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                scope.launch { handleIncomingFrame(text) }
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                // Spec frames are text; ignore binary for V0.1.
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Timber.tag(TAG).w("ws closing code=%d reason=%s", code, reason)
+                webSocket.close(code, reason)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Timber.tag(TAG).w("ws closed code=%d", code)
+                socket = null
+                if (!closed.get()) {
+                    scheduleReconnect()
+                }
+            }
+
+            override fun onFailure(
+                webSocket: WebSocket, t: Throwable, response: Response?,
+            ) {
+                Timber.tag(TAG).w(t, "ws failure")
+                socket = null
+                if (!ready.isCompleted) {
+                    ready.completeExceptionally(
+                        LiveChannelException("ws_failure", t.message ?: ""),
+                    )
+                }
+                if (!closed.get()) {
+                    scheduleReconnect()
+                }
+            }
+        }
+        httpClient.newWebSocket(wsReq, listener)
+        ready.await()
+    }
+
+    private fun scheduleReconnect() {
+        // Jittered exponential backoff per spec
+        // ("client SDK uses jittered exponential backoff
+        //  starting at 2s, max 30s").
+        if (closed.get()) return
+        connectJob?.cancel()
+        connectJob = scope.launch {
+            var attempt = 0
+            while (!closed.get() && socket == null) {
+                val baseSec = min(30.0, 2.0 * Math.pow(2.0, attempt.toDouble())).toInt()
+                val jitter = Random.nextDouble(0.0, baseSec * 0.3)
+                delay(((baseSec + jitter) * 1000).toLong())
+                attempt++
+                runCatching { socketMutex.withLock { if (socket == null) connectInternal() } }
+                    .onFailure { Timber.tag(TAG).w(it, "reconnect attempt %d failed", attempt) }
+            }
+        }
+    }
+
+    private fun handleIncomingFrame(raw: String) {
+        val frame = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val type = frame.optString("type")
+        val channelName = frame.optString("channel")
+        when (type) {
+            "open" -> channels[channelName]?._openDeferred?.complete(Unit)
+            "close" -> {
+                channels.remove(channelName)?._incoming?.tryEmit(ChannelEvent.Closed)
+            }
+            "message" -> {
+                val payload = frame.optString("payload", "")
+                if (payload.isNotEmpty()) {
+                    val bytes = runCatching {
+                        android.util.Base64.decode(payload, android.util.Base64.NO_WRAP)
+                    }.getOrNull() ?: return
+                    channels[channelName]?._incoming?.tryEmit(ChannelEvent.Message(bytes))
+                }
+            }
+            "ack" -> {
+                // V0.1: noop ‚?" we don't track per-frame acks at
+                // the client level. SDK-side `await` on send is
+                // a v0.2 follow-up.
+            }
+            "error" -> {
+                val code = frame.optString("payload", "unknown")
+                auditLogger.record(pluginRowId, "live_error_$code", channelName)
+                channels[channelName]?._incoming?.tryEmit(ChannelEvent.Error(code))
+            }
+            "ping" -> {
+                socket?.send(
+                    JSONObject().apply {
+                        put("channel", "")
+                        put("type", "pong")
+                    }.toString(),
+                )
+            }
+            "pong" -> Unit
+            else -> Timber.tag(TAG).w("unknown frame type: %s", type)
+        }
+    }
+
+    override fun close() {
+        if (closed.getAndSet(true)) return
+        connectJob?.cancel()
+        socket?.close(1000, "client_close")
+        socket = null
+        scope.cancel()
+    }
+
+    private inline fun <T> withCallSafe(block: () -> T): T = try {
+        block()
+    } catch (exc: LiveChannelException) {
+        throw exc
+    } catch (exc: Throwable) {
+        throw LiveChannelException("network_error", exc.message ?: "")
+    }
+
+    companion object {
+        private const val TAG = "LiveChannelClient"
+        /** Spec docs/live-channel.md "Wire contract": 64 KB. */
+        const val MAX_FRAME_BYTES: Int = 64 * 1024
+    }
+}
+
+/**
+ * Plugin-facing channel handle. Hot SharedFlow of inbound
+ * events; suspending [send] for outbound; [close] removes
+ * the channel from the multiplex.
+ */
+class LiveChannel internal constructor(
+    val name: String,
+    private val client: LiveChannelClient,
+) {
+    internal val _incoming = MutableSharedFlow<ChannelEvent>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+    val incoming: SharedFlow<ChannelEvent> = _incoming.asSharedFlow()
+
+    internal var _openDeferred: CompletableDeferred<Unit>? = null
+
+    suspend fun send(envelope: ByteArray) {
+        client.sendMessageFrame(name, envelope)
+    }
+
+    suspend fun close() {
+        client.sendCloseFrame(name)
+    }
+}
+
+sealed class ChannelEvent {
+    data class Message(val envelopeBytes: ByteArray) : ChannelEvent()
+    data class Error(val code: String) : ChannelEvent()
+    object Closed : ChannelEvent()
+}
+
+class LiveChannelException(val code: String, message: String) : RuntimeException(message)
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 462ms:
+        // LAN/dev box without TLS. Release builds require HTTPS unconditionally.
+        require(url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))) {
+            "plugin URLs must use HTTPS (got $url)"
+        }
+    }
+
+    companion object {
+        private val defaultMoshi: Moshi = Moshi.Builder()
+            .add(KotlinJsonAdapterFactory())
+            .build()
+
+        private fun buildPluginHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .connectionSpecs(
+                if (BuildConfig.DEBUG) {
+                    listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT)
+                } else {
+                    listOf(ConnectionSpec.MODERN_TLS)
+                },
+            )
+            .build()
+
+        fun android(
+            context: Context,
+            scope: CoroutineScope,
+            // V3 #16: opt-in sink for incoming card.patch
+            // frames on the live channel. The app composition
+            // root passes InboxRepository::applyLivePatch
+            // here; tests / minimal builds use NoOp.
+            livePatchSink: app.syncler.core.network.LivePatchSink =
+                app.syncler.core.network.LivePatchSink.NoOp,
+            // Triad 158 bug 2 FIX: take the host's existing
+            // Session so the LiveBridge's deviceJwtProvider
+            // resolves to the real device JWT instead of the
+            // throwing placeholder. Optional with a default
+            // of null so headless / minimal builds (and
+            // tests) keep working ‚?" the placeholder behavior
+            // is preserved only when no Session is wired.
+            session: app.syncler.core.auth.Session? = null,
+        ): PluginLoader {
+            val appContext = context.applicationContext
+            val auditLogger = AuditLogger(appContext)
+            // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
+            // ‚?" neither permits cleartext, so http:// URLs fail at the
+            // connection layer even when requireHttps() lets them through
+            // for debug builds. Mirror NetworkBridge / InboxRepository:
+            // release stays HTTPS-only; debug allows LAN HTTP for dev boxes.
+            val networkBridge = NetworkBridge(buildPluginHttpClient(), auditLogger)
+            val sandboxConnection = PluginSandboxConnection(appContext)
+            val bridgeDispatcher = SandboxBridgeDispatcher()
+            // Phase 11: native Kotlin plugin connection is API 29+
+            // (bindIsolatedService instanceName overload). On older
+            // devices the router rejects native_kotlin loads at runtime
+            // with `native_only_api_29`.
+            val nativeConnection = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                NativePluginSandboxConnection(appContext)
+            } else {
+                null
+            }
+            val sandboxRouter = SandboxRouter(
+                connection = sandboxConnection,
+                bridgeDispatcher = bridgeDispatcher,
+                nativeConnection = nativeConnection,
+            )
+            // Phase 12: capability infrastructure. The CapabilityActivityCoordinator
+            // requires an Application; if context isn't one, fall back to a
+            // null coordinator and the bridges will fail with no_foreground_activity
+            // at call time. (Service-style contexts are an edge case in v0.1.)
+            // Triad 143 C4 FIX: use the process-singleton so
+            // Settings-side revokes invalidate the bridges'
+            // cache too. Previously this call site and the
+            // Settings VM constructed independent instances
+            // with independent caches.
+            val capGrantStore = app.syncler.android.pluginhost.capabilities.CapabilityGrantStore.shared(appContext)
+            val capHandleStore = app.syncler.android.pluginhost.capabilities.CapabilityHandleStore(appContext)
+            val capPrompter = app.syncler.android.pluginhost.capabilities.CapabilityGrantPrompter()
+            val capCoordinator = (appContext as? android.app.Application)?.let {
+                app.syncler.android.pluginhost.capabilities.CapabilityActivityCoordinator(it).also { c -> c.attach() }
+            }
+            val capAuditDao = capGrantStore.auditDaoForTest()
+            // Phase 12: app-start handle wipe so any orphan
+            // staging files from a previous process death don't
+            // linger. Idempotent + cheap.
+            capHandleStore.wipeAll()
+
+            return PluginLoader(
+                httpClient = buildPluginHttpClient(),
+                verifier = PluginSignatureVerifier(auditLogger),
+                permissionReader = PluginPermissionStore(appContext)::grantedCapabilities,
+                bundleStore = AndroidEncryptedBundleStore(appContext),
+                instanceFactory = SandboxedPluginInstanceFactory(
+                    scope = scope,
+                    auditLogger = auditLogger,
+                    sandboxRouter = sandboxRouter,
+                    bridgeDispatcher = bridgeDispatcher,
+                    networkBridge = networkBridge,
+                    storageBridge = StorageBridge(appContext, auditLogger),
+                    notificationBridge = NotificationBridge(appContext),
+                    cameraBridge = CameraBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        handleStore = capHandleStore,
+                        auditLogger = capAuditDao,
+                    ),
+                    galleryBridge = GalleryBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        handleStore = capHandleStore,
+                        auditLogger = capAuditDao,
+                    ),
+                    fileBridge = FileBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        handleStore = capHandleStore,
+                        auditLogger = capAuditDao,
+                    ),
+                    locationBridge = LocationBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        prompter = capPrompter,
+                        auditLogger = capAuditDao,
+                    ),
+                    messageBridge = MessageBridge(auditLogger),
+                    capabilityHandleStore = capHandleStore,
+                    liveBridge = app.syncler.android.pluginhost.capabilities.LiveBridge(
+                        clientFactory = object : app.syncler.android.pluginhost.capabilities.LiveChannelClientFactory {
+                            override fun build(
+                                plugin: app.syncler.android.pluginhost.PluginInstance,
+                            ): app.syncler.android.pluginhost.live.LiveChannelClient {
+                                // Triad 144 codex FIX: route by the
+                                // server row UUID, NOT manifest.id.
+                                // PluginInstance carries the UUID
+                                // separately from V3 #14 onward.
+                                require(plugin.pluginRowId.isNotEmpty()) {
+                                    "live channel requires pluginRowId on PluginInstance"
+                                }
+                                // Triad 158 bug 2 FIX: real device-JWT
+                                // provider now resolves through the
+                                // host's Session. When no session is
+                                // wired (test / headless build), keep
+                                // the loud placeholder so the wiring
+                                // gap can't slip past in production.
+                                return app.syncler.android.pluginhost.live.LiveChannelClient(
+                                    baseUrl = "https://syncler.local",
+                                    pluginRowId = plugin.pluginRowId,
+                                    deviceJwtProvider = {
+                                        if (session == null) {
+                                            auditLogger.record(
+                                                plugin.manifest.id,
+                                                "live_no_session",
+                                                "no Session wired into PluginLoader.android(); live disabled",
+                                            )
+                                            timber.log.Timber.tag("LiveBridge").e(
+                                                "deviceJwtProvider: no Session wired ‚?" live channel unusable",
+                                            )
+                                            throw app.syncler.android.pluginhost.live.LiveChannelException(
+                                                "no_session",
+                                                "session not wired into PluginLoader.android()",
+                                            )
+                                        }
+                                        session.currentToken()
+                                            ?: throw app.syncler.android.pluginhost.live.LiveChannelException(
+                                                "no_session",
+                                                "no device JWT available (locked / signed out)",
+                                            )
+                                    },
+                                    httpClient = buildPluginHttpClient(),
+                                    auditLogger = auditLogger,
+                                )
+                            }
+                        },
+                        auditLogger = auditLogger,
+                        livePatchSink = livePatchSink,
+                    ),
+                ),
+                auditLogger = auditLogger,
+            )
+        }
+    }
+}
+
+interface PluginBundleStore {
+    fun write(pluginId: String, bundleBytes: ByteArray): File
+}
+
+class AndroidEncryptedBundleStore(context: Context) : PluginBundleStore {
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content -Path server/app/routers/live.py | Select-Object -Skip 245 -First 70' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "BASE_URL|baseUrl|syncler.local|PluginLoader.android" android/feature/plugin-host android/app android -g "*.kt"' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"PluginLoader\\.android\\(|android\\(.*session|session =\" android -g \"*.kt\"" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "MAX_CHANNEL_NAME_LEN|MAX_FRAME_BYTES|payload_too_large|payload" docs/live-channel.md server/app/routers/live.py android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt' in D:\Projects\syncler
+ succeeded in 300ms:
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:43: * which exposes a hot Flow of incoming envelope payloads and
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:47: *  - Frame payloads are OPAQUE V2-shape envelopes — this
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:105:        if (envelope.size > MAX_FRAME_BYTES) {
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:107:                "payload_too_large",
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:108:                "envelope size ${envelope.size} > $MAX_FRAME_BYTES",
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:112:        val payloadB64 = android.util.Base64.encodeToString(
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:120:            put("payload", payloadB64)
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:262:                val payload = frame.optString("payload", "")
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:263:                if (payload.isNotEmpty()) {
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:265:                        android.util.Base64.decode(payload, android.util.Base64.NO_WRAP)
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:276:                val code = frame.optString("payload", "unknown")
+android/feature/plugin-host/src/main/kotlin/app/syncler/android/pluginhost/live/LiveChannelClient.kt:312:        const val MAX_FRAME_BYTES: Int = 64 * 1024
+docs/live-channel.md:26:  routing pipe with no payload access.
+docs/live-channel.md:79:  "payload": "..."
+docs/live-channel.md:89:- `payload` — frame-type-specific.
+docs/live-channel.md:123:  "payload": "<base64 V2-style envelope bytes>"
+docs/live-channel.md:127:`payload` is OPAQUE to the server. For sender → device
+docs/live-channel.md:156:  "payload": "<error_code>"
+docs/live-channel.md:168:- `payload_too_large`
+docs/live-channel.md:363:  impl. Privacy invariant: patch payloads MUST use V2-style
+server/app/routers/live.py:56:MAX_FRAME_BYTES = 64 * 1024
+server/app/routers/live.py:58:MAX_CHANNEL_NAME_LEN = 64
+server/app/routers/live.py:205:    payload is opaque to the server and the recipient_envelopes
+server/app/routers/live.py:237:    # the wire stays under MAX_FRAME_BYTES.
+server/app/routers/live.py:238:    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
+server/app/routers/live.py:253:        "payload": _b64.b64encode(envelope_json.encode()).decode(),
+server/app/routers/live.py:372:    if not name or len(name) > MAX_CHANNEL_NAME_LEN:
+server/app/routers/live.py:380:    payload: dict[str, Any] = {"channel": channel, "type": "error", "payload": code}
+server/app/routers/live.py:382:        payload["id"] = frame_id
+server/app/routers/live.py:383:    return json.dumps(payload, separators=(",", ":"))
+server/app/routers/live.py:470:            if len(msg) > MAX_FRAME_BYTES:
+server/app/routers/live.py:472:                    _build_error_frame("", None, "payload_too_large")
+server/app/routers/live.py:493:        async for payload in push_sub.messages():
+server/app/routers/live.py:496:            await websocket.send_text(payload)
+server/app/routers/live.py:578:    - `message` — payload forwarded to sender via the webhook
+server/app/routers/live.py:653:        # The frame's `payload` is opaque bytes (an already-
+server/app/routers/live.py:659:        payload_str = frame.get("payload")
+server/app/routers/live.py:660:        if not isinstance(payload_str, str):
+server/app/routers/live.py:688:            envelope_json=payload_str,
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 307ms:
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:27:        val session = Session(tokenStore)
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:50:        val session = Session(tokenStore)
+android\core\auth\src\test\kotlin\app\syncler\core\auth\AuthRepositoryTest.kt:77:        val session = Session(tokenStore)
+android\feature\settings\src\main\kotlin\app\syncler\feature\settings\PluginPermissionsCard.kt:91:    // also observe. Previously this VM and PluginLoader.android()
+android\core\auth\src\test\kotlin\app\syncler\core\auth\RotationRepositoryTest.kt:303:        val session = Session(tokenStore)
+android\core\auth\src\test\kotlin\app\syncler\core\auth\RotationRepositoryTest.kt:308:            session = session,
+android\core\auth\src\test\kotlin\app\syncler\core\auth\SessionTest.kt:22:        val session = Session(tokenStore)
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\UserStateRepositoryPushTest.kt:52:        val session = unlockedSession()
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\UserStateRepositoryPushTest.kt:78:        val session = unlockedSession()
+android\feature\inbox\src\test\kotlin\app\syncler\feature\inbox\UserStateRepositoryPushTest.kt:103:        val session = Session(store)
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:251:                                        if (session == null) {
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:255:                                                "no Session wired into PluginLoader.android(); live disabled",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:262:                                                "session not wired into PluginLoader.android()",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\CapabilityGrantStore.kt:136:         * holder. Settings UI and PluginLoader.android() both
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:35: * from PluginLoader.android().
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 309ms:
+android\core\network\src\test\kotlin\app\syncler\core\network\SynclerApiTest.kt:86:            .baseUrl(server.url("/"))
+android\core\network\src\test\kotlin\app\syncler\core\network\BrokerApiTest.kt:44:            .baseUrl(server.url("/"))
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:248:                                    baseUrl = "https://syncler.local",
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:255:                                                "no Session wired into PluginLoader.android(); live disabled",
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:262:                                                "session not wired into PluginLoader.android()",
+android\core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:77:        // SERVER_BASE_URL at http://10.0.2.2:8000/ (or a LAN IP), so we need
+android\core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:96:            .baseUrl(BuildConfig.SERVER_BASE_URL)
+android\core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:137:            .baseUrl("http://placeholder/")
+android\core\network\src\main\kotlin\app\syncler\core\network\EventStreamManager.kt:168:            .url(BuildConfig.SERVER_BASE_URL.trimEnd('/') + "/v1/events")
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:56:    private val baseUrl: String,
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:156:            .url("$baseUrl/v1/live/connect-token")
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:176:        val wsUrl = baseUrl
+android\feature\settings\src\main\kotlin\app\syncler\feature\settings\PluginPermissionsCard.kt:91:    // also observe. Previously this VM and PluginLoader.android()
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\CapabilityGrantStore.kt:136:         * holder. Settings UI and PluginLoader.android() both
+android/feature/plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:35: * from PluginLoader.android().
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:248:                                    baseUrl = "https://syncler.local",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:255:                                                "no Session wired into PluginLoader.android(); live disabled",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:262:                                                "session not wired into PluginLoader.android()",
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:56:    private val baseUrl: String,
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:156:            .url("$baseUrl/v1/live/connect-token")
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\live\LiveChannelClient.kt:176:        val wsUrl = baseUrl
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\CapabilityGrantStore.kt:136:         * holder. Settings UI and PluginLoader.android() both
+android\feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:35: * from PluginLoader.android().
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 385ms:
+    # envelope JSON was published unwrapped and silently
+    # ignored on the device side.
+    import base64 as _b64
+    frame = {
+        "type": "message",
+        "channel": body.channel,
+        "id": uuid.uuid4().hex,
+        "payload": _b64.b64encode(envelope_json.encode()).decode(),
+    }
+    frame_json = json.dumps(frame, separators=(",", ":"))
+
+    # Triad 144 gemini CRITICAL fix: fan out to (user, plugin)
+    # topics only. Each paired user gets the envelope on its
+    # own scoped topic; devices for OTHER paired users (User B
+    # vs User A) never see the frame even at the metadata layer.
+    paired_result = await db.execute(
+        select(Pairing).where(
+            Pairing.sender_id == plugin.sender_id,
+            Pairing.revoked_at.is_(None),
+        )
+    )
+    paired_user_ids = [p.user_id for p in paired_result.scalars().all()]
+    hub = get_hub()
+    delivered = 0
+    for user_id in paired_user_ids:
+        delivered += await hub.publish_ephemeral(
+            plugin_topic(str(user_id), plugin_row_id), frame_json
+        )
+    return LivePushResponse(delivered=delivered)
+
+
+# --- WS multiplex endpoint ---
+
+
+def _extract_bearer_from_subprotocol(websocket: WebSocket) -> str | None:
+    """Parse `Sec-WebSocket-Protocol: syncler.v1, bearer.<token>`
+    from the WS request and return the token bytes. Returns
+    None if missing/malformed."""
+    raw = websocket.headers.get("sec-websocket-protocol")
+    if raw is None:
+        return None
+    # Header is comma-separated subprotocols. We expect at least
+    # one starting with `bearer.`.
+    for part in raw.split(","):
+        token = part.strip()
+        if token.startswith("bearer."):
+            return token[len("bearer."):]
+    return None
+
+
+async def _verify_plugin_paired_to_user(
+    db: AsyncSession, plugin_row_id: uuid.UUID, user_id: uuid.UUID
+) -> Plugin | None:
+    """Confirm the plugin row is active AND its sender is
+    currently paired with [user_id]. The pairing join is the
+    same shape the inbox routes use; revocation flips
+    pairings.revoked_at and the join falls through.
+
+    Returns the validated Plugin row on success (callers
+    cache it for webhook URL lookups), or None on any failure.
+    """
+    plugin_result = await db.execute(
+        select(Plugin).where(Plugin.id == plugin_row_id)
+    )
+    plugin = plugin_result.scalar_one_or_none()
+    if plugin is None or plugin.revoked_at is not None:
+        return None
+    pairing_result = await db.execute(
+        select(Pairing).where(
+            Pairing.user_id == user_id,
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+codex
+One substantive issue is emerging outside the four listed fixes: the Android factory still constructs the live client with a literal `https://syncler.local`, while the rest of the app appears to use `BuildConfig.SERVER_BASE_URL`. I’m checking whether that is test-only or actually the production composition path before I classify it.
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'rg -n "inner_cap|push_live|publish_ephemeral|LivePushRequest|test_v3_14|live" server/tests server/app -g "*.py"' in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"PluginLoader\\.|PluginLoader\\(|pluginLoader|loadPlugin|SERVER_BASE_URL|BuildConfig.SERVER_BASE_URL|Provides.*PluginLoader|@Provides\" android/app android/feature android/core -g \"*.kt\"" in D:\Projects\syncler
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$frame = @{type='"'message';channel=('a'*64);id=('b'*32);payload=''} | ConvertTo-Json -Compress; "'$frame.Length; $frame' in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$frame = @{type='"'message';channel=('a'*64);id=('b'*32);payload=''} | ConvertTo-Json -Compress; "'$frame.Length; $frame'` rejected: blocked by policy
+2026-05-26T21:54:50.321345Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$frame = @{type='"'message';channel=('a'*64);id=('b'*32);payload=''} | ConvertTo-Json -Compress; "'$frame.Length; $frame'` rejected: blocked by policy
+ succeeded in 310ms:
+android/core\storage\src\main\kotlin\app\syncler\core\storage\SecurePrefs.kt:52:    @Provides
+android/core\storage\src\main\kotlin\app\syncler\core\storage\LocalDb.kt:41:    @Provides
+android/feature\plugin-host\src\test\kotlin\app\syncler\android\pluginhost\PluginLoaderTest.kt:77:    private fun loader(): PluginLoader = PluginLoader(
+android/feature\settings\src\main\kotlin\app\syncler\feature\settings\SecurityPrefs.kt:75:    @Provides
+android/feature\settings\src\main\kotlin\app\syncler\feature\settings\PluginPermissionsCard.kt:91:    // also observe. Previously this VM and PluginLoader.android()
+android/core\network\src\main\kotlin\app\syncler\core\network\EventStreamManager.kt:168:            .url(BuildConfig.SERVER_BASE_URL.trimEnd('/') + "/v1/events")
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:27:    @Provides
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:31:    @Provides
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:69:    @Provides
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:77:        // SERVER_BASE_URL at http://10.0.2.2:8000/ (or a LAN IP), so we need
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:92:    @Provides
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:96:            .baseUrl(BuildConfig.SERVER_BASE_URL)
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:101:    @Provides
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:117:    @Provides
+android/core\network\src\main\kotlin\app\syncler\core\network\NetworkModule.kt:131:    @Provides
+android/feature\inbox\src\main\kotlin\app\syncler\feature\inbox\InboxRepository.kt:62:        // can host bundles on a LAN box. Matches PluginLoader.requireHttps.
+android/feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStatePrefs.kt:65:     * explicit @Provides because it doesn't honor Kotlin default values
+android/feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStatePrefs.kt:68:    @Provides
+android/feature\inbox\src\main\kotlin\app\syncler\feature\inbox\UserStatePrefs.kt:72:    @Provides
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:63:        override fun loadPlugin(
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:83:            // table's "loadPlugin while loading" row.
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:86:                    "loadPlugin token=%d already in state %s",
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:113:        override fun unloadPlugin(sandboxToken: Int) {
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxService.kt:116:                Timber.tag(TAG).w("unloadPlugin unknown token %d", sandboxToken)
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxState.kt:21:     * Host called `unloadPlugin` and sandbox is mid-teardown. Will
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxState.kt:43: * `IllegalStateException` over Binder on `loadPlugin`. See
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:24: * Lifecycle: created on [loadPlugin], destroyed on [unload] OR
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\PluginTokenCoordinator.kt:71:     * Kick off the WebView load. Caller is the AIDL `loadPlugin`
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:263:    /** Hardening — matches `PluginLoader.harden` byte-for-byte. */
+android/feature\plugin-sandbox\src\main\kotlin\app\syncler\feature\pluginsandbox\RealPluginWebViewHost.kt:345: * produces one [RealPluginWebViewHost] per `loadPlugin` call,
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:38:class PluginLoader(
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:186:            return PluginLoader(
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:255:                                                "no Session wired into PluginLoader.android(); live disabled",
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:262:                                                "session not wired into PluginLoader.android()",
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:336: * [SandboxRouter] to fire the AIDL `loadPlugin`. The returned
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:423:            sandboxRouter.loadPlugin(parcel)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginLoader.kt:454:     * Also skips the AIDL `unloadPlugin` round-trip — the
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\CapabilityGrantStore.kt:136:         * holder. Settings UI and PluginLoader.android() both
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\PluginRegistry.kt:18:     * coordinator gets the AIDL `unloadPlugin` call. Use this
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:75:    fun loadPlugin_blankPluginId_throwsParcelMalformed() {
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:84:            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:90:    fun loadPlugin_oversizeDiagnostic_throwsDiagnosticFieldOversize() {
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:100:            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:106:    fun loadPlugin_hashMismatch_throwsBundleHashMismatch() {
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:115:            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:121:    fun loadPlugin_unsupportedRenderer_throwsUnsupportedRenderer() {
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:132:            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:138:    fun loadPlugin_thenUnload_firesOnPluginUnloadedAcrossProcesses() {
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:149:        val returnedToken = sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:158:        sandbox.unloadPlugin(token)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:170:    fun loadPlugin_sameTokenTwice_throwsConcurrentLoadInProgress() {
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:180:        sandbox.loadPlugin(first, firstCallback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:186:                sandbox.loadPlugin(second, secondCallback, /* bundleFd = */ null)
+android/feature\plugin-sandbox\src\androidTest\kotlin\app\syncler\feature\pluginsandbox\PluginSandboxServiceTest.kt:190:            sandbox.unloadPlugin(token)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:25: *   [loadPlugin] / [unload] / [dispatchHook] /
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:66:     * registered with [PluginSandboxConnection] until [loadPlugin]
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:73:     * Bind the sandbox (if not bound), invoke `loadPlugin`, and
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:87:    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle =
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:123:            val returnedToken = sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:130:            // bindService succeeded but loadPlugin failed — undo
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:175:            val returnedToken = sandbox.loadPlugin(parcel, callback, bundleFd)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:189:            // time, and loadPlugin is synchronous — the sandbox has
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:209:            sandbox.unloadPlugin(handle.sandboxToken)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:214:            sandbox.unloadPlugin(handle.sandboxToken)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxRouter.kt:217:            // it. The release that pairs with loadPlugin's acquire
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\sandbox\SandboxBridgeDispatcher.kt:33:     * we register synchronously before `SandboxRouter.loadPlugin`
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\RealNativePluginHost.kt:63:     * received `loadPlugin`. Throws [IllegalStateException] with
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\RealNativePluginHost.kt:217:     * so [PluginNativeSandboxService.unloadPlugin] can fire
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:33: * `loadPlugin` is a one-shot per process lifetime.
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:57:        override fun loadPlugin(
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:79:                    // loadPlugin into the same process is a host bug.
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:109:        override fun unloadPlugin(sandboxToken: Int) {
+android/feature\plugin-native-sandbox\src\main\kotlin\app\syncler\feature\pluginnativesandbox\PluginNativeSandboxService.kt:112:                Timber.tag(TAG).w("unloadPlugin token=%d not loaded", sandboxToken)
+android/feature\plugin-host\src\main\kotlin\app\syncler\android\pluginhost\capabilities\LiveBridge.kt:35: * from PluginLoader.android().
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+ succeeded in 324ms:
+server/app\config.py:14:    # V3 #14 step 5: Ed25519 32-byte seed used by the live
+server/app\config.py:19:    # available, webhook forwarding falls back to "delivery
+server/app\config.py:23:    # V3 #17: live-backplane selector. "memory" keeps the
+server/app\config.py:30:    # Spec: docs/live-backplane.md "Configuration".
+server/app\config.py:31:    live_backplane: Literal["memory", "redis"] = "memory"
+server/app\config.py:34:    # live_backplane=="redis"; ignored when "memory".
+server/app\config.py:47:    live_ordered_stream_maxlen: int = 1024
+server/app\config.py:52:    # the backplane writes ("live:token:...", "sse:user:...",
+server/app\config.py:54:    live_redis_key_prefix: str = ""
+server/app\main.py:19:    live,
+server/app\main.py:37:    # a real backplane op hits Redis. Spec: docs/live-
+server/app\main.py:40:    if settings.live_backplane == "redis":
+server/app\main.py:48:            "live_backplane=memory in production — multi-worker SSE/WS "
+server/app\main.py:54:        if settings.live_backplane == "redis":
+server/app\main.py:82:# V3 #14 — two-way live channel between plugins and senders.
+server/app\main.py:83:# Spec: docs/live-channel.md.
+server/app\main.py:84:app.include_router(live.router, prefix="/v1/live")
+server/app\auth.py:65:    `device_id` is None for the short-lived bootstrap token returned by
+server/app\schemas.py:320:    """Inbox item with optional discriminator for live cards."""
+server/app\schemas.py:326:    type: Literal["live"] = "live"
+server/app\schemas.py:772:    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+server/app\schemas.py:773:    # for live cards.
+server/app\schemas.py:774:    card_type: Literal["event", "live"] = "event"
+server/app\schemas.py:781:    # live channel frames. When the device sends a frame, the
+server/app\schemas.py:785:    # development. Spec: docs/live-channel.md "Inbound webhook".
+server/app\schemas.py:786:    live_inbound_url: str | None = None
+server/app\schemas.py:788:    @field_validator("live_inbound_url")
+server/app\schemas.py:790:    def validate_live_inbound_url(cls, value: str | None) -> str | None:
+server/app\schemas.py:799:                "live_inbound_url must be https:// (or http:// against a "
+server/app\schemas.py:801:                "docs/live-channel.md 'Inbound webhook'"
+server/app\schemas.py:886:        # The pairing rules live here (not on TemplateObject) because the
+server/app\schemas.py:910:        # Phase 3b: live cards MUST have a card_key_path to extract their
+server/app\schemas.py:912:        if self.card_type == "live" and not self.card_key_path:
+server/app\schemas.py:913:            raise ValueError("card_key_path required when card_type == 'live'")
+server/app\schemas.py:961:    # Phase 3b: card_type ("event" or "live") and optional card_key_path.
+server/app\schemas.py:962:    card_type: Literal["event", "live"] = "event"
+server/app\schemas.py:968:    # V3 #14: sender's live-channel inbound webhook URL.
+server/app\schemas.py:972:    # one-way-push only). Spec: docs/live-channel.md.
+server/app\schemas.py:973:    live_inbound_url: str | None = None
+server/app\schemas.py:1236:    Spec: docs/live-card-patch.md. The patches themselves
+server/app\schemas.py:1237:    live inside the per-recipient HPKE-sealed envelopes; the
+server/app\schemas.py:1295:    envelope_kind: Literal["live_card_upsert"]
+server/app\schemas.py:1354:    envelope_kind: Literal["live_card_delete"]
+server/app\schemas.py:1483:    """V3 #16 — patch entry attached to a live-card inbox item
+server/app\schemas.py:1489:    Spec: docs/live-card-patch.md "Catch-up surface". The
+server/app\schemas.py:1500:    """V2 live-card inbox item. Mirrors MessageInboxItemV2 plus
+server/app\schemas.py:1512:    envelope_kind: Literal["live_card_upsert"] = "live_card_upsert"
+server/app\schemas.py:1538:    """V2 unified inbox feed. Items are either event messages or live
+server/app\services\envelopes_v2.py:246:def build_live_card_upsert_envelope_bytes(payload: Any) -> bytes:
+server/app\services\envelopes_v2.py:247:    """Canonical Ed25519 signing input for ``envelope_kind="live_card_upsert"``.
+server/app\services\envelopes_v2.py:255:            "envelope_kind": "live_card_upsert",
+server/app\services\envelopes_v2.py:277:    Spec: docs/live-card-patch.md. The patches themselves are
+server/app\services\envelopes_v2.py:302:def build_live_card_delete_envelope_bytes(payload: Any) -> bytes:
+server/app\services\envelopes_v2.py:303:    """Canonical Ed25519 signing input for ``envelope_kind="live_card_delete"``.
+server/app\services\envelopes_v2.py:309:            "envelope_kind": "live_card_delete",
+server/tests\test_crypto.py:210:    # detection now lives in app.services.nonce_replay against
+server/tests\test_crypto.py:211:    # Postgres). The integration tests for the DB-backed flow live in
+server/app\services\devices.py:169:        from app.live.hub import get_hub, pairing_revocation_topic
+server/app\services\cards.py:43:async def upsert_live_card_v2(
+server/app\services\cards.py:48:    """Phase 9b V2 live-card upsert (spec §11.5).
+server/app\services\cards.py:73:            f"expires_at exceeds the {int(MAX_TTL.total_seconds() // 3600)}h live-card cap"
+server/app\services\cards.py:89:    # Plugin lookup — must be a live-card plugin owned by this sender.
+server/app\services\cards.py:95:                Plugin.card_type == "live",
+server/app\services\cards.py:103:            "plugin missing, revoked, not live-type, or not owned by sender"
+server/app\services\cards.py:172:async def delete_live_card_v2(
+server/app\services\cards.py:180:    """Phase 9b V2 live-card delete (spec §11.6). Plugin-scoped lookup
+server/app\services\cards.py:217:async def get_live_cards_for_user(
+server/app\models.py:177:    # Phase 3b: card_type ("event" or "live") and optional card_key_path
+server/app\models.py:178:    # for live cards to extract their stable identity from the payload.
+server/app\models.py:189:    # live channel frames. NULL when the plugin uses one-way push
+server/app\models.py:190:    # only (sender → device). Spec: docs/live-channel.md.
+server/app\models.py:191:    live_inbound_url: Mapped[str | None] = mapped_column(Text)
+server/app\models.py:221:class DeliveryStatus(Base):
+server/app\models.py:222:    __tablename__ = "delivery_status"
+server/app\models.py:234:    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+server/app\models.py:240:    __tablename__ = "live_cards"
+server/app\models.py:248:            name="uq_live_cards_sender_user_plugin_key",
+server/app\models.py:297:    Spec: docs/live-card-patch.md.
+server/app\redis_client.py:4:three live-backplane components (BroadcastHub, EventBus,
+server/app\redis_client.py:7:Spec: docs/live-backplane.md "Redis client factory".
+server/app\redis_client.py:68:    logger.info("redis: live backplane reachable")
+server/app\redis_client.py:90:    backplane. Spec: docs/live-backplane.md "Configuration"."""
+server/app\redis_client.py:91:    prefix = get_settings().live_redis_key_prefix
+server/app\services\pairing.py:209:        # so any open live-channel WS sockets for this user
+server/app\services\pairing.py:215:            from app.live.hub import get_hub, pairing_revocation_topic
+server/app\jobs\retention.py:24:    live_cards = await session.execute(delete(LiveCard).where(LiveCard.expires_at < now))
+server/app\jobs\retention.py:60:        "live_cards": live_cards.rowcount or 0,
+server/app\live\hub_redis.py:4:Redis primitives per docs/live-backplane.md "Lane mapping":
+server/app\live\hub_redis.py:38:    return prefixed(f"live:eph:{topic}")
+server/app\live\hub_redis.py:42:    return prefixed(f"live:ctrl:{topic}")
+server/app\live\hub_redis.py:46:    return prefixed(f"live:ord:{topic}")
+server/app\live\hub_redis.py:149:    async def publish_ephemeral(self, topic: str, message: str) -> int:
+server/app\live\hub_redis.py:286:        maxlen = get_settings().live_ordered_stream_maxlen
+server/app\live\hub_redis.py:305:        # wrong for a fresh live-only subscription.
+server/app\live\hub_redis.py:311:            # only deliver messages published AFTER this call
+server/app\live\hub_redis.py:336:        Cursor mapping (spec docs/live-backplane.md "Lane
+server/app\live\hub_redis.py:345:             stream ID > S* then transition to live XREAD.
+server/app\live\hub_redis.py:347:             log a warning and start live only from the
+server/app\live\hub_redis.py:359:                        "hub(redis): ordered cursor %s not found for topic=%s; live only",
+server/app\live\hub_redis.py:362:                    # Tail-capture for live-only fallback too.
+server/app\live\hub_redis.py:375:                    # resolved stream ID, then continue live.
+server/app\live\token_store.py:7:Spec: docs/live-backplane.md "Connect-token store".
+server/app\live\token_store.py:124:    return prefixed(f"live:token:{token}")
+server/app\live\token_store.py:142:    Spec: docs/live-backplane.md "Connect-token store".
+server/app\live\token_store.py:229:        backend = get_settings().live_backplane
+server/app\services\nonce_replay.py:16:- The insert lives in the *same* AsyncSession the caller passes in.
+server/app\services\nonce_replay.py:117:    # and the subsequent `store_message` / `upsert_live_card` commit
+server/app\live\webhook.py:3:When a device sends a frame on a live channel, the server
+server/app\live\webhook.py:29:Delivery:
+server/app\live\webhook.py:36:`live_inbound_url` field added in step 6. Until step 6 lands
+server/app\live\webhook.py:62:class WebhookDeliveryResult:
+server/app\live\webhook.py:63:    delivered: bool
+server/app\live\webhook.py:145:) -> WebhookDeliveryResult:
+server/app\live\webhook.py:146:    """Forward a device-originated live frame to the sender's
+server/app\live\webhook.py:174:                    return WebhookDeliveryResult(
+server/app\live\webhook.py:175:                        delivered=True,
+server/app\live\webhook.py:181:                    return WebhookDeliveryResult(
+server/app\live\webhook.py:182:                        delivered=False,
+server/app\live\webhook.py:191:    return WebhookDeliveryResult(
+server/app\live\webhook.py:192:        delivered=False,
+server/app\live\__init__.py:1:"""V3 #14 live-channel package.
+server/app\live\__init__.py:4:ordered/durable delivery up front so the V3 #17 Redis Streams
+server/app\live\__init__.py:6:`docs/live-channel.md` "Frame ordering + delivery semantics".
+server/app\services\messages.py:11:from app.models import DeliveryStatus, Device, Message, Pairing, Plugin
+server/app\services\messages.py:51:    """Active devices (revoked_at IS NULL). Used for delivery_status fan-out."""
+server/app\services\messages.py:99:    DeliveryStatus rows.
+server/app\services\messages.py:115:    delivery_status fan-out.
+server/app\services\messages.py:156:    # Delivery_status rows cover EVERY active device (same pattern as V1).
+server/app\services\messages.py:161:            DeliveryStatus(
+server/app\services\messages.py:201:    # per-device, so a message without a DeliveryStatus row for this
+server/app\services\messages.py:203:    # path fans out DeliveryStatus rows for every device active at publish
+server/app\services\messages.py:212:            DeliveryStatus,
+server/app\services\messages.py:214:                DeliveryStatus.message_id == Message.id,
+server/app\services\messages.py:215:                DeliveryStatus.device_id == device_id,
+server/app\services\messages.py:222:                DeliveryStatus.dismissed_at.is_(None),
+server/app\services\messages.py:257:) -> DeliveryStatus:
+server/app\services\messages.py:259:        select(DeliveryStatus).where(
+server/app\services\messages.py:261:                DeliveryStatus.message_id == message_id,
+server/app\services\messages.py:262:                DeliveryStatus.device_id == device_id,
+server/app\services\messages.py:268:        raise MessageNotFoundError("delivery_status row not found")
+server/app\routers\cards.py:30:    delete_live_card_v2,
+server/app\routers\cards.py:31:    upsert_live_card_v2,
+server/app\routers\cards.py:36:    build_live_card_delete_envelope_bytes,
+server/app\routers\cards.py:37:    build_live_card_upsert_envelope_bytes,
+server/app\routers\cards.py:59:    """Phase 9b V2 live-card upsert (spec §11.5)."""
+server/app\routers\cards.py:67:    envelope_bytes = build_live_card_upsert_envelope_bytes(payload)
+server/app\routers\cards.py:117:        card = await upsert_live_card_v2(db, payload=payload)
+server/app\routers\cards.py:167:    """Phase 9b V2 live-card delete (spec §11.6).
+server/app\routers\cards.py:181:    envelope_bytes = build_live_card_delete_envelope_bytes(payload)
+server/app\routers\cards.py:198:                f"expires_at exceeds the {int(MAX_TTL.total_seconds() // 3600)}h live-card cap"
+server/app\routers\cards.py:207:    await delete_live_card_v2(
+server/app\routers\cards.py:244:    """V3 #16 — field-level patch on a live card.
+server/app\routers\cards.py:253:    Spec: docs/live-card-patch.md.
+server/app\routers\cards.py:421:    from app.live.hub import get_hub, plugin_topic
+server/app\routers\cards.py:422:    await get_hub().publish_ephemeral(
+server/app\services\events.py:9:V3 #17 (docs/live-backplane.md): the bus now has two backends. The
+server/app\services\events.py:49:    bus (spec: docs/live-backplane.md "Event IDs"). The lex-sortable
+server/app\services\events.py:133:        # for targeted disconnect on revoke. A given subscriber lives in
+server/app\services\events.py:177:        delivered = 0
+server/app\services\events.py:184:                    delivered += 1
+server/app\services\events.py:190:        return delivered
+server/app\services\events.py:239:    docs/live-backplane.md "EventBus".
+server/app\services\events.py:368:            # and subsequent subscribes think the reader is alive.
+server/app\services\events.py:462:        backend = get_settings().live_backplane
+server/app\services\events.py:490:HEARTBEAT_BYTES = b": keep-alive\n\n"
+server/app\routers\events.py:40:# right below that keeps the connection alive without burning many
+server/app\routers\events.py:47:# can't outlive its authorization (Codex consultation 56 RED #6).
+server/app\routers\events.py:79:                # expired, close the connection so it can't outlive its
+server/app\routers\events.py:95:                    # the connection stays alive.
+server/app\routers\events.py:120:            "Connection": "keep-alive",
+server/app\services\plugins.py:52:# location split. Source of truth lives in the SDK enum but the
+server/app\services\plugins.py:210:    live_inbound_url: str | None = None,
+server/app\services\plugins.py:253:    if card_type == "live":
+server/app\services\plugins.py:255:            raise InvalidTemplateError("card_key_path is required for card_type='live'")
+server/app\services\plugins.py:294:        live_inbound_url=live_inbound_url,
+server/app\services\rotation.py:9:    stay live.
+server/app\services\rotation.py:527:    # also had access to every sender's pairing key (they live in
+server/app\services\push.py:1:"""Push delivery via Firebase Cloud Messaging (FCM).
+server/app\services\push.py:10:no-op development mode and logs delivery intent.
+server/app\services\push.py:25:from app.models import DeliveryStatus, Device, Message
+server/app\services\push.py:36:    delivered: bool
+server/app\services\push.py:98:        outcome = _deliver(app, device, payload)
+server/app\services\push.py:100:        if not outcome.delivered and outcome.error == "invalid_token":
+server/app\services\push.py:103:    # Record delivery timestamps for those that succeeded
+server/app\services\push.py:104:    if any(o.delivered for o in outcomes):
+server/app\services\push.py:105:        delivered_at = datetime.now(UTC)
+server/app\services\push.py:107:            select(DeliveryStatus).where(DeliveryStatus.message_id == message.id),
+server/app\services\push.py:109:        delivery_rows = {row.device_id: row for row in result.scalars().all()}
+server/app\services\push.py:111:            if outcome.delivered and outcome.device_id in delivery_rows:
+server/app\services\push.py:112:                delivery_rows[outcome.device_id].delivered_at = delivered_at
+server/app\services\push.py:147:    return [_deliver(app, device, payload) for device in devices]
+server/app\services\push.py:150:def _deliver(app: Any | None, device: Device, payload: dict[str, str]) -> FcmResult:
+server/app\services\push.py:153:            "FCM[dev] would deliver to device=%s payload=%s", device.id, payload
+server/app\services\push.py:155:        return FcmResult(device_id=device.id, delivered=True)
+server/app\services\push.py:166:        return FcmResult(device_id=device.id, delivered=True)
+server/app\services\push.py:168:        logger.warning("FCM delivery failed for device=%s: %s", device.id, exc)
+server/app\services\push.py:172:            delivered=False,
+server/app\routers\messages.py:33:from app.services.cards import get_live_cards_for_user
+server/app\routers\messages.py:177:    V2 envelope for each message / live card so the device can verify
+server/app\routers\messages.py:190:    live_cards = await get_live_cards_for_user(db, user_id=ctx.user.id)
+server/app\routers\messages.py:192:    plugin_ids = list({m.plugin_id for m in messages} | {c.plugin_id for c in live_cards})
+server/app\routers\messages.py:207:    # V3 #16: fetch persisted patches for the live cards in
+server/app\routers\messages.py:214:    if live_cards:
+server/app\routers\messages.py:223:            for c in live_cards
+server/app\routers\messages.py:232:    for c in live_cards:
+server/app\routers\messages.py:234:            _live_card_to_inbox_item_v2(
+server/app\routers\messages.py:280:        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="delivery row not found") from exc
+server/app\routers\messages.py:322:def _live_card_to_inbox_item_v2(
+server/app\routers\messages.py:327:    """Phase 9b V2 live-card projection (spec §11.5).
+server/app\routers\messages.py:331:    being offline during the live broadcast. Spec:
+server/app\routers\messages.py:332:    docs/live-card-patch.md "Catch-up surface".
+server/tests\test_phase5d_validators.py:65:        "card_type": "live",
+server/tests\test_phase5d_validators.py:76:        "card_type": "live",
+server/tests\v2_helpers.py:12:lives in the SDK so the server tests don't drift from the
+server/tests\v2_helpers.py:37:    assemble_live_card_delete_envelope_v2,
+server/tests\v2_helpers.py:38:    assemble_live_card_upsert_envelope_v2,
+server/tests\v2_helpers.py:177:def build_live_card_upsert_body(
+server/tests\v2_helpers.py:193:    """Build a V2 live-card upsert body (spec §11.5)."""
+server/tests\v2_helpers.py:204:        envelope_kind="live_card_upsert",
+server/tests\v2_helpers.py:215:    envelope_bytes = assemble_live_card_upsert_envelope_v2(
+server/tests\v2_helpers.py:233:        "envelope_kind": "live_card_upsert",
+server/tests\v2_helpers.py:257:def build_live_card_delete_body(
+server/tests\v2_helpers.py:268:    """Build a V2 live-card delete body (spec §11.6).
+server/tests\v2_helpers.py:282:    envelope_bytes = assemble_live_card_delete_envelope_v2(
+server/tests\v2_helpers.py:293:        "envelope_kind": "live_card_delete",
+server/app\routers\rotation.py:10:All non-trivial logic lives in ``app/services/rotation.py``; this layer
+server/tests\test_messages.py:327:    a best-effort delivery channel on top of it."""
+server/tests\test_phase3.py:1:"""Phase 3 — template renderer + live cards + dismiss filter.
+server/tests\test_phase3.py:32:    build_live_card_delete_body,
+server/tests\test_phase3.py:33:    build_live_card_upsert_body,
+server/tests\test_phase3.py:126:async def _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:134:    """Seed an active pairing + a Phase 3b live-card plugin row."""
+server/tests\test_phase3.py:146:        plugin_identifier="com.lottery.live",
+server/tests\test_phase3.py:155:        card_type="live",
+server/tests\test_phase3.py:313:# ---------- Phase 3b: live card upsert security gates --------------------
+server/tests\test_phase3.py:327:    """Phase 9b V2 live-card upsert body (spec §11.5)."""
+server/tests\test_phase3.py:328:    return build_live_card_upsert_body(
+server/tests\test_phase3.py:351:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:381:        card_type="live",
+server/tests\test_phase3.py:400:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:421:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:442:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:479:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:507:    delete_body = build_live_card_delete_body(
+server/tests\test_phase3.py:544:    """Phase 9b V2 live-card delete body (spec §11.6). plugin_id is
+server/tests\test_phase3.py:546:    return build_live_card_delete_body(
+server/tests\test_phase3.py:569:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:601:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:624:    plugin_id = await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:649:    await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:660:        "envelope_kind": "live_card_delete",
+server/tests\test_phase3.py:681:    `delete_live_card` no-ops without committing when the row is
+server/tests\test_phase3.py:688:    await _seed_pairing_and_live_plugin(
+server/tests\test_phase3.py:714:    """Per consultation 57, inbox_for_device LEFT JOINs DeliveryStatus and
+server/tests\test_v3_17_token_store.py:18:from app.live.token_store import (
+server/app\routers\plugins.py:83:    # V3 #14: live_inbound_url. Conditionally included so
+server/app\routers\plugins.py:84:    # senders publishing without a live-channel webhook sign
+server/app\routers\plugins.py:86:    if payload.live_inbound_url is not None:
+server/app\routers\plugins.py:87:        envelope["live_inbound_url"] = payload.live_inbound_url
+server/app\routers\plugins.py:149:            live_inbound_url=payload.live_inbound_url,
+server/app\routers\plugins.py:205:        live_inbound_url=plugin.live_inbound_url,
+server/app\routers\plugins.py:256:        live_inbound_url=plugin.live_inbound_url,
+server/app\middleware\rate_limit_config.py:27:    # Phase 3b: live cards. 1 per second per card (60/min).
+server/tests\test_v3_14_ws_endpoint.py:32:from app.routers.live import _reset_store_for_test
+server/tests\test_v3_14_ws_endpoint.py:85:        with client.websocket_connect("/v1/live/plugin/00000000-0000-0000-0000-000000000000"):
+server/tests\test_v3_14_ws_endpoint.py:95:            "/v1/live/plugin/00000000-0000-0000-0000-000000000000",
+server/tests\test_v3_14_ws_endpoint.py:109:    from app.routers.live import ConnectToken, _TOKEN_STORE
+server/tests\test_v3_14_ws_endpoint.py:119:            "/v1/live/plugin/not-a-uuid",
+server/app\crypto\hpke.py:15:  recipient authenticated context lives in HPKE ``info`` instead (see
+server/app\crypto\hpke.py:139:    if envelope_kind == "live_card_upsert":
+server/app\crypto\hpke.py:141:            raise ValueError("live_card_upsert info requires card_key, card_type, sequence_number")
+server/app\crypto\hpke.py:175:    if envelope_kind == "live_card_upsert":
+server/app\crypto\hpke.py:177:            raise ValueError("live_card_upsert aad requires card_key, card_type, sequence_number")
+server/app\routers\devices.py:113:    # request, but a long-lived event stream that's already past
+server/tests\test_events.py:31:# class for the Redis swap (docs/live-backplane.md).
+server/tests\test_events.py:80:    delivered = await bus.publish_to_user(user, "inbox.changed", {"message_id": "m1"})
+server/tests\test_events.py:82:    assert delivered == 2
+server/tests\test_events.py:131:    delivered = await bus.publish_to_user(user, "inbox.changed", {})
+server/tests\test_events.py:132:    assert delivered == 0
+server/tests\test_v3_14_hub.py:14:from app.live.hub import (
+server/tests\test_v3_14_hub.py:35:    delivered = await hub.publish_ephemeral("topic-a", "hello")
+server/tests\test_v3_14_hub.py:36:    assert delivered == 0
+server/tests\test_v3_14_hub.py:44:    delivered = await hub.publish_ephemeral("topic-a", "hello")
+server/tests\test_v3_14_hub.py:45:    assert delivered == 1
+server/tests\test_v3_14_hub.py:58:    delivered = await hub.publish_ephemeral("topic-a", "broadcast")
+server/tests\test_v3_14_hub.py:59:    assert delivered == 2
+server/tests\test_v3_14_hub.py:75:    await hub.publish_ephemeral("topic-a", "only-a")
+server/tests\test_v3_14_hub.py:99:        await hub.publish_ephemeral("topic-a", f"msg-{i}")
+server/tests\test_v3_14_hub.py:127:    delivered = await hub.publish_ordered("topic-a", "msg1", cursor_id="c1")
+server/tests\test_v3_14_hub.py:128:    # No live subscribers, but V0.1 in-process always logs the
+server/tests\test_v3_14_hub.py:129:    # append. Returns 0 live deliveries; the entry sits in the
+server/tests\test_v3_14_hub.py:131:    assert delivered == 0
+server/tests\test_v3_14_hub.py:161:    # The replay should deliver c2 and c3 (strictly > c1).
+server/tests\test_v3_14_hub.py:201:    shape but live in separate maps. A subscriber to one must
+server/tests\test_v3_14_hub.py:205:    await hub.publish_ephemeral("shared-topic", "eph-msg")
+server/tests\test_v3_14_hub.py:224:    delivered = await hub.publish_control(
+server/tests\test_v3_14_hub.py:228:    assert delivered == 2
+server/tests\test_v3_14_hub.py:255:    assert hasattr(hub, "publish_ephemeral")
+server/tests\test_v3_14_connect_token.py:1:"""V3 #14 step 2 — /v1/live/connect-token endpoint tests.
+server/tests\test_v3_14_connect_token.py:3:Mints a short-lived (60s) opaque token bound to (user_id,
+server/tests\test_v3_14_connect_token.py:5:auth surface for the WS upgrade — keeps the long-lived JWT
+server/tests\test_v3_14_connect_token.py:29:from app.routers.live import (
+server/tests\test_v3_14_connect_token.py:122:    resp = await client.post("/v1/live/connect-token")
+server/tests\test_v3_14_connect_token.py:144:        "/v1/live/connect-token",
+server/tests\test_v3_14_connect_token.py:158:        "/v1/live/connect-token",
+server/tests\test_v3_14_connect_token.py:174:        "/v1/live/connect-token",
+server/tests\test_v3_14_connect_token.py:198:        "/v1/live/connect-token",
+server/tests\test_v3_14_connect_token.py:226:        "/v1/live/connect-token",
+server/tests\test_phase9_hpke.py:251:        envelope_kind="live_card_upsert",
+server/tests\test_phase9_hpke.py:273:            envelope_kind="live_card_upsert",
+server/app\routers\live.py:1:"""V3 #14 — live channel HTTP + WebSocket endpoints.
+server/app\routers\live.py:3:Step 2 of the live-channel implementation order
+server/app\routers\live.py:4:(`docs/live-channel.md`): the `/v1/live/connect-token`
+server/app\routers\live.py:7:The device's long-lived JWT must NOT ride in the WS upgrade
+server/app\routers\live.py:12:1. Device POSTs `/v1/live/connect-token` with its device JWT
+server/app\routers\live.py:14:2. Server mints a short-lived (60s) opaque connect token
+server/app\routers\live.py:43:from app.live.hub import (
+server/app\routers\live.py:52:router = APIRouter(tags=["live"])
+server/app\routers\live.py:54:# --- Frame + rate-limit constants (spec docs/live-channel.md) ---
+server/app\routers\live.py:74:# V3 #17 (docs/live-backplane.md): the dict-based store moved
+server/app\routers\live.py:75:# behind app/live/token_store.py so the same route handler
+server/app\routers\live.py:79:from app.live.token_store import (
+server/app\routers\live.py:120:    """V3 #14 step 2: mint a short-lived opaque connect token.
+server/app\routers\live.py:160:class LivePushRequest(BaseModel):
+server/app\routers\live.py:161:    """Sender posts a live update for an active plugin row.
+server/app\routers\live.py:175:    `connect()`'d to. Spec: docs/live-channel.md §"Outer
+server/app\routers\live.py:188:    delivered: int
+server/app\routers\live.py:196:async def push_live(
+server/app\routers\live.py:198:    body: LivePushRequest,
+server/app\routers\live.py:238:    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
+server/app\routers\live.py:239:    if len(envelope_json) > inner_cap:
+server/app\routers\live.py:245:    # docs/live-channel.md §"Message"). Pre-fix the raw
+server/app\routers\live.py:269:    delivered = 0
+server/app\routers\live.py:271:        delivered += await hub.publish_ephemeral(
+server/app\routers\live.py:274:    return LivePushResponse(delivered=delivered)
+server/app\routers\live.py:408:    where token is a short-lived connect token minted by
+server/app\routers\live.py:409:    `/v1/live/connect-token` and bound to (user_id, device_id).
+server/app\routers\live.py:556:                    logger.exception("live ws task errored")
+server/app\routers\live.py:580:      Server posts a signed envelope to `plugin.live_inbound_url`
+server/app\routers\live.py:655:        # plugin has no live_inbound_url set, the sender chose
+server/app\routers\live.py:656:        # one-way push only — surface webhook_delivery_failed
+server/app\routers\live.py:658:        webhook_url = plugin.live_inbound_url
+server/app\routers\live.py:667:                _build_error_frame(channel, frame_id, "webhook_delivery_failed")
+server/app\routers\live.py:674:        from app.live.webhook import forward_to_sender, _load_signing_key
+server/app\routers\live.py:677:                "live webhook %s requested but SERVER_SIGNING_SEED_B64 unset; refusing",
+server/app\routers\live.py:681:                _build_error_frame(channel, frame_id, "webhook_delivery_failed")
+server/app\routers\live.py:692:        if result.delivered:
+server/app\routers\live.py:696:                _build_error_frame(channel, frame_id, "webhook_delivery_failed")
+server/app\crypto\nonce.py:3:Phase 7 — the durable nonce-replay registry lives in
+server/app\live\hub.py:5:ephemeral pub/sub from ordered/durable delivery up front so the
+server/app\live\hub.py:10:- `publish_ephemeral` / `subscribe_ephemeral` — best-effort,
+server/app\live\hub.py:46:    async def publish_ephemeral(self, topic: str, message: str) -> int:
+server/app\live\hub.py:48:        the number of subscribers delivered to. Slow subscribers
+server/app\live\hub.py:73:        cursor_ids strictly greater than it before live
+server/app\live\hub.py:74:        delivery resumes."""
+server/app\live\hub.py:162:    of the subscriber maps. Hot-path message delivery is
+server/app\live\hub.py:185:    async def publish_ephemeral(self, topic: str, message: str) -> int:
+server/app\live\hub.py:215:        delivered = 0
+server/app\live\hub.py:218:                delivered += 1
+server/app\live\hub.py:219:        return delivered
+server/app\live\hub.py:229:            # registering the live subscription so we don't
+server/app\live\hub.py:230:            # double-deliver any in-flight publish_ordered.
+server/app\live\hub.py:266:        delivered = 0
+server/app\live\hub.py:269:                delivered += 1
+server/app\live\hub.py:270:        return delivered
+server/app\live\hub.py:307:# control, Streams ordered). Spec: docs/live-backplane.md.
+server/app\live\hub.py:315:        backend = get_settings().live_backplane
+server/app\live\hub.py:317:            from app.live.hub_redis import RedisBroadcastHub
+server/app\live\hub.py:339:    topic delivered every push to every device for every
+C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1 : Cannot dot-source this command because it 
+was defined in a different language mode. To invoke this command without importing its contents, omit the '.' operator.
+At line:1 char:1
++ . 'C:\Users\Dima\Documents\WindowsPowerShell\Microsoft.PowerShell_pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1], NotSupportedException
+    + FullyQualifiedErrorId : DotSourceNotSupported,Microsoft.PowerShell_profile.ps1
+ 
+Cannot set property. Property setting is supported only on core types in this language mode.
+At line:1 char:1
++ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage
+ 
+
+exec
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "@'
+import json, base64
+MAX=64*1024
+frame={\"type\":\"message\",\"channel\":\"a\"*64,\"id\":\"b\"*32,\"payload\":\"\"}
+empty=len(json.dumps(frame,separators=(\",\",\":\")))
+inner=(MAX*3)//4-64
+payload_len=len(base64.b64encode(b\"x\"*inner).decode())
+frame[\"payload\"]=\"x\"*payload_len
+print(empty, inner, payload_len, len(json.dumps(frame,separators=(\",\",\":\"))))
+'@ | python -" in D:\Projects\syncler
+ declined in 0ms:
+`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "@'
+import json, base64
+MAX=64*1024
+frame={\"type\":\"message\",\"channel\":\"a\"*64,\"id\":\"b\"*32,\"payload\":\"\"}
+empty=len(json.dumps(frame,separators=(\",\",\":\")))
+inner=(MAX*3)//4-64
+payload_len=len(base64.b64encode(b\"x\"*inner).decode())
+frame[\"payload\"]=\"x\"*payload_len
+print(empty, inner, payload_len, len(json.dumps(frame,separators=(\",\",\":\"))))
+'@ | python -"` rejected: blocked by policy
+2026-05-26T21:55:00.754719Z ERROR codex_core::tools::router: error=`"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "@'
+import json, base64
+MAX=64*1024
+frame={\"type\":\"message\",\"channel\":\"a\"*64,\"id\":\"b\"*32,\"payload\":\"\"}
+empty=len(json.dumps(frame,separators=(\",\",\":\")))
+inner=(MAX*3)//4-64
+payload_len=len(base64.b64encode(b\"x\"*inner).decode())
+frame[\"payload\"]=\"x\"*payload_len
+print(empty, inner, payload_len, len(json.dumps(frame,separators=(\",\",\":\"))))
+'@ | python -"` rejected: blocked by policy
+codex
+Findings first:
+
+- **FIX:** Inner cap math is too loose. With max channel 64 and 32-char `uuid.hex`, compact frame overhead is about 148 bytes, not 64. Current cap `49088` base64s to `65452`; outer frame becomes about `65600`, over `65536`. Even short channel can exceed by a few bytes. Use a computed post-wrap size check, or reserve worst-case overhead and base64 padding correctly.
+- **FIX / 5th thing:** Android live client is still built with `baseUrl = "https://syncler.local"` in `PluginLoader.android` (`PluginLoader.kt` around line 248). The rest of the app appears to use `BuildConfig.SERVER_BASE_URL`. Unless `syncler.local` is intentional production config, this means the inbound path is not actually usable end-to-end from the standard Android loader.
+
+Per concern:
+
+1. **FIX**: cap reservation is wrong; see above.
+2. **OK**: server-generated frame id is acceptable v0.1. Push POST already returns synchronously; no sender-visible ack correlation needed yet.
+3. **NIT/DESIGN**: nullable `session` is acceptable for preserving tests/minimal builds, but production wiring should make omission hard. If keeping nullable, add a factory test or composition-root assertion.
+4. **OK**: TypeError rejection plus Android warn/drop is acceptable for malformed host frames. SDK-side logging would be optional; the host is the faulty boundary.
+5. **FIX**: add the server unit test. This change has a concrete wire-contract bug, and a hub-level shape/size test would have caught it without full PG/WebSocket E2E.
+6. **NIT**: Android JWT-provider plumbing is small, but one focused factory/clientFactory test is worth adding because omission degrades live into `no_session`.
+
+Implementation vs spec: the four intended fixes are directionally correct: server wraps opaque envelope, TS hooks now route, defaults are additive, and `Session.currentToken()` is the right auth source. But because of the cap bug and the hardcoded Android base URL, I would not call V3 #14 inbound fully closed yet.
+tokens used
+66,309
+Findings first:
+
+- **FIX:** Inner cap math is too loose. With max channel 64 and 32-char `uuid.hex`, compact frame overhead is about 148 bytes, not 64. Current cap `49088` base64s to `65452`; outer frame becomes about `65600`, over `65536`. Even short channel can exceed by a few bytes. Use a computed post-wrap size check, or reserve worst-case overhead and base64 padding correctly.
+- **FIX / 5th thing:** Android live client is still built with `baseUrl = "https://syncler.local"` in `PluginLoader.android` (`PluginLoader.kt` around line 248). The rest of the app appears to use `BuildConfig.SERVER_BASE_URL`. Unless `syncler.local` is intentional production config, this means the inbound path is not actually usable end-to-end from the standard Android loader.
+
+Per concern:
+
+1. **FIX**: cap reservation is wrong; see above.
+2. **OK**: server-generated frame id is acceptable v0.1. Push POST already returns synchronously; no sender-visible ack correlation needed yet.
+3. **NIT/DESIGN**: nullable `session` is acceptable for preserving tests/minimal builds, but production wiring should make omission hard. If keeping nullable, add a factory test or composition-root assertion.
+4. **OK**: TypeError rejection plus Android warn/drop is acceptable for malformed host frames. SDK-side logging would be optional; the host is the faulty boundary.
+5. **FIX**: add the server unit test. This change has a concrete wire-contract bug, and a hub-level shape/size test would have caught it without full PG/WebSocket E2E.
+6. **NIT**: Android JWT-provider plumbing is small, but one focused factory/clientFactory test is worth adding because omission degrades live into `no_session`.
+
+Implementation vs spec: the four intended fixes are directionally correct: server wraps opaque envelope, TS hooks now route, defaults are additive, and `Session.currentToken()` is the right auth source. But because of the cap bug and the hardcoded Android base URL, I would not call V3 #14 inbound fully closed yet.

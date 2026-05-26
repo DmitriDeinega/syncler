@@ -1,0 +1,15 @@
+Findings first:
+
+- **FIX:** Inner cap math is too loose. With max channel 64 and 32-char `uuid.hex`, compact frame overhead is about 148 bytes, not 64. Current cap `49088` base64s to `65452`; outer frame becomes about `65600`, over `65536`. Even short channel can exceed by a few bytes. Use a computed post-wrap size check, or reserve worst-case overhead and base64 padding correctly.
+- **FIX / 5th thing:** Android live client is still built with `baseUrl = "https://syncler.local"` in `PluginLoader.android` (`PluginLoader.kt` around line 248). The rest of the app appears to use `BuildConfig.SERVER_BASE_URL`. Unless `syncler.local` is intentional production config, this means the inbound path is not actually usable end-to-end from the standard Android loader.
+
+Per concern:
+
+1. **FIX**: cap reservation is wrong; see above.
+2. **OK**: server-generated frame id is acceptable v0.1. Push POST already returns synchronously; no sender-visible ack correlation needed yet.
+3. **NIT/DESIGN**: nullable `session` is acceptable for preserving tests/minimal builds, but production wiring should make omission hard. If keeping nullable, add a factory test or composition-root assertion.
+4. **OK**: TypeError rejection plus Android warn/drop is acceptable for malformed host frames. SDK-side logging would be optional; the host is the faulty boundary.
+5. **FIX**: add the server unit test. This change has a concrete wire-contract bug, and a hub-level shape/size test would have caught it without full PG/WebSocket E2E.
+6. **NIT**: Android JWT-provider plumbing is small, but one focused factory/clientFactory test is worth adding because omission degrades live into `no_session`.
+
+Implementation vs spec: the four intended fixes are directionally correct: server wraps opaque envelope, TS hooks now route, defaults are additive, and `Session.currentToken()` is the right auth source. But because of the cap bug and the hardcoded Android base URL, I would not call V3 #14 inbound fully closed yet.
