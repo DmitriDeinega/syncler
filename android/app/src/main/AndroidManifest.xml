@@ -31,6 +31,21 @@
         </activity>
 
         <!--
+            V2 #11 (triad 140 codex #2 FIX): plugin notification
+            taps fire this receiver. Manifest-declared (not
+            dynamically registered) so it cold-starts the process
+            on a tap even after the app is killed. exported="false"
+            so only the host's own PendingIntents reach it.
+        -->
+        <receiver
+            android:name="app.syncler.android.pluginhost.capabilities.NotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="app.syncler.NOTIFICATION_ACTION" />
+            </intent-filter>
+        </receiver>
+
+        <!--
             Phase 12 (V2 #10) CameraBridge writes its
             ACTION_IMAGE_CAPTURE temp output to a host-owned URI
             via FileProvider. The authority must match

@@ -22,6 +22,16 @@ class PluginInstance(
     val manifest: PluginManifest,
     val grantedCapabilities: Set<String>,
     val bundleFilePath: String,
+    /**
+     * V2 #11 closeout (triad 140 codex #1 FIX): host-trusted
+     * `actionId → endpoint` map populated at load time from the
+     * server's `PluginLatestResponse.template.actions`. Used by
+     * `MessageBridge.respond` so the plugin no longer supplies
+     * an endpoint string — the host always uses its own
+     * authoritative lookup. Empty for non-template plugins or
+     * pre-V2 #11 loaders.
+     */
+    val actionEndpoints: Map<String, String> = emptyMap(),
     var sandboxHandle: SandboxHandle? = null,
     var bridge: PluginBridge? = null,
 ) {

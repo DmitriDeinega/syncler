@@ -2,7 +2,6 @@ package app.syncler.android.pluginhost.capabilities
 
 import app.syncler.android.pluginhost.AuditLogger
 import app.syncler.android.pluginhost.BuildConfig
-import app.syncler.android.pluginhost.EndpointMatcher
 import app.syncler.android.pluginhost.PluginInstance
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,8 +46,6 @@ class MessageBridge(
             val args = JsonBridgeCodec.objectFrom(argsJson)
             val actionId = args["actionId"] as? String
                 ?: return@withContext JsonBridgeCodec.error("invalid_args")
-            val endpoint = args["endpoint"] as? String
-                ?: return@withContext JsonBridgeCodec.error("invalid_args")
             val payload = when (val raw = args["payload"]) {
                 is String -> raw // already JSON-encoded by caller
                 null -> "{}"
@@ -59,13 +56,17 @@ class MessageBridge(
                 else -> raw.toString()
             }
 
-            // V2 #11: gate the endpoint on declaredEndpoints —
-            // the plugin can't address arbitrary URLs via this
-            // bridge. Same glob grammar `platform.network.fetch`
-            // uses (EndpointMatcher).
-            if (!EndpointMatcher.matches(endpoint, plugin.manifest.declaredEndpoints)) {
-                auditLogger.denied(plugin.manifest.id, "endpoint_not_declared", endpoint)
-                return@withContext JsonBridgeCodec.error("endpoint_not_declared")
+            // Triad 140 codex #1 FIX: the endpoint is NEVER
+            // plugin-supplied. The host loads the manifest's
+            // template.actions[].endpoint into PluginInstance
+            // .actionEndpoints at plugin-load time; the bridge
+            // looks up by actionId. A plugin can't address
+            // arbitrary URLs via this bridge — that's what
+            // platform.network.fetch is for.
+            val endpoint = plugin.actionEndpoints[actionId]
+            if (endpoint == null) {
+                auditLogger.denied(plugin.manifest.id, "unknown_action", actionId)
+                return@withContext JsonBridgeCodec.error("unknown_action")
             }
 
             // Scheme check (mirrors TemplateActionRunner / NetworkBridge).

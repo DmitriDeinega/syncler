@@ -1,0 +1,43 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+(node:35096) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+It's good to see these items landing; the post-impl review pattern is a practical way to close the loop on V2 while the V1/V2 transition is still hot.
+
+Overall, the implementations for #11 and #12 are solid and consistent with the established V1 patterns. V2 #13 is a safe scaffold but leaves the most "open" design questions.
+
+Here is the verdict on your 16 points:
+
+### V2 #11 — message.respond + showNotification
+
+1.  **`endpoint` arg trust.** **NIT**. While it's true a plugin could technically pass an endpoint that doesn't match a specific `action.id` in the manifest, the `EndpointMatcher.matches(..., plugin.manifest.declaredEndpoints)` gate ensures they cannot hit any URL they haven't already broad-declared. Since `message.respond` is likely to be used by `script` renderers (who don't use the template action map), keeping the endpoint explicit is more flexible.
+2.  **Audit-log key reuse.** **FIX**. Calling `auditLogger.denied(...)` for a successful `respond_ok` is confusing for anyone reading the audit trails. I recommend a rename to `auditLogger.record(...)` or `auditLogger.logBridgeCall(...)` before V3.
+3.  **No timeout / retries on the OkHttp call.** **NIT**. 10s is a long time to block a plugin's execution thread if a sender is slow. It's acceptable for a V0.1/V2 baseline, but we should consider adding a `timeoutMillis` arg to `message.respond` if we see plugin-host thread exhaustion.
+4.  **NotificationActionReceiver registration.** **OK**. The `@Volatile` guard on a singleton `BroadcastReceiver` is the standard way to handle this in Android's multi-instance/single-process model.
+5.  **`PendingIntent` flags.** **OK**. Hashing the notification ID (`pluginId + title + body`) to use as the `requestCode` is correct. It ensures that notifications that visually "replace" each other also share the same PendingIntent identity.
+6.  **No de-duplication.** **OK**. If a user double-taps, the plugin getting two hooks is the most honest representation of user intent.
+7.  **No upgrade of the inbox-UI flow.** **OK**. Shipping the bridge first and the UI-wire later is a classic "engine first" trade-off. It’s acceptable as long as we don't forget to circle back.
+
+### V2 #12 — template layouts
+
+8.  **Compose rendering not unit-tested.** **FIX**. I agree with your concern. While the server-side validation is robust, a layout regression in `TemplateCard.kt` (e.g., someone accidentally changing a `weight(1f)` to something else) won't be caught. V3 should introduce at least one "golden" screenshot/layout test for each template type.
+9.  **`stat_grid` field naming.** **OK**. The flat `stat1_label` schema is the "correct" choice for V2 because the `TemplateObject.fields` map is fundamentally a `Map<String, TemplateField>`. Supporting nested arrays would require a schema-level change to the manifest that ripples through the server, SDK, and Android code. Let's keep it flat until we see a grid that actually needs dynamic sizing.
+10. **Overflow handling.** **OK**. I checked `server/app/schemas.py`: `validate_fields_for_layout` calculates `extra = self.fields.keys() - allowed`. Since `allowed` only includes up to `stat4_*`, the server **will** reject a manifest declaring `stat5_label`. This is already strict.
+11. **`compact_row` button placement.** **DESIGN**. Rendering full-width buttons below a "compact" row somewhat defeats the purpose of the layout. We should consider a `compact_row`-specific action style (e.g., small chips inline or a single trailing action button) in a V3 design pass.
+
+### V2 #13 — script_fast renderer (scaffold)
+
+12. **Shipping the renderer name.** **OK**. This is a good "prepare the ecosystem" move. Senders can start tagging their plugins, and current devices will correctly report `script_fast_not_available` instead of trying to run it as a standard WebView script.
+13. **No engine choice.** **DESIGN**. This is the biggest gap. We need a real design triad for the V0.2 engine.
+14. **No SDK guidance.** **DESIGN**. Authors need to know that `script_fast` means "no DOM, no window, only platform.*". The SDK should reflect this via conditional types in `manifest.ts`.
+
+### General
+
+15. **Skipped-triad-during-impl.** **NIT**. For #11 and #12, the changes were direct extensions of existing V1 patterns, so skipping the overhead was a reasonable efficiency gain. #13, however, is a major architectural pivot (non-WebView JS) and should have had a design triad even for the scaffold.
+16. **Roadmap reordering.** **DESIGN**. V3 #14 (WebSocket) is deep. It definitely warrants its own triad. I'd suggest one design triad for #14, with #15-#17 handled as implementation follow-ups.
+
+### Summary of FIX list for V3:
+1.  **Rename `AuditLogger.denied`** to something neutral (Concern #2).
+2.  **Add golden layout tests** for `TemplateCard` renderers (Concern #8).
+3.  **Initiate V3 #14 (WebSocket) Design Triad** as the first act of the new phase.
+4.  **Initiate V2 #13 (Script Fast Engine) Design Triad** before any code is written for the runtime.

@@ -104,6 +104,24 @@ _LAYOUT_REQUIRED_FIELDS_SERVICE: dict[str, frozenset[str]] = {
     "stat_grid": frozenset({"title"}),
 }
 
+# Triad 140 codex #5 / #10 FIX: service-layer extra-field
+# rejection. The Pydantic TemplateObject validator (in
+# schemas.py) already rejects unknown fields, but direct
+# service callers can bypass that. Mirror the allowed-set
+# check here so both the publish router AND any other caller
+# (tests, internal tools) see the same drift-resistant rule.
+_LAYOUT_OPTIONAL_FIELDS_SERVICE: dict[str, frozenset[str]] = {
+    "standard_card": frozenset({"subtitle", "body"}),
+    "compact_row": frozenset({"trailing", "subtitle"}),
+    "score_card": frozenset({"caption"}),
+    "stat_grid": frozenset({
+        "stat1_label", "stat1_value",
+        "stat2_label", "stat2_value",
+        "stat3_label", "stat3_value",
+        "stat4_label", "stat4_value",
+    }),
+}
+
 
 def _validate_template(template: dict, declared_endpoints: list[str]) -> None:
     layout = template.get("layout")
@@ -124,6 +142,13 @@ def _validate_template(template: dict, declared_endpoints: list[str]) -> None:
             raise InvalidTemplateError(
                 f"missing required field for layout {layout}: {required}"
             )
+
+    allowed = _LAYOUT_REQUIRED_FIELDS_SERVICE[layout] | _LAYOUT_OPTIONAL_FIELDS_SERVICE[layout]
+    extra = set(fields.keys()) - allowed
+    if extra:
+        raise InvalidTemplateError(
+            f"unexpected field(s) for layout {layout}: {sorted(extra)}"
+        )
 
     for name, config in fields.items():
         if not isinstance(config, dict) or "path" not in config:
@@ -211,13 +236,16 @@ async def publish_plugin(
                 "native_sdk_abi is required for renderer='native_kotlin'"
             )
     elif renderer == "script_fast":
-        # V2 #13: server accepts the renderer for publish-pipeline
-        # parity but the Android sandbox returns
-        # `unsupported_renderer` until the engine (QuickJS/Javy
-        # integration) ships in V0.2. Publishers can register
-        # plugins with this renderer today; they're invisible to
-        # devices until the runtime arrives.
-        pass
+        # Triad 140 codex #6 FIX: don't let publishers ship
+        # unusable plugins. Reject `script_fast` server-side
+        # until the runtime engine arrives (V0.2). When the
+        # engine ships, lift this rejection and add the renderer
+        # to the device-side router. Plugin authors should NOT
+        # be publishing with this renderer in V0.1.
+        raise InvalidTemplateError(
+            "renderer 'script_fast' is reserved for V0.2 — the runtime engine "
+            "isn't shipped yet; publish under renderer='script' for now"
+        )
     elif renderer != "script":
         raise InvalidTemplateError(f"unknown renderer type: {renderer}")
 

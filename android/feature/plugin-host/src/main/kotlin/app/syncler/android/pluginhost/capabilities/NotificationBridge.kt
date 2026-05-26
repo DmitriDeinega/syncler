@@ -6,7 +6,6 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -34,31 +33,14 @@ import timber.log.Timber
 class NotificationBridge(context: Context) {
     private val appContext = context.applicationContext
 
-    init {
-        // Receiver auto-registers once per process. exported=false
-        // (registerReceiver in API 34+ would need explicit flag)
-        // because only the host app's own PendingIntents reach it.
-        if (!receiverRegistered) {
-            receiverRegistered = true
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    appContext.registerReceiver(
-                        NotificationActionReceiver,
-                        IntentFilter(ACTION_INTENT),
-                        Context.RECEIVER_NOT_EXPORTED,
-                    )
-                } else {
-                    @Suppress("UnspecifiedRegisterReceiverFlag")
-                    appContext.registerReceiver(
-                        NotificationActionReceiver,
-                        IntentFilter(ACTION_INTENT),
-                    )
-                }
-            } catch (exc: Throwable) {
-                Timber.tag(TAG).w(exc, "registerReceiver failed; notification taps will no-op")
-            }
-        }
-    }
+    // Triad 140 codex #2 FIX: receiver registration moved to a
+    // manifest-declared <receiver> entry in the app module.
+    // That way a notification tap that fires AFTER process death
+    // still cold-starts the receiver instead of no-op'ing. The
+    // previous volatile-check-then-register dance had two bugs:
+    // (1) check-then-set wasn't atomic; (2) `receiverRegistered =
+    // true` was set BEFORE registerReceiver(), so a failed call
+    // silently suppressed all future retries.
 
     suspend fun show(plugin: PluginInstance, argsJson: String): String = withContext(Dispatchers.IO) {
         val args = JsonBridgeCodec.objectFrom(argsJson)
@@ -120,9 +102,6 @@ class NotificationBridge(context: Context) {
         const val ACTION_INTENT = "app.syncler.NOTIFICATION_ACTION"
         const val EXTRA_PLUGIN_ID = "plugin_id"
         const val EXTRA_ACTION_ID = "action_id"
-
-        @Volatile
-        private var receiverRegistered = false
     }
 }
 
@@ -137,7 +116,17 @@ object NotificationActionReceiver : BroadcastReceiver() {
         if (intent?.action != NotificationBridge.ACTION_INTENT) return
         val pluginId = intent.getStringExtra(NotificationBridge.EXTRA_PLUGIN_ID) ?: return
         val actionId = intent.getStringExtra(NotificationBridge.EXTRA_ACTION_ID) ?: return
-        val payloadJson = "{\"actionId\":\"$actionId\",\"surface\":\"notification\"}"
+        // Triad 140 codex #3 FIX: actionId comes from a plugin-
+        // supplied string. Hand-interpolating it into JSON would
+        // emit invalid bytes for any actionId containing a
+        // quote, backslash, or control char. Route through the
+        // existing JSON codec for safe escaping.
+        val payloadJson = JsonBridgeCodec.toJson(
+            mapOf(
+                "actionId" to actionId,
+                "surface" to "notification",
+            ),
+        )
         runCatching {
             PluginRegistry.dispatchAction(pluginId, actionId, payloadJson)
         }.onFailure { Timber.tag("NotifReceiver").w(it, "dispatchAction failed") }
