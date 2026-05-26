@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Phase 12 (V2 #10) FileProvider paths for the camera bridge.
+
+    Exposes ONLY `cacheDir/plugin-camera/` to the camera app's
+    ACTION_IMAGE_CAPTURE intent. The grant is one-shot per Intent
+    (FLAG_GRANT_WRITE_URI_PERMISSION) and bound to the camera
+    Activity's lifetime — once the capture returns the URI is
+    revoked.
+
+    Spec: docs/plugin-capability-expansion.md "Step 12 CameraBridge".
+-->
+<paths>
+    <cache-path
+        name="plugin-camera"
+        path="plugin-camera/" />
+</paths>

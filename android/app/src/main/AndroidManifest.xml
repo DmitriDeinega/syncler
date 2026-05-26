@@ -29,5 +29,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Phase 12 (V2 #10) CameraBridge writes its
+            ACTION_IMAGE_CAPTURE temp output to a host-owned URI
+            via FileProvider. The authority must match
+            "${context.packageName}.fileprovider" used by
+            CameraBridge.captureImage(). Paths file scopes the
+            provider to the cacheDir/plugin-camera/ subdir so we
+            can't accidentally share other host data.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/plugin_capability_paths" />
+        </provider>
     </application>
 </manifest>
