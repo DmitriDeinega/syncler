@@ -20,6 +20,12 @@ android {
         compose = true
     }
 
+    testOptions {
+        // Phase 12 tests touch SystemClock.elapsedRealtime — let
+        // Android mocked methods return 0 instead of throwing.
+        unitTests.isReturnDefaultValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
