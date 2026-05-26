@@ -149,7 +149,12 @@ class PluginLoader(
             // requires an Application; if context isn't one, fall back to a
             // null coordinator and the bridges will fail with no_foreground_activity
             // at call time. (Service-style contexts are an edge case in v0.1.)
-            val capGrantStore = app.syncler.android.pluginhost.capabilities.CapabilityGrantStore(appContext)
+            // Triad 143 C4 FIX: use the process-singleton so
+            // Settings-side revokes invalidate the bridges'
+            // cache too. Previously this call site and the
+            // Settings VM constructed independent instances
+            // with independent caches.
+            val capGrantStore = app.syncler.android.pluginhost.capabilities.CapabilityGrantStore.shared(appContext)
             val capHandleStore = app.syncler.android.pluginhost.capabilities.CapabilityHandleStore(appContext)
             val capPrompter = app.syncler.android.pluginhost.capabilities.CapabilityGrantPrompter()
             val capCoordinator = (appContext as? android.app.Application)?.let {

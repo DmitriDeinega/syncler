@@ -1,0 +1,53 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+Error executing tool list_directory: Error: Failed to list directory.
+Error executing tool list_directory: Error: Failed to list directory.
+Error executing tool list_directory: Error: Failed to list directory.
+(node:31376) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+After reviewing the V2 closeout implementation and the 10 concerns raised in Consultation 143, here is the per-item verdict and technical rationale.
+
+### Summary Verdicts
+
+| Item | Concern | Verdict | Rationale |
+| :--- | :--- | :--- | :--- |
+| **A** | 1: AuditLogger rename | **OK** | Surgical rename is correct; `record` is semantically neutral and fits the success/fail log pattern. |
+| **B** | 2: Bypass-when-not-loaded | **NIT** | Acceptable for v0.1, but the "plugin usually loaded" assumption is fragile. A load-retry flow is needed for v0.2. |
+| **B** | 3: Argument plumbing | **FIX** | **Critical Mismatch.** `InboxItem.pluginId` is the UUID (`plugin_row_id`), but `PluginRegistry` is keyed by `manifest.id` (Identifier). Action dispatch will likely fail. |
+| **C** | 4: VM cache-coherence | **FIX** | `CapabilityGrantStore` is not a singleton; multiple instances create stale cache islands. Revocations in Settings may not reach active bridges. |
+| **C** | 5: OS-perm interaction | **OK** | Privacy Tip is a good v0.1 compromise. Linking to App Info is a non-breaking future enhancement. |
+| **C** | 6: Empty-state | **OK** | "No grants" is adequate for the current scope. |
+| **D** | 7: Semantics vs Geometry | **OK** | The hybrid approach is a pragmatic first layer for instrumented tests. |
+| **D** | 8: Weight regressions | **NIT** | Acknowledge the gap; weight bugs are a known risk that requires V0.2 Robolectric/Snapshot work. |
+| **—** | 9: Bisect health | **OK** | Commit sequence and dependency graph appear stable. |
+| **—** | 10: Backlog completion | **OK** | Items 1-4 are shipped; `script_fast` is correctly deferred. |
+
+---
+
+### Detailed Findings & Technical Rationale
+
+#### 1. Item B — Argument Plumbing (Concern 3)
+There is a confirmed key mismatch in the action routing path.
+*   **The Key:** `PluginRegistry` keys instances by `manifest.id`. Based on `PluginLoaderTest` and the `PluginManifest` schema, this field maps to the **Plugin Identifier** (e.g., `com.example.plugin`).
+*   **The Caller:** `InboxViewModel.runTemplateAction` passes `selectedItem.pluginId`. In `InboxRepository`, this field is populated from the server's `plugin_id` / `plugin_row_id`, which is a **UUID**.
+*   **Impact:** `PluginRegistry.dispatchAction(uuid)` will return `PLUGIN_NOT_LOADED` even if the plugin is active, because it is stored under its identifier.
+*   **Fix:** `InboxViewModel` should pass `selectedItem.pluginIdentifier` to `runTemplateAction`. Additionally, name resolution in `PluginPermissionsViewModel` (Item C) also fails for the same reason—it tries to lookup a display name from the registry using the UUID.
+
+#### 2. Item C — CapabilityGrantStore Singleton (Concern 4)
+The `CapabilityGrantStore` implementation contains an in-memory `ConcurrentHashMap` cache.
+*   **The Issue:** `PluginPermissionsViewModel` and `PluginLoader.android()` both instantiate fresh `CapabilityGrantStore` wrappers.
+*   **Impact:** When a user revokes a grant in the Settings UI, only the VM's instance observes the cache invalidation. A `PluginInstance` running in a different scope (or even just a different bridge instance if not shared) might continue using a stale `true` grant from its own local cache without hitting the DB.
+*   **Fix:** `CapabilityGrantStore` must be a `@Singleton` (or shared via a common `CapabilityComponent`) to ensure process-wide cache coherence.
+
+#### 3. Item B — Load-and-Dispatch Fallback (Concern 2)
+While acceptable for v0.1, the current bypass weakens the "Plugin First" promise.
+*   **Observation:** In the current build, `PluginRegistry` is almost always empty for inbox cards because nothing in the inbox path calls `PluginLoader`. This means action routing is effectively a 100% fallback to the V1 fire-and-forget path.
+*   **Recommendation:** As we move into V3, the inbox should use a `PluginLoader` to ensure plugins can interpose on actions even if they weren't the ones that rendered the card (e.g., the user re-opens the app and immediately taps an action on a cached card).
+
+#### 4. Item D — Test Adequacy (Concern 7 & 8)
+The transition to instrumented tests is a significant improvement over the previous lack of coverage.
+*   **Geometry Risk:** Typoing a `weight(1f)` in `stat_grid` or a `fillMaxWidth()` in `compact_row` will indeed pass these semantics tests. 
+*   **Verdict:** The hybrid approach (asserting all children are displayed) is acceptable for v0.1, but we should not consider layout "safe" until V0.2 adds geometry assertions or snapshot diffing.
+
+### Recommendation
+Proceed to V3 implementation **ONLY AFTER** applying fixes for the **Key Mismatch (B3)** and **Store Singleton (C4)**. These are structural integrity issues that will cause the newly shipped "Plugin Permissions" and "Action Routing" features to malfunction in production. All other items are OK/NIT and can be addressed as follow-ups.

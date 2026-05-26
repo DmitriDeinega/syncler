@@ -130,6 +130,34 @@ class CapabilityGrantStore(context: Context) {
          * grantedAtMs (which is a positive wall-clock time).
          */
         private const val CACHE_MISS_SENTINEL: Long = Long.MIN_VALUE
+
+        /**
+         * Triad 143 C4 FIX (both reviewers): process-singleton
+         * holder. Settings UI and PluginLoader.android() both
+         * previously instantiated their own wrapper, each with
+         * its own in-memory cache. A Settings-revoke updated
+         * only the VM's cache; a loaded bridge with a positive
+         * cached grant kept observing stale state until process
+         * death. Now both call sites resolve to the same
+         * instance via [shared].
+         */
+        @Volatile
+        private var sharedInstance: CapabilityGrantStore? = null
+
+        fun shared(context: android.content.Context): CapabilityGrantStore {
+            val existing = sharedInstance
+            if (existing != null) return existing
+            return synchronized(this) {
+                sharedInstance ?: CapabilityGrantStore(
+                    context.applicationContext,
+                ).also { sharedInstance = it }
+            }
+        }
+
+        /** Test helper — drop the process-singleton between tests. */
+        internal fun resetForTest() {
+            sharedInstance = null
+        }
     }
 
     /** Test helper — for tests that want to bypass the SecurePrefs path. */

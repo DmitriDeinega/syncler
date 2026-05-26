@@ -365,8 +365,16 @@ fun InboxScreen(
             onDelete = { viewModel.delete(selectedItem.id) },
             onRevoke = { viewModel.revokeSender(selectedItem.senderId) },
             onAction = { aid, endpoint ->
+                // Triad 143 B3 FIX (both reviewers): pass the
+                // plugin IDENTIFIER, not the row UUID. The
+                // PluginRegistry keys instances by manifest.id
+                // (the dotted "com.example.x" string); the
+                // capability bridges also store grants keyed
+                // by manifest.id. `InboxItem.pluginId` is the
+                // server-side row UUID and would always miss
+                // the registry lookup.
                 viewModel.runTemplateAction(
-                    pluginId = selectedItem.pluginId,
+                    pluginId = selectedItem.pluginIdentifier,
                     actionId = aid,
                     endpoint = endpoint,
                     payloadJson = selectedItem.payloadJson,

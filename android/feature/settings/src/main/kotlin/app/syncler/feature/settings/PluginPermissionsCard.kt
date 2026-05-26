@@ -86,11 +86,14 @@ class PluginPermissionsViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
-    // Construct lazily on first use; the store is process-singleton
-    // shaped (lazy SQLCipher open via SecurePrefs passphrase) so
-    // construction is cheap.
+    // Triad 143 C4 FIX: resolve via the process-singleton so
+    // a revoke here invalidates the cache that loaded bridges
+    // also observe. Previously this VM and PluginLoader.android()
+    // each held an independent wrapper with its own cache —
+    // settings-side revokes were silently invisible to active
+    // capability bridges.
     private val grantStore: CapabilityGrantStore by lazy {
-        CapabilityGrantStore(context.applicationContext)
+        CapabilityGrantStore.shared(context.applicationContext)
     }
 
     private val _ui = MutableStateFlow(PluginPermissionsUi(groups = emptyList(), loading = true))
