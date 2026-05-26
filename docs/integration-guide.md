@@ -763,18 +763,7 @@ WS subprotocol: Sec-WebSocket-Protocol: syncler.v1, bearer.<connect_token>
 
 The connect token is a 256-bit single-use bearer minted by `POST /v1/live/connect-token` (the device's regular JWT auths the mint, the WS only sees the opaque token). Tokens expire after 60 seconds. The device side handles minting; you don't touch this from your sender.
 
-Every frame is a JSON object:
-
-```json
-{
-  "type":    "message",
-  "id":      "client-or-server-generated-id",
-  "channel": "ticker",
-  "payload": "<base64 of your V2 envelope>"
-}
-```
-
-Frame `type` values: `open`, `close`, `message`, `ack`, `error`, `ping`, `pong`. A single WS multiplexes many named channels.
+The wire is a multiplex of named **channels** over one socket, with seven frame types (`open / close / message / ack / error / ping / pong`). The full frame schema is in `docs/live-channel.md §"Outer envelope (all frames)"`; the TypeScript SDK + Android runtime handle framing for you, so you only touch the schema if you're building a non-SDK client.
 
 Server enforces:
 - **Heartbeat** — server `ping` every 30s, closes `4408` if no inbound frame in 60s.
