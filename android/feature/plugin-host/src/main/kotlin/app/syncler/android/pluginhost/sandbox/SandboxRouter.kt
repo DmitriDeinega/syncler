@@ -1,7 +1,11 @@
 package app.syncler.android.pluginhost.sandbox
 
+import android.os.Build
+import android.os.ParcelFileDescriptor
 import app.syncler.core.pluginaidl.IPluginHostCallback
+import app.syncler.core.pluginaidl.IPluginSandbox
 import app.syncler.core.pluginaidl.PluginLoadParcel
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +36,15 @@ import timber.log.Timber
 class SandboxRouter(
     private val connection: PluginSandboxConnection,
     private val bridgeDispatcher: BridgeDispatcher,
+    /**
+     * Phase 11: native plugin connection. Null when the host is
+     * running on an API level below 29 (bindIsolatedService gate)
+     * — native_kotlin publishes are rejected with
+     * `native_only_api_29` at load time instead. Caller is
+     * responsible for the null vs. non-null decision; the router
+     * does not gate construction.
+     */
+    private val nativeConnection: NativePluginSandboxConnection? = null,
     private val scope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
@@ -39,8 +52,12 @@ class SandboxRouter(
     private val nextToken = AtomicInteger(1)
     private val handles = java.util.concurrent.ConcurrentHashMap<Int, SandboxHandle>()
 
+    /** Phase 11: per-token IPluginSandbox cache for native plugins. */
+    private val nativeSandboxes = java.util.concurrent.ConcurrentHashMap<Int, IPluginSandbox>()
+
     init {
         connection.onSandboxDeath = ::handleSandboxDeath
+        nativeConnection?.onTokenDeath = ::handleNativeTokenDeath
     }
 
     /**
@@ -58,8 +75,22 @@ class SandboxRouter(
      * and unload. Suspends until the sandbox acknowledges
      * load — on failure the AIDL `IllegalStateException` (with a
      * structured failure code) propagates.
+     *
+     * Phase 11: routes by `parcel.renderer`. `script` goes to the
+     * shared `:plugin` connection (one process, refcounted bind).
+     * `native_kotlin` goes to [NativePluginSandboxConnection]
+     * which spawns one isolated process per token via
+     * `bindIsolatedService(instanceName=token)`. Native loads on
+     * API < 29 fail synchronously with `native_only_api_29`
+     * before any bind is attempted.
      */
-    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle {
+    suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle =
+        when (parcel.renderer) {
+            "native_kotlin" -> loadNative(parcel)
+            else -> loadJs(parcel)
+        }
+
+    private suspend fun loadJs(parcel: PluginLoadParcel): SandboxHandle {
         val sandbox = connection.acquire()
         // Triad 117: pre-register the handle BEFORE the AIDL call so
         // a synchronous-or-oneway callback firing mid-load doesn't
@@ -71,15 +102,14 @@ class SandboxRouter(
             sandboxToken = parcel.sandboxToken,
             pluginId = parcel.pluginId,
             router = this,
+            isNative = false,
         )
         handles[parcel.sandboxToken] = handle
         try {
             val callback = PluginHostCallbackStub(parcel.sandboxToken)
-            // Phase 11: `:plugin` is the JS subprocess and is NOT isolated,
-            // so it can still read `parcel.bundleFilePath` directly from
-            // /data/data/.../files/.... The native (DEX) loader goes
-            // through a different sandbox (PluginNativeSandboxService)
-            // which DOES need the FD. Pass null here.
+            // `:plugin` is the JS subprocess and is NOT isolated, so
+            // it reads `parcel.bundleFilePath` directly. bundleFd is
+            // exclusively for the native (isolated UID) path.
             val returnedToken = sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
             check(returnedToken == parcel.sandboxToken) {
                 "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
@@ -98,12 +128,76 @@ class SandboxRouter(
         }
     }
 
+    private suspend fun loadNative(parcel: PluginLoadParcel): SandboxHandle {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            // bindIsolatedService(instanceName=...) is API 29+. On
+            // older devices the manifest's isolatedProcess=true
+            // still works as a hard process separation, but we
+            // can't get per-token isolation, which is the whole
+            // point. Reject the load loudly.
+            throw IllegalStateException("native_only_api_29")
+        }
+        val native = nativeConnection
+            ?: throw IllegalStateException("native_only_api_29")
+
+        // The isolated sandbox UID can't read host /data/data/...,
+        // so the host opens the staged DEX file here (host UID has
+        // access) and passes the resulting PFD over Binder.
+        val bundleFile = File(parcel.bundleFilePath)
+        val bundleFd = try {
+            ParcelFileDescriptor.open(bundleFile, ParcelFileDescriptor.MODE_READ_ONLY)
+        } catch (exc: Throwable) {
+            Timber.tag(TAG).e(exc, "failed to open bundleFd path=%s", parcel.bundleFilePath)
+            throw IllegalStateException("missing_bundle_fd")
+        }
+
+        val handle = SandboxHandle(
+            sandboxToken = parcel.sandboxToken,
+            pluginId = parcel.pluginId,
+            router = this,
+            isNative = true,
+        )
+        handles[parcel.sandboxToken] = handle
+        try {
+            val sandbox = native.bindForToken(parcel.sandboxToken)
+            nativeSandboxes[parcel.sandboxToken] = sandbox
+            val callback = PluginHostCallbackStub(parcel.sandboxToken)
+            val returnedToken = sandbox.loadPlugin(parcel, callback, bundleFd)
+            check(returnedToken == parcel.sandboxToken) {
+                "native sandbox returned token=$returnedToken but parcel.sandboxToken=" +
+                    "${parcel.sandboxToken} — fatal sandbox bug"
+            }
+            return handle
+        } catch (exc: Throwable) {
+            handles.remove(parcel.sandboxToken)
+            nativeSandboxes.remove(parcel.sandboxToken)
+            runCatching { bundleFd.close() }
+            native.unbindForToken(parcel.sandboxToken)
+            throw exc
+        }
+        // bundleFd ownership: once successfully sent across Binder,
+        // Android dup'd a copy in the sandbox process; closing here
+        // on the success path would race the sandbox's read. The
+        // sandbox closes its dup after reading; we let our handle
+        // fall out of scope so the host's dup closes naturally on
+        // GC. (Explicit close on the success path is left out
+        // intentionally to avoid the race.)
+    }
+
     /**
      * Begin unload. Sandbox fires `onPluginUnloaded` when the
      * teardown completes; the host then releases the connection
      * ref via [releaseHandle].
+     *
+     * Phase 11: native and JS paths use the same callback signal
+     * but different connection types.
      */
     suspend fun unload(handle: SandboxHandle) {
+        if (handle.isNative) {
+            val sandbox = nativeSandboxes[handle.sandboxToken] ?: return
+            sandbox.unloadPlugin(handle.sandboxToken)
+            return
+        }
         val sandbox = connection.acquire()
         try {
             sandbox.unloadPlugin(handle.sandboxToken)
@@ -121,6 +215,11 @@ class SandboxRouter(
         payloadJson: String,
         callbackId: String,
     ) {
+        if (handle.isNative) {
+            val sandbox = nativeSandboxes[handle.sandboxToken] ?: return
+            sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
+            return
+        }
         val sandbox = connection.acquire()
         try {
             sandbox.dispatchHook(handle.sandboxToken, hook, payloadJson, callbackId)
@@ -134,6 +233,12 @@ class SandboxRouter(
         callbackId: String,
         resultJson: String,
     ) {
+        val handle = handles[sandboxToken]
+        if (handle?.isNative == true) {
+            val sandbox = nativeSandboxes[sandboxToken] ?: return
+            sandbox.deliverBridgeResult(sandboxToken, callbackId, resultJson)
+            return
+        }
         val sandbox = connection.acquire()
         try {
             sandbox.deliverBridgeResult(sandboxToken, callbackId, resultJson)
@@ -160,7 +265,14 @@ class SandboxRouter(
     private fun releaseHandle(sandboxToken: Int): Boolean {
         val removed = handles.remove(sandboxToken)
         return if (removed != null) {
-            scope.launch { connection.release() }
+            if (removed.isNative) {
+                // Native: unbind the per-token isolated process.
+                // The OS reaps the synthesized UID on last unbind.
+                nativeSandboxes.remove(sandboxToken)
+                nativeConnection?.unbindForToken(sandboxToken)
+            } else {
+                scope.launch { connection.release() }
+            }
             true
         } else {
             Timber.tag(TAG).w(
@@ -168,6 +280,21 @@ class SandboxRouter(
                 sandboxToken,
             )
             false
+        }
+    }
+
+    /**
+     * Phase 11: a single native plugin's isolated process died.
+     * Unlike [handleSandboxDeath] (which reaps EVERY active handle
+     * because the shared `:plugin` process is gone), this only
+     * affects ONE token — siblings keep running in their own
+     * processes. That per-token isolation is the point.
+     */
+    private fun handleNativeTokenDeath(sandboxToken: Int) {
+        val removed = handles.remove(sandboxToken) ?: return
+        nativeSandboxes.remove(sandboxToken)
+        scope.launch {
+            bridgeDispatcher.onPluginCrashed(removed.sandboxToken, "process_died")
         }
     }
 
@@ -189,11 +316,14 @@ class SandboxRouter(
      * does the release + lifecycle dispatch.
      */
     private fun handleSandboxDeath() {
-        // Snapshot keys (cheap copy) then iterate. The atomic
-        // remove gates both the release AND the dispatch, so a
-        // racing onPluginUnloaded that lost the remove emits
-        // nothing additional.
-        val tokens = handles.keys.toList()
+        // Phase 11 scope tweak: this fires ONLY for the shared
+        // `:plugin` (JS) process. Native plugins each get their
+        // own isolated process and report via
+        // [handleNativeTokenDeath]; we must NOT reap native
+        // handles here (their processes are still alive).
+        val tokens = handles.entries
+            .filter { !it.value.isNative }
+            .map { it.key }
         tokens.forEach { token ->
             val removed = handles.remove(token) ?: return@forEach
             scope.launch {
@@ -288,6 +418,13 @@ class SandboxHandle internal constructor(
     val sandboxToken: Int,
     val pluginId: String,
     private val router: SandboxRouter,
+    /**
+     * Phase 11: `true` if this handle is for a native_kotlin
+     * plugin (bound via NativePluginSandboxConnection, lives in
+     * its own isolated process). `false` for JS plugins
+     * (PluginSandboxConnection, shared :plugin process).
+     */
+    val isNative: Boolean = false,
 ) {
     suspend fun unload() = router.unload(this)
     suspend fun dispatchHook(hook: String, payloadJson: String, callbackId: String) {

@@ -11,6 +11,7 @@ import app.syncler.android.pluginhost.capabilities.MessageBridge
 import app.syncler.android.pluginhost.capabilities.NetworkBridge
 import app.syncler.android.pluginhost.capabilities.NotificationBridge
 import app.syncler.android.pluginhost.capabilities.StorageBridge
+import app.syncler.android.pluginhost.sandbox.NativePluginSandboxConnection
 import app.syncler.android.pluginhost.sandbox.PluginSandboxConnection
 import app.syncler.android.pluginhost.sandbox.SandboxBridgeDelivery
 import app.syncler.android.pluginhost.sandbox.SandboxBridgeDispatcher
@@ -128,7 +129,20 @@ class PluginLoader(
             val networkBridge = NetworkBridge(buildPluginHttpClient(), auditLogger)
             val sandboxConnection = PluginSandboxConnection(appContext)
             val bridgeDispatcher = SandboxBridgeDispatcher()
-            val sandboxRouter = SandboxRouter(sandboxConnection, bridgeDispatcher)
+            // Phase 11: native Kotlin plugin connection is API 29+
+            // (bindIsolatedService instanceName overload). On older
+            // devices the router rejects native_kotlin loads at runtime
+            // with `native_only_api_29`.
+            val nativeConnection = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                NativePluginSandboxConnection(appContext)
+            } else {
+                null
+            }
+            val sandboxRouter = SandboxRouter(
+                connection = sandboxConnection,
+                bridgeDispatcher = bridgeDispatcher,
+                nativeConnection = nativeConnection,
+            )
             return PluginLoader(
                 httpClient = buildPluginHttpClient(),
                 verifier = PluginSignatureVerifier(auditLogger),

@@ -73,6 +73,10 @@ dependencies {
     // sandbox module so PluginSandboxService is reachable by name
     // when PluginSandboxConnection.bindService() fires.
     implementation(project(":feature:plugin-sandbox"))
+    // Phase 11: same reason for the native (isolatedProcess) sandbox
+    // — the APK must declare PluginNativeSandboxService for
+    // bindIsolatedService to resolve.
+    implementation(project(":feature:plugin-native-sandbox"))
     implementation(project(":feature:settings"))
 
     implementation(platform(libs.androidx.compose.bom))
