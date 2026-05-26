@@ -31,6 +31,9 @@ kotlin {
 dependencies {
     // Phase 8c — RotationRepository lives in core/auth.
     implementation(project(":core:auth"))
+    // V2 closeout triad 142 #1: PluginPermissionsCard surfaces
+    // the CapabilityGrantStore.allGrants() + revoke flow.
+    implementation(project(":feature:plugin-host"))
     // Retrofit's HttpException is part of the public surface of
     // RotationRepository's failure path (the rewrap call returns a
     // retrofit Response and unsuccessful codes are wrapped). The

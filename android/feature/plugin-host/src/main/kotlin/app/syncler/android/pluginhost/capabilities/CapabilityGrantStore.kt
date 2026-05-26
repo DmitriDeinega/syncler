@@ -98,6 +98,15 @@ class CapabilityGrantStore(context: Context) {
     suspend fun forPlugin(pluginRowId: String): List<PluginCapabilityGrantRow> =
         db.grants().forPlugin(pluginRowId)
 
+    /**
+     * V2 closeout triad 142 codex #1: Settings revoke screen
+     * needs ALL stored grants, not just grants for currently-
+     * loaded plugins. Used by `CapabilitySettingsViewModel`
+     * to build the per-plugin grant list pivot.
+     */
+    suspend fun allGrants(): List<PluginCapabilityGrantRow> =
+        db.grants().all()
+
     /** Mark the grant as recently invoked so settings can show "last used". */
     suspend fun touch(pluginRowId: String, capability: String, atMs: Long) {
         db.grants().markInvoked(pluginRowId, capability, atMs)

@@ -121,7 +121,7 @@ fun CapabilityGrantDialogHost(prompter: CapabilityGrantPrompter) {
         text = {
             Text(
                 "This plugin is requesting access to $capabilityLabel. " +
-                    "You can revoke this in Settings at any time.",
+                    "You can revoke this in Settings → Plugin permissions at any time.",
             )
         },
         confirmButton = {

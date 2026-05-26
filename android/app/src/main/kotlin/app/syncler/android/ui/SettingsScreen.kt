@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.syncler.feature.settings.ChangePasswordCard
+import app.syncler.feature.settings.PluginPermissionsCard
 import app.syncler.feature.settings.RotateMasterKeyCard
 
 /**
@@ -123,6 +124,11 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 onLogout = onLogout,
             )
+            Spacer(Modifier.height(12.dp))
+            // V2 closeout triad 142 #1 — per-plugin capability
+            // grant list with revoke + last-used hint + privacy
+            // tip on last-plugin OS perm revoke.
+            PluginPermissionsCard(modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = onLogout,

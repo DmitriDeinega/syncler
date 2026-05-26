@@ -82,6 +82,15 @@ interface PluginCapabilityGrantDao {
     @Query("SELECT * FROM plugin_capability_grants WHERE pluginRowId = :pluginRowId")
     suspend fun forPlugin(pluginRowId: String): List<PluginCapabilityGrantRow>
 
+    /**
+     * V2 closeout triad 142 codex #1: Settings UI lists ALL
+     * stored grants regardless of whether the plugin is
+     * currently loaded. The legacy `forPlugin(...)` only
+     * surfaced loaded plugins' rows.
+     */
+    @Query("SELECT * FROM plugin_capability_grants ORDER BY grantedAtMs DESC")
+    suspend fun all(): List<PluginCapabilityGrantRow>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(row: PluginCapabilityGrantRow)
 
