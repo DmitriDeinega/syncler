@@ -1,0 +1,56 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+Here is the review of the Phase 12 capability expansion design.
+
+### 1. WeakReference-to-Activity coordinator design
+**FIX**
+Relying purely on a WeakReference across process boundaries and Intents will drop continuations during standard config changes (e.g., device rotation while the Camera is open).
+**Recommendation:** Go with **(c)** (refuse when no Activity is foregrounded) to keep background logic simple, combined with **(b)** (`ActivityResultRegistry`). The Application or a BaseActivity should hold the `ActivityResultRegistry`. When the capability is invoked, verify an Activity is resumed, launch via the registry, and hold the continuation in a host-level map keyed by `call_id`. If the Activity recreates, the registry re-attaches and routes the result back to the host's pending map.
+
+### 2. Grant prompt rate-limit
+**FIX**
+A 60s cooldown for a denied prompt is hostile UX. A user who says "No" to a camera prompt will be annoyed to see it again a minute later.
+**Recommendation:** Implement a session-based cooldown (clear-once-on-foreground) or an exponential backoff. Alternatively, adopt Android's "Don't ask again" model where two consecutive denials permanently block the prompt for that plugin until manually re-enabled in settings.
+
+### 3. OS permission + grant prompt sequencing
+**FIX**
+For `camera`, `gallery`, and `file`, the UI inherently acts as the grant. The user taking a photo or picking a file *is* the explicit user consent. An in-app prompt beforehand is redundant and annoying.
+**Recommendation:** 
+- **Camera/Gallery/File:** Skip the in-app grant prompt entirely. The OS Intent (Camera app, Photo Picker, SAF) is sufficient proof of user intent.
+- **Location:** Since this is a silent service call, an in-app grant prompt (or persistent notification) *is* required if the user hasn't explicitly granted it to the plugin, followed by the OS prompt if the app itself lacks the permission.
+
+### 4. Photo Picker vs. SAF for gallery
+**OK**
+**Recommendation:** Use the `androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia` backport unconditionally. It cleanly abstracts API level differences, falling back to SAF automatically on older OS versions while providing a unified API to the host.
+
+### 5. Result byte transfer size
+**FIX / DESIGN**
+You cannot return multi-megabyte base64 strings over Binder. Android enforces a strict 1MB limit for *all* concurrent Binder transactions across the process. Passing a 2MB image will throw `TransactionTooLargeException` and crash the host.
+**Recommendation:** Use **(b)**. The host should read the result URI, copy the bytes into a temporary host-owned file (e.g., `cacheDir/plugin-transfer/`), and return the file path or a `ParcelFileDescriptor` to the sandbox. The sandbox reads the file and parses the bytes locally. 
+
+### 6. CameraBridge tempfile lifecycle
+**OK**
+**Recommendation:** Periodic cleanup of `cacheDir` on app startup is standard and robust. To tighten it, proactively delete the temp file immediately after the sandbox successfully reads it via the bridge, or if the `call_id` continuation is cancelled/dropped.
+
+### 7. Location capability granularity
+**FIX**
+Plugins should adhere to the principle of least privilege. Lumping them together forces users to grant precise location to a plugin that only needs to know the current city.
+**Recommendation:** Split into `location.fine` and `location.coarse`. If a plugin requests `fine`, the OS prompt should allow the user to downgrade to `coarse` (standard Android 12+ behavior), and the bridge must gracefully handle returning coarse data.
+
+### 8. Audit log entry per invocation vs. per grant
+**FIX**
+Per-invocation logging for polled capabilities (location) will rapidly bloat the database and cause unnecessary flash wear.
+**Recommendation:** Aggregate high-frequency silent capabilities. Write one row per `(plugin_row_id, capability)` per hour or session, using a `count` and `last_invoked_at_ms` column. Alternatively, log per-invocation only for explicit UI-driven capabilities (Camera/File) and aggregate for background ones.
+
+### 9. Settings-sheet revoke UX
+**NIT**
+**Recommendation:** Start with the per-plugin pivot (`Settings → Plugin X → Capabilities`). Users manage trust primarily at the plugin level (like Android's App Info screen). If time permits, adding a capability pivot is nice-to-have, but per-plugin is the blocker.
+
+### 10. Manifest capability validation gap
+**FIX**
+**Recommendation:** Introduce a manifest version bump if your schema supports it. If backwards compatibility is strictly required, map the legacy `location` manifest string to `location.coarse` to prevent older plugins from silently inheriting high-precision access.
+
+### Missing Considerations for Implementation:
+- **Binder Death Recipients:** If the `:nativePlugin` sandbox process crashes or is killed by the OS while an Activity intent (Camera/SAF) is in-flight, the host must register an `IBinder.DeathRecipient` on the sandbox connection to drop the pending continuation and clean up any staged temp files.
+- **SAF URI Expiration:** For `file` and `gallery`, the `content://` URI returned by the Intent only has read permissions temporarily. The host must immediately open the `InputStream` and copy the data to its own staging file before the Activity result fully completes, otherwise the read permission may be revoked.
+- **Mid-flight Revocation:** Check `PluginPermissionStore` one final time *after* the Activity result returns but *before* dispatching the bytes/file to the sandbox, in case the user revoked the capability in settings while the Intent was open.

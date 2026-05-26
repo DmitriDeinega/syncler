@@ -43,6 +43,56 @@ class InvalidTemplateError(PluginError):
     """Template configuration is malformed or invalid."""
 
 
+class InvalidCapabilityError(PluginError):
+    """Manifest declares a capability the host won't accept (legacy
+    name, mutually exclusive pair, etc.). Phase 12 added."""
+
+
+# Phase 12 (V2 #10): the canonical capability name set after the
+# location split. Source of truth lives in the SDK enum but the
+# server is the final gate — a malicious sender bypassing the SDK
+# still hits this check.
+_VALID_CAPABILITIES = frozenset({
+    "network",
+    "storage",
+    "camera",
+    "gallery",
+    "file",
+    "location.coarse",
+    "location.fine",
+    "background-exec",
+})
+
+
+def _validate_capabilities(capabilities: list[str]) -> None:
+    """Phase 12: reject legacy `location` and mutually-exclusive
+    `location.coarse` + `location.fine` declarations.
+
+    See docs/plugin-capability-expansion.md "Server-side capability
+    validation". The location pair is mutually exclusive so plugins
+    can't smuggle the precise grant under the cover of the coarse
+    declaration.
+    """
+    seen = set()
+    for cap in capabilities:
+        if cap == "location":
+            raise InvalidCapabilityError(
+                "legacy `location` capability is rejected — declare "
+                "`location.coarse` or `location.fine` instead"
+            )
+        if cap not in _VALID_CAPABILITIES:
+            raise InvalidCapabilityError(f"unknown capability: {cap}")
+        if cap in seen:
+            raise InvalidCapabilityError(f"duplicate capability: {cap}")
+        seen.add(cap)
+    if "location.coarse" in seen and "location.fine" in seen:
+        raise InvalidCapabilityError(
+            "location_double_declaration: manifest must not declare both "
+            "`location.coarse` and `location.fine` — declare `location.fine` "
+            "and check the returned precision field for OS-downgraded fixes"
+        )
+
+
 class PluginNotFoundError(PluginError):
     """No plugin with that identifier."""
 
@@ -118,6 +168,14 @@ async def publish_plugin(
     native_sdk_abi: int | None = None,
 ) -> Plugin:
     new_key = _parse_version(version)
+
+    # Phase 12 (V2 #10): location capability split. `location.coarse`
+    # and `location.fine` are mutually exclusive — plugins should
+    # declare `.fine` and check the returned `precision` field to
+    # detect OS-downgraded approximate fixes. Legacy `location` is
+    # rejected; no V0.1 plugins use it. Spec:
+    # docs/plugin-capability-expansion.md "Server-side capability validation".
+    _validate_capabilities(capabilities)
 
     if renderer == "template":
         if not template:

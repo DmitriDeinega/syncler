@@ -10,6 +10,14 @@ export enum DismissBehavior {
 
 /**
  * Runtime capabilities a plugin may request in its manifest.
+ *
+ * Phase 12 (V2 #10) split `LOCATION` into `LOCATION_COARSE` and
+ * `LOCATION_FINE` per the least-privilege principle. Manifests
+ * declaring legacy `location` are rejected at publish time;
+ * manifests declaring BOTH `location.coarse` and `location.fine`
+ * are also rejected — plugins should declare `location.fine` and
+ * check the `precision` field on the result for OS-downgraded
+ * approximate fixes. See docs/plugin-capability-expansion.md.
  */
 export enum Capability {
   NETWORK = 'network',
@@ -17,7 +25,8 @@ export enum Capability {
   CAMERA = 'camera',
   GALLERY = 'gallery',
   FILE = 'file',
-  LOCATION = 'location',
+  LOCATION_COARSE = 'location.coarse',
+  LOCATION_FINE = 'location.fine',
   BACKGROUND_EXEC = 'background-exec',
 }
 

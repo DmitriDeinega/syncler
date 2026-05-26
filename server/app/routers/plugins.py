@@ -23,6 +23,7 @@ from app.schemas import (
 )
 from app.services.plugins import (
     DuplicateVersionError,
+    InvalidCapabilityError,
     InvalidVersionError,
     PluginNotFoundError,
     VersionRegressionError,
@@ -142,6 +143,8 @@ async def publish(
             native_sdk_abi=payload.native_sdk_abi,
         )
     except InvalidVersionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InvalidCapabilityError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except VersionRegressionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
