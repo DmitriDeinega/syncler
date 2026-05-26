@@ -767,7 +767,7 @@ class PluginPublishRequest(BaseModel):
     # published before the template renderer existed — their canonical
     # publish envelope does not include this field, so the conditional
     # serialization in `_publish_envelope` keeps their signature valid.
-    renderer: Literal["script", "template", "native_kotlin"] = "script"
+    renderer: Literal["script", "template", "native_kotlin", "script_fast"] = "script"
     template: TemplateObject | None = None
     # Phase 3b: card_type ("event" or "live") and optional card_key_path
     # for live cards.
@@ -932,7 +932,7 @@ class PluginLatestResponse(BaseModel):
     # Phase 3a. Defaults to "script" so pre-Phase-3a stored rows (where the
     # backfilled server default fills NULL with "script") and pre-Phase-3a
     # clients (which ignore the field) both see the WebView path.
-    renderer: Literal["script", "template", "native_kotlin"] = "script"
+    renderer: Literal["script", "template", "native_kotlin", "script_fast"] = "script"
     template: TemplateObject | None = None
     # Phase 3b: card_type ("event" or "live") and optional card_key_path.
     card_type: Literal["event", "live"] = "event"

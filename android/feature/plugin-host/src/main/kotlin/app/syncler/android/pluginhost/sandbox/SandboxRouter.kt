@@ -87,6 +87,16 @@ class SandboxRouter(
     suspend fun loadPlugin(parcel: PluginLoadParcel): SandboxHandle =
         when (parcel.renderer) {
             "native_kotlin" -> loadNative(parcel)
+            "script_fast" -> {
+                // V2 #13: server accepts script_fast for the
+                // publish pipeline, but the Android engine is
+                // V0.2 work. Reject the load here so the host's
+                // existing error-code UX surfaces the gap
+                // instead of silently falling through to the
+                // WebView path (which would misinterpret the
+                // bundle).
+                throw IllegalStateException(SCRIPT_FAST_NOT_AVAILABLE)
+            }
             else -> loadJs(parcel)
         }
 
@@ -416,6 +426,14 @@ class SandboxRouter(
          * constant rather than the literal.
          */
         const val NATIVE_ONLY_API_29: String = "native_only_api_29"
+
+        /**
+         * V2 #13 host-side error code: the publish pipeline accepts
+         * `script_fast` plugins but the Android execution engine
+         * (QuickJS/Javy) ships in V0.2. The sandbox emits this
+         * code when asked to load one in the interim.
+         */
+        const val SCRIPT_FAST_NOT_AVAILABLE: String = "script_fast_not_available"
     }
 }
 

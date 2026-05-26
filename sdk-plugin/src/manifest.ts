@@ -52,11 +52,17 @@ export interface PluginManifest {
   /** Minimum compatible native bridge version. */
   minPlatformVersion: string;
   /**
-   * Render mode. `'script'` (default) loads the JS bundle in a WebView.
-   * `'template'` ships no JS and uses a native Compose card driven by
-   * [template]. Server defaults to `'script'` when omitted.
+   * Render mode.
+   *  - `'script'` (default) — loads the JS bundle in a WebView.
+   *  - `'template'` — no JS; native Compose card driven by [template].
+   *  - `'script_fast'` (V2 #13) — lighter JS engine (QuickJS) with no
+   *    WebView, no DOM. Server accepts the renderer for publish-pipeline
+   *    parity; the Android runtime ships in V0.2 — until then the
+   *    sandbox returns `unsupported_renderer` for these plugins.
+   *
+   * Server defaults to `'script'` when omitted.
    */
-  renderer?: 'script' | 'template';
+  renderer?: 'script' | 'template' | 'script_fast';
   /**
    * Template manifest. Required when [renderer] is `'template'`; rejected
    * when [renderer] is `'script'`. Validated server-side at publish time.
@@ -222,9 +228,10 @@ export function validatePluginManifest(
   if (
     renderer !== undefined &&
     renderer !== 'script' &&
-    renderer !== 'template'
+    renderer !== 'template' &&
+    renderer !== 'script_fast'
   ) {
-    issues.push('renderer must be "script" or "template" when set');
+    issues.push('renderer must be "script", "template", or "script_fast" when set');
   }
   const effectiveRenderer = renderer ?? 'script';
   if (effectiveRenderer === 'template' && !value.template) {

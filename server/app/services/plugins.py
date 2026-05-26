@@ -210,6 +210,14 @@ async def publish_plugin(
             raise InvalidTemplateError(
                 "native_sdk_abi is required for renderer='native_kotlin'"
             )
+    elif renderer == "script_fast":
+        # V2 #13: server accepts the renderer for publish-pipeline
+        # parity but the Android sandbox returns
+        # `unsupported_renderer` until the engine (QuickJS/Javy
+        # integration) ships in V0.2. Publishers can register
+        # plugins with this renderer today; they're invisible to
+        # devices until the runtime arrives.
+        pass
     elif renderer != "script":
         raise InvalidTemplateError(f"unknown renderer type: {renderer}")
 
