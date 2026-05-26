@@ -1,0 +1,31 @@
+**Item 1: OK**
+
+Take `envelope` as-is. Live push is a transport fanout API, not a card/domain mutation API, so sealing internally would over-constrain it and create confusing helper variants later. The docstring should say the envelope must already be sealed and serializable. I’d also validate `channel` client-side with the same regex to fail before network, but server remains authoritative.
+
+**Item 2: OK**
+
+Add `live_inbound_url: str | None = None` to `publish_plugin(...)` and include `live_inbound_url` only when not `None`. Snake case is right if that is the server schema. No signing-input change is fine as long as publish signing already excludes server-validated mutable metadata or the canonical body rules explicitly tolerate optional fields.
+
+**Item 3: OK**
+
+Unauthenticated is correct. A webhook verification public key is public deployment metadata; hiding it only makes integration worse and does not improve security.
+
+I’d prefer a new `routers/server.py` mounted under `/v1/server/...`. This is deployment discovery, not live-channel behavior. Returning `404` for missing signing seed is acceptable, though `503` is arguably more semantically accurate for server misconfiguration. If the guide will tell partners to fetch this at startup, `503` gives better operational signal. Either is fine if documented.
+
+**Item 4: NIT**
+
+The test is worth adding. I would extract the anonymous factory/provider plumbing into a small named internal class or function, then test that directly. Testing through `PluginLoader.android()` is more brittle and obscures the exact regression: “provider omitted or wrong no-session reason.”
+
+Keep the test focused on the provider behavior and exception codes/messages. Distinct reasons for `session returned null` vs `no Session wired` are useful, but assert on stable fields/code or audit key, not prose if possible.
+
+**Item 5: DESIGN**
+
+Do not fake precision by listing distinct senders from current inbox items. That answers “who has messaged this device recently,” not “who was affected by losing another device,” and can both miss relevant senders and include irrelevant ones.
+
+For v0.1, I agree with the simplification: populate `affectedSenders` from all paired senders, and frame it as a review/re-pair candidate list rather than inferred certainty. If the model name/doc says “affected,” either rename later or add copy/docs that this is a conservative candidate set. Precise inference needs envelope recipient visibility or server-side history and should remain deferred.
+
+**Missed Partner-Facing Risks**
+
+One thing I’d check: error-shape consistency across SDK helpers. `live_push`, `publish_plugin(live_inbound_url=...)`, and webhook-key discovery should have documented status codes and exception behavior, especially `400`, `404/503`, auth failures, and webhook validation failures.
+
+Also ensure the integration guide shows the full loop: publish `live_inbound_url`, fetch webhook public key, verify `X-Syncler-Signature`, then send `live_push`. That sequence is what partner projects will actually copy.
