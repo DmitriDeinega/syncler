@@ -31,6 +31,8 @@ kotlin {
 dependencies {
     // Phase 8c — RotationRepository lives in core/auth.
     implementation(project(":core:auth"))
+    // V4 #18 — SynclerApi.revokeDevice for the lost-device flow.
+    implementation(project(":core:network"))
     // V2 closeout triad 142 #1: PluginPermissionsCard surfaces
     // the CapabilityGrantStore.allGrants() + revoke flow.
     implementation(project(":feature:plugin-host"))
@@ -52,6 +54,9 @@ dependencies {
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.timber)
+    // V4 #18 — SecurityPrefs uses EncryptedSharedPreferences
+    // for the days-based banner marker.
+    implementation(libs.androidx.security.crypto)
 
     ksp(libs.hilt.compiler)
     testImplementation(libs.junit)
