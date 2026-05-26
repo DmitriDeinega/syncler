@@ -1,0 +1,29 @@
+**FIX**
+
+- [docs/integration-guide.md:770](/d:/Projects/syncler/docs/integration-guide.md:770): the TS live sample does not match the shipped SDK. `platform.live.connect("ticker")` returns the bridge connect result, not a channel object with `.onMessage/.send/.close`. Current SDK shape is `platform.live.connect(channel)`, `platform.live.send(channel, envelopeBase64)`, `platform.live.close(channel)`, and incoming frames arrive through the plugin `onLiveMessage` hook. This sample will not compile/work as written.
+
+- [docs/integration-guide.md:789](/d:/Projects/syncler/docs/integration-guide.md:789): `client.live_push(...)` does not exist in `sdk-python/syncler/client.py`. Either document the raw signed `POST /v1/live/plugin/{plugin_row_id}/push` contract, or add/ship the SDK helper before publishing this guide.
+
+- [docs/integration-guide.md:804](/d:/Projects/syncler/docs/integration-guide.md:804): “register a `liveInboundUrl` in your plugin manifest at publish time” is incomplete for Python integrators. The TS manifest has `liveInboundUrl`, but Python `Client.publish_plugin(...)` currently has no `live_inbound_url` parameter, while the server expects snake_case `live_inbound_url`. A partner using the Python SDK cannot follow this instruction.
+
+- [docs/integration-guide.md:742](/d:/Projects/syncler/docs/integration-guide.md:742): rotation endpoint is wrong. Shipped/spec API is `POST /v1/account/rotate-master-key/challenge`, then `POST /v1/account/rotate-master-key`; not `POST /v1/account/rotate-master-key/{challenge, commit}`.
+
+- [docs/integration-guide.md:747](/d:/Projects/syncler/docs/integration-guide.md:747): “your sender’s pairing keys ride the existing rotation rewrap path” is directionally OK but too absolute. The host rewraps local per-sender pairing material under the new master key. Senders do not rotate or receive anything, and if sender pairing material was only present/usable on the lost device or inference says review needed, the user may need to re-pair via the host handoff. Say “no sender API change” rather than implying all pairings always remain transparently usable.
+
+- [docs/integration-guide.md:856](/d:/Projects/syncler/docs/integration-guide.md:856): prefs section says batching boundaries, but spec says v0.1 shipped gate suppression only and WorkManager boundary wakeups are V0.2/outstanding. As written, it over-promises runtime behavior.
+
+**NIT**
+
+- Internal labels leak heavily: [line 40](/d:/Projects/syncler/docs/integration-guide.md:40), [41](/d:/Projects/syncler/docs/integration-guide.md:41), [42](/d:/Projects/syncler/docs/integration-guide.md:42), [43](/d:/Projects/syncler/docs/integration-guide.md:43), section titles [734](/d:/Projects/syncler/docs/integration-guide.md:734), [751](/d:/Projects/syncler/docs/integration-guide.md:751), [810](/d:/Projects/syncler/docs/integration-guide.md:810), [849](/d:/Projects/syncler/docs/integration-guide.md:849). Also “V0.2/v0.1”, “Phase 4.5 doc-bug”, and the closing “Eleven sections…” read internal, not partner-facing.
+
+- Voice consistency: §§12-14 feel bolted on because they switch from tutorial prose to spec digest prose (“V3 #14 added…”, “Privacy invariant”, “Confirm if your usage drifts”). They need the same external voice as §§1-10: “Use this when…”, “Call this…”, “Expect this failure…”.
+
+- [docs/integration-guide.md:38](/d:/Projects/syncler/docs/integration-guide.md:38): “V1 design / V1.5 add” is internal and too implementation-heavy for the top “host does for you” list.
+
+**DESIGN / GAP**
+
+- §12 is not enough for non-TS senders. It omits exact sender-push request JSON, canonical signing bytes/AAD, base64 expectations, recipient envelope shape, and response/error shape. It also doesn’t mention Redis/backplane production posture from `docs/live-backplane.md`: `LIVE_BACKPLANE=redis`, `REDIS_URL`, Redis 6.2+ for `GETDEL`, no mixed-backend rolling deploys.
+
+- §13 needs explicit decision criteria: use `upsert_card` for the initial card, schema/identity changes, `hostPreview` changes, TTL extension, recovery from sequence mistakes, or periodic checkpoints; use `patch_card` only for small high-frequency field replacements on an existing live card and only when you can maintain contiguous `patch_seq`.
+
+- Missing shipped surfaces: guide still says only script/template render modes, but server/SDK also expose `native_kotlin` and `script_fast` surfaces. If intentionally not partner-ready, say “not covered / not public integration surface yet.”
