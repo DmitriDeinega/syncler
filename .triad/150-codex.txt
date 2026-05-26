@@ -1,0 +1,26 @@
+No blocking V4-close issues found. I would greenlight #18/#19 retirement with a few non-blocking notes below.
+
+**Findings**
+- **NIT:** [docs/plugin-prefs.md](D:/Projects/syncler/docs/plugin-prefs.md:49) still shows `"plugin_prefs"` and `"<sender_id>/<plugin_identifier>"`, while the implementation and earlier doc text use existing `plugin_settings` keyed by `plugin_identifier` only. Not a runtime issue, but it weakens the shipped contract.
+- **NIT:** [SecurityPrefs.kt](D:/Projects/syncler/android/feature/settings/src/main/kotlin/app/syncler/feature/settings/SecurityPrefs.kt:52) expires only when `ageMs > 30 days`, so the marker is still active at exactly 30 days. If “once 30 days elapse” is meant literally, this should be `>=`. Not worth blocking.
+- **DESIGN:** [LostDeviceFlow.kt](D:/Projects/syncler/android/feature/settings/src/main/kotlin/app/syncler/feature/settings/LostDeviceFlow.kt:164) has state classes for `DoneAlreadyRotated` / `InProgressOnAnother`, but 409 mapping always returns `Failure.RotationExpired` at line 175. Acceptable as declared v0.1 simplification, but the spec/docs still promise richer 409 mapping.
+
+**Per-Concern Verdicts**
+1. **PluginSettings identity = `plugin_identifier` only:** **OK for v0.1.** Existing map shape plus documented limitation is acceptable. Compound key can wait until collision pressure is real.
+2. **Gate reads `state.value`, not fresh fetch:** **OK.** Notifications are hints; hot-path refresh would add latency, network coupling, and failure modes for marginal benefit.
+3. **Quiet hours use saved timezone:** **OK.** Implementation matches spec: [PluginNotificationGate.kt](D:/Projects/syncler/android/core/push/src/main/kotlin/app/syncler/core/push/PluginNotificationGate.kt:92), covered by test at [PluginNotificationGateTest.kt](D:/Projects/syncler/android/core/push/src/test/kotlin/app/syncler/core/push/PluginNotificationGateTest.kt:94).
+4. **start==end quiet window / UI validation:** **NIT.** Repository trusts callers. Fine for v0.1, but UI should prevent accidental empty windows once screens exist.
+5. **Gate Hilt dep on `UserStateMutator`:** **OK.** Interface is in `:core:storage`, binding exists in [UserStatePrefs.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStatePrefs.kt:98), implementation at [UserStateRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:54). No cycle spotted.
+6. **`modifiedAt = now` on idempotent writes:** **OK.** Some blob churn, but simpler and consistent with LWW merge.
+7. **Coarse 409 mapping:** **DESIGN.** Not a close blocker if v0.1 explicitly accepts it; do not present the richer states as shipped behavior.
+8. **`CheckRotationReady` no-op:** **DESIGN.** Acceptable v0.1 scaffolding. Real remote probe belongs with richer UX/error parsing.
+9. **CharArray zeroing:** **OK with UI caveat.** VM clears the passed buffer on Result and throw paths at [LostDeviceFlow.kt](D:/Projects/syncler/android/feature/settings/src/main/kotlin/app/syncler/feature/settings/LostDeviceFlow.kt:131) and line 145. UI must still clear any source buffer it owns.
+10. **`SecurityPrefs` in `:feature:settings`:** **OK.** Wait for an actual cross-feature banner consumer before extracting.
+11. **Deferred UI / WorkManager / Compose / affected-senders:** **OK.** They are properly v0.2-scoped and don’t invalidate the core shipped invariants.
+
+**Core Invariants**
+CAS merge for #19 is acceptable: plugin prefs merge by later `modifiedAt` in [StateMerger.kt](D:/Projects/syncler/android/core/storage/src/main/kotlin/app/syncler/core/storage/StateMerger.kt:43), with targeted regression coverage at [StateMergerTest.kt](D:/Projects/syncler/android/core/storage/src/test/kotlin/app/syncler/core/storage/StateMergerTest.kt:335).
+
+Privacy invariants look intact: prefs are host-read only through `UserStateMutator.state.value` in [PluginNotificationGate.kt](D:/Projects/syncler/android/core/push/src/main/kotlin/app/syncler/core/push/PluginNotificationGate.kt:58), and server sync encrypts `state.toJson()` before PUT at [UserStateRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/UserStateRepository.kt:455).
+
+I did not rerun tests because you requested review-only/no mutation; build/test outputs would write to the workspace.
