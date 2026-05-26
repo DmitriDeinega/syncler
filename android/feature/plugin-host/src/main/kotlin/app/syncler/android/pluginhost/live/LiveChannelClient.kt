@@ -97,6 +97,17 @@ class LiveChannelClient(
 
     /** Called by [LiveChannel.send]. */
     internal suspend fun sendMessageFrame(channelName: String, envelope: ByteArray) {
+        // Triad 144 BOTH FIX: client-side 64 KB frame cap. The
+        // server enforces this too (closing 4429 on sustained
+        // violation) but failing fast in the client avoids the
+        // base64+JSON encode work and gives the plugin a clean
+        // error before any bytes leave the device.
+        if (envelope.size > MAX_FRAME_BYTES) {
+            throw LiveChannelException(
+                "payload_too_large",
+                "envelope size ${envelope.size} > $MAX_FRAME_BYTES",
+            )
+        }
         ensureConnected()
         val payloadB64 = android.util.Base64.encodeToString(
             envelope, android.util.Base64.NO_WRAP,
@@ -297,6 +308,8 @@ class LiveChannelClient(
 
     companion object {
         private const val TAG = "LiveChannelClient"
+        /** Spec docs/live-channel.md "Wire contract": 64 KB. */
+        const val MAX_FRAME_BYTES: Int = 64 * 1024
     }
 }
 

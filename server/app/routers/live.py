@@ -265,10 +265,23 @@ async def push_live(
     if len(envelope_json) > MAX_FRAME_BYTES:
         raise HTTPException(status_code=413, detail="envelope too large")
 
-    hub = get_hub()
-    delivered = await hub.publish_ephemeral(
-        plugin_topic(plugin_row_id), envelope_json
+    # Triad 144 gemini CRITICAL fix: fan out to (user, plugin)
+    # topics only. Each paired user gets the envelope on its
+    # own scoped topic; devices for OTHER paired users (User B
+    # vs User A) never see the frame even at the metadata layer.
+    paired_result = await db.execute(
+        select(Pairing).where(
+            Pairing.sender_id == plugin.sender_id,
+            Pairing.revoked_at.is_(None),
+        )
     )
+    paired_user_ids = [p.user_id for p in paired_result.scalars().all()]
+    hub = get_hub()
+    delivered = 0
+    for user_id in paired_user_ids:
+        delivered += await hub.publish_ephemeral(
+            plugin_topic(str(user_id), plugin_row_id), envelope_json
+        )
     return LivePushResponse(delivered=delivered)
 
 
@@ -293,17 +306,21 @@ def _extract_bearer_from_subprotocol(websocket: WebSocket) -> str | None:
 
 async def _verify_plugin_paired_to_user(
     db: AsyncSession, plugin_row_id: uuid.UUID, user_id: uuid.UUID
-) -> bool:
+) -> Plugin | None:
     """Confirm the plugin row is active AND its sender is
     currently paired with [user_id]. The pairing join is the
     same shape the inbox routes use; revocation flips
-    pairings.revoked_at and the join falls through."""
+    pairings.revoked_at and the join falls through.
+
+    Returns the validated Plugin row on success (callers
+    cache it for webhook URL lookups), or None on any failure.
+    """
     plugin_result = await db.execute(
         select(Plugin).where(Plugin.id == plugin_row_id)
     )
     plugin = plugin_result.scalar_one_or_none()
     if plugin is None or plugin.revoked_at is not None:
-        return False
+        return None
     pairing_result = await db.execute(
         select(Pairing).where(
             Pairing.user_id == user_id,
@@ -311,7 +328,9 @@ async def _verify_plugin_paired_to_user(
             Pairing.revoked_at.is_(None),
         )
     )
-    return pairing_result.scalar_one_or_none() is not None
+    if pairing_result.scalar_one_or_none() is None:
+        return None
+    return plugin
 
 
 class _SocketState:
@@ -416,10 +435,13 @@ async def plugin_socket(
         await websocket.close(code=CLOSE_BAD_AUTH)
         return
 
-    # Pairing + active-plugin check.
-    if not await _verify_plugin_paired_to_user(
+    # Pairing + active-plugin check. Returns the cached
+    # Plugin row so the inbound message handler can look up
+    # the webhook URL without a second DB hit per frame.
+    plugin_for_session = await _verify_plugin_paired_to_user(
         db, plugin_row_uuid, binding.user_id
-    ):
+    )
+    if plugin_for_session is None:
         await websocket.close(code=CLOSE_BAD_AUTH)
         return
 
@@ -428,7 +450,13 @@ async def plugin_socket(
 
     state = _SocketState()
     hub = get_hub()
-    push_sub = await hub.subscribe_ephemeral(plugin_topic(plugin_row_id))
+    # Triad 144 gemini CRITICAL fix: subscribe to the
+    # (user, plugin) scoped topic only. Even with cross-user
+    # pairings on the same sender, this socket never sees
+    # frames addressed to a different user.
+    push_sub = await hub.subscribe_ephemeral(
+        plugin_topic(str(binding.user_id), plugin_row_id)
+    )
     revoke_sub = await hub.subscribe_control(pairing_revocation_topic())
 
     inbound_task: asyncio.Task[Any] | None = None
@@ -446,6 +474,10 @@ async def plugin_socket(
             except WebSocketDisconnect:
                 closing.set()
                 return
+            # Triad 144 gemini FIX: enforce size + rate-limit
+            # BEFORE any frame parsing so a 10MB malicious
+            # frame doesn't get base64'd / JSON-parsed before
+            # we close the socket.
             if len(msg) > MAX_FRAME_BYTES:
                 await websocket.send_text(
                     _build_error_frame("", None, "payload_too_large")
@@ -456,7 +488,15 @@ async def plugin_socket(
                 close_code["value"] = CLOSE_RATE_LIMIT_EXCEEDED
                 closing.set()
                 return
-            await _handle_inbound_frame(websocket, state, msg)
+            await _handle_inbound_frame(
+                websocket=websocket,
+                state=state,
+                raw=msg,
+                plugin_row_id=plugin_row_id,
+                plugin=plugin_for_session,
+                binding=binding,
+                db=db,
+            )
             state.last_pong_s = time.monotonic()  # ANY frame counts
 
     async def pump_pushes() -> None:
@@ -534,14 +574,23 @@ async def plugin_socket(
 
 
 async def _handle_inbound_frame(
-    websocket: WebSocket, state: _SocketState, raw: str
+    websocket: WebSocket,
+    state: _SocketState,
+    raw: str,
+    plugin_row_id: str,
+    plugin: Plugin,
+    binding: ConnectToken,
+    db: AsyncSession,
 ) -> None:
     """Parse a device→server frame and act on its type:
 
     - `open` — register a new channel (cap-checked).
     - `close` — release a channel.
-    - `message` — payload forwarded to sender (step 5 — V0.1
-      ack-only, no webhook yet).
+    - `message` — payload forwarded to sender via the webhook
+      forwarder (triad 144 BOTH FIX — was ack-only before).
+      Server posts a signed envelope to `plugin.live_inbound_url`
+      with 3 retries; ack on 2xx, error frame back to the
+      device on failure.
     - `pong` — just rolls the heartbeat deadline.
 
     Any unrecognized type or malformed shape sends an `error`
@@ -611,10 +660,52 @@ async def _handle_inbound_frame(
                 _build_error_frame(channel, None, "invalid_frame")
             )
             return
-        # V0.1: ack now; webhook forwarding is step 5.
-        # The frame's `payload` is treated as opaque bytes (an
-        # already-sealed V2-style envelope per the spec).
-        await websocket.send_text(_build_ack_frame(channel, frame_id))
+        # Triad 144 BOTH FIX: forward to sender webhook.
+        # The frame's `payload` is opaque bytes (an already-
+        # sealed V2-style envelope per the spec). If the
+        # plugin has no live_inbound_url set, the sender chose
+        # one-way push only — surface webhook_delivery_failed
+        # so the plugin can branch on the contract.
+        webhook_url = plugin.live_inbound_url
+        payload_str = frame.get("payload")
+        if not isinstance(payload_str, str):
+            await websocket.send_text(
+                _build_error_frame(channel, frame_id, "invalid_frame")
+            )
+            return
+        if webhook_url is None:
+            await websocket.send_text(
+                _build_error_frame(channel, frame_id, "webhook_delivery_failed")
+            )
+            return
+        # Triad 144 codex #6 FIX: refuse to forward if a
+        # webhook URL is configured but no server signing key
+        # exists. Posting unsigned would let a misconfigured
+        # sender accept spoofed traffic.
+        from app.live.webhook import forward_to_sender, _load_signing_key
+        if _load_signing_key() is None:
+            logger.error(
+                "live webhook %s requested but SERVER_SIGNING_SEED_B64 unset; refusing",
+                webhook_url,
+            )
+            await websocket.send_text(
+                _build_error_frame(channel, frame_id, "webhook_delivery_failed")
+            )
+            return
+        result = await forward_to_sender(
+            sender_webhook_url=webhook_url,
+            plugin_row_id=plugin_row_id,
+            channel=channel,
+            envelope_json=payload_str,
+            device_id=binding.device_id,
+            sender_id=plugin.sender_id,
+        )
+        if result.delivered:
+            await websocket.send_text(_build_ack_frame(channel, frame_id))
+        else:
+            await websocket.send_text(
+                _build_error_frame(channel, frame_id, "webhook_delivery_failed")
+            )
         return
 
     if ftype == "pong":

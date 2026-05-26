@@ -318,9 +318,17 @@ def set_hub(hub: BroadcastHub) -> None:
 # --- Topic-namespace helpers (keep call sites grep-able) ---
 
 
-def plugin_topic(plugin_row_id: str) -> str:
-    """V3 #14 WS fan-out routing key."""
-    return f"plugin:{plugin_row_id}"
+def plugin_topic(user_id: str, plugin_row_id: str) -> str:
+    """V3 #14 WS fan-out routing key.
+
+    Triad 144 gemini CRITICAL fix: scoped to (user, plugin)
+    NOT just (plugin). The previous global `plugin:{rowId}`
+    topic delivered every push to every device for every
+    user paired with that sender — User B's WS would receive
+    frames addressed to User A, leaking metadata even when
+    the V2 envelope payload remained opaque.
+    """
+    return f"user:{user_id}:plugin:{plugin_row_id}"
 
 
 def pairing_revocation_topic() -> str:

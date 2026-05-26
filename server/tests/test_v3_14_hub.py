@@ -236,7 +236,7 @@ async def test_control_pairing_revocation_topic_fan_out(
 
 
 def test_plugin_topic_format() -> None:
-    assert plugin_topic("abc-123") == "plugin:abc-123"
+    assert plugin_topic("user-7", "abc-123") == "user:user-7:plugin:abc-123"
 
 
 def test_pairing_revocation_topic_is_stable() -> None:

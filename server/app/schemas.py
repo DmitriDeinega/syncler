@@ -784,6 +784,23 @@ class PluginPublishRequest(BaseModel):
     # HTTPS required in production; HTTP allowed only in
     # development. Spec: docs/live-channel.md "Inbound webhook".
     live_inbound_url: str | None = None
+
+    @field_validator("live_inbound_url")
+    @classmethod
+    def validate_live_inbound_url(cls, value: str | None) -> str | None:
+        # Triad 144 BOTH FIX: enforce the same scheme/host
+        # policy template action endpoints use. Production
+        # rejects http://; dev allows http on canonical-private
+        # IPs only (mirrors _is_allowed_action_endpoint_scheme).
+        if value is None:
+            return None
+        if not _is_allowed_action_endpoint_scheme(value):
+            raise ValueError(
+                "live_inbound_url must be https:// (or http:// against a "
+                "canonical-private IP in development); see "
+                "docs/live-channel.md 'Inbound webhook'"
+            )
+        return value
     native_sdk_abi: int | None = None
     sender_signature: str  # base64 Ed25519 over canonical publish body
 

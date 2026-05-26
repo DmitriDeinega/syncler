@@ -214,15 +214,30 @@ class PluginLoader(
                             override fun build(
                                 plugin: app.syncler.android.pluginhost.PluginInstance,
                             ): app.syncler.android.pluginhost.live.LiveChannelClient {
+                                // Triad 144 codex FIX: route by the
+                                // server row UUID, NOT manifest.id.
+                                // PluginInstance carries the UUID
+                                // separately from V3 #14 onward.
+                                require(plugin.pluginRowId.isNotEmpty()) {
+                                    "live channel requires pluginRowId on PluginInstance"
+                                }
                                 // V0.1: device JWT provider TBD —
                                 // production wiring needs a Session
-                                // dep injected here; for now use a
-                                // placeholder that always throws so
-                                // the plugin sees a clean error.
+                                // dep injected here. Loudly log so
+                                // the gap doesn't slip past review.
                                 return app.syncler.android.pluginhost.live.LiveChannelClient(
                                     baseUrl = "https://syncler.local",
-                                    pluginRowId = plugin.manifest.id,
+                                    pluginRowId = plugin.pluginRowId,
                                     deviceJwtProvider = {
+                                        auditLogger.record(
+                                            plugin.manifest.id,
+                                            "live_no_session",
+                                            "deviceJwtProvider placeholder hit; live disabled",
+                                        )
+                                        timber.log.Timber.tag("LiveBridge").e(
+                                            "deviceJwtProvider placeholder reached — live channel " +
+                                                "wiring incomplete (V0.1)",
+                                        )
                                         throw app.syncler.android.pluginhost.live.LiveChannelException(
                                             "no_session",
                                             "device session not wired into LiveBridge yet",
@@ -278,6 +293,13 @@ interface PluginInstanceFactory {
         bundleFilePath: String,
         bundleBytes: ByteArray,
         manifestJson: String,
+        /**
+         * V3 #14 (triad 144 codex FIX): server-assigned row
+         * UUID. Required for the live-channel WS endpoint;
+         * empty string when the caller doesn't have it (live
+         * connect will refuse).
+         */
+        pluginRowId: String = "",
     ): PluginInstance
 }
 
@@ -313,12 +335,14 @@ class SandboxedPluginInstanceFactory(
         bundleFilePath: String,
         bundleBytes: ByteArray,
         manifestJson: String,
+        pluginRowId: String,
     ): PluginInstance {
         val sandboxToken = sandboxRouter.allocateToken()
         val instance = PluginInstance(
             manifest = manifest,
             grantedCapabilities = grantedCapabilities,
             bundleFilePath = bundleFilePath,
+            pluginRowId = pluginRowId,
         )
         val delivery = SandboxBridgeDelivery(
             sandboxToken = sandboxToken,
@@ -417,6 +441,7 @@ class SandboxedPluginInstanceFactory(
         override fun onPluginCrashed(reason: String) {
             auditLogger.record(pluginId, "plugin_crashed", reason)
             wipeCapabilityHandles(sandboxToken)
+            liveBridge.closeForPlugin(pluginId)
             PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
         }
         override fun onPluginUnloaded() {
@@ -424,6 +449,11 @@ class SandboxedPluginInstanceFactory(
             // dir so handles from this plugin don't outlive the
             // plugin process.
             wipeCapabilityHandles(sandboxToken)
+            // Triad 144 codex FIX: close the live WS client +
+            // kill the reconnect loop on unload. Without this,
+            // a plugin teardown leaves the WS alive in
+            // perpetuity, retrying forever.
+            liveBridge.closeForPlugin(pluginId)
             PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
         }
     }

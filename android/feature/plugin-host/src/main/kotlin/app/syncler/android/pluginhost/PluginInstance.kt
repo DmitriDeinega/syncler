@@ -23,6 +23,19 @@ class PluginInstance(
     val grantedCapabilities: Set<String>,
     val bundleFilePath: String,
     /**
+     * V3 #14 (triad 144 codex FIX): the server's row UUID for
+     * this plugin (i.e. `Plugin.id` UUID). Distinct from
+     * `manifest.id` (dotted identifier) — the live-channel WS
+     * endpoint at `/v1/live/plugin/{plugin_row_id}` requires
+     * the UUID form. Same field that drove the triad 143 B3
+     * key-mismatch fix on dispatchAction; the live-channel
+     * path needs an explicit non-manifest source for it.
+     * Empty string when the loader couldn't surface the row
+     * UUID (legacy load paths); `LiveChannelClient` will
+     * refuse to connect.
+     */
+    val pluginRowId: String = "",
+    /**
      * V2 #11 closeout (triad 140 codex #1 FIX): host-trusted
      * `actionId → endpoint` map populated at load time from the
      * server's `PluginLatestResponse.template.actions`. Used by

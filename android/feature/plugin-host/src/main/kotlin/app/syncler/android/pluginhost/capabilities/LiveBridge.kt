@@ -45,6 +45,29 @@ class LiveBridge(
      */
     private val clientsByPlugin = ConcurrentHashMap<String, LiveChannelClient>()
 
+    /**
+     * Triad 144 codex FIX: track which channels each plugin
+     * has explicitly opened. send() / close() must NOT silently
+     * open a channel that hasn't been connect()'d first —
+     * spec says `channel_not_open` for that case.
+     *
+     * Key = `${pluginId}|${channelName}`.
+     */
+    private val openChannels: MutableSet<String> = java.util.Collections.newSetFromMap(
+        ConcurrentHashMap<String, Boolean>()
+    )
+
+    private fun isOpen(pluginId: String, channelName: String): Boolean =
+        "$pluginId|$channelName" in openChannels
+
+    private fun markOpen(pluginId: String, channelName: String) {
+        openChannels.add("$pluginId|$channelName")
+    }
+
+    private fun markClosed(pluginId: String, channelName: String) {
+        openChannels.remove("$pluginId|$channelName")
+    }
+
     suspend fun connect(plugin: PluginInstance, argsJson: String): String {
         val args = JsonBridgeCodec.objectFrom(argsJson)
         val channelName = args["channel"] as? String
@@ -52,9 +75,18 @@ class LiveBridge(
         val client = clientsByPlugin.getOrPut(plugin.manifest.id) {
             clientFactory.build(plugin)
         }
+        // Triad 144 codex FIX: only wire the incoming flow on
+        // FIRST open. Repeated connect() calls re-return the
+        // cached channel but must not attach a duplicate
+        // collector (which would double-deliver every frame
+        // to the plugin's onLiveMessage hook).
+        val alreadyOpen = isOpen(plugin.manifest.id, channelName)
         return try {
             val channel = client.openChannel(channelName)
-            wireIncoming(plugin, channel)
+            if (!alreadyOpen) {
+                wireIncoming(plugin, channel)
+                markOpen(plugin.manifest.id, channelName)
+            }
             auditLogger.record(plugin.manifest.id, "live_connect_ok", channelName)
             JsonBridgeCodec.toJson(mapOf("channel" to channelName, "ok" to true))
         } catch (exc: LiveChannelException) {
@@ -77,15 +109,20 @@ class LiveBridge(
             android.util.Base64.decode(envelopeB64, android.util.Base64.NO_WRAP)
         }.getOrNull() ?: return JsonBridgeCodec.error("invalid_args")
 
+        // Triad 144 codex FIX: send() must NOT silently open
+        // a channel that wasn't connect()'d first. Spec says
+        // channel_not_open. Also: client-side 64 KB cap before
+        // we even cross the AIDL boundary (codex/gemini #10).
+        if (bytes.size > 64 * 1024) {
+            return JsonBridgeCodec.error("payload_too_large")
+        }
+        if (!isOpen(plugin.manifest.id, channelName)) {
+            return JsonBridgeCodec.error("channel_not_open")
+        }
         val client = clientsByPlugin[plugin.manifest.id]
             ?: return JsonBridgeCodec.error("channel_not_open")
         return try {
-            // open-channel state is the client's concern; if
-            // the plugin hasn't opened this channel send()
-            // will surface a server-side `channel_not_open`
-            // error frame on the incoming flow.
-            val handle = clientChannelHandle(client, channelName)
-                ?: return JsonBridgeCodec.error("channel_not_open")
+            val handle = client.openChannel(channelName)
             handle.send(bytes)
             "{}"
         } catch (exc: Throwable) {
@@ -101,9 +138,17 @@ class LiveBridge(
             ?: return JsonBridgeCodec.error("invalid_args")
         val client = clientsByPlugin[plugin.manifest.id]
             ?: return "{}"
+        // Idempotent close — if the channel wasn't open we
+        // still return OK (the plugin's intent is "I'm done
+        // with it"). But we MUST NOT call openChannel() here:
+        // a previous opening attempt's failure would otherwise
+        // resurrect the WS round-trip on close.
+        if (!isOpen(plugin.manifest.id, channelName)) {
+            return "{}"
+        }
+        markClosed(plugin.manifest.id, channelName)
         return try {
-            val handle = clientChannelHandle(client, channelName) ?: return "{}"
-            handle.close()
+            client.sendCloseFrame(channelName)
             "{}"
         } catch (exc: Throwable) {
             Timber.tag(TAG).w(exc, "live.close threw")
@@ -113,10 +158,15 @@ class LiveBridge(
 
     /**
      * Called from PluginRegistry / unload hooks to release the
-     * per-plugin WebSocket on teardown.
+     * per-plugin WebSocket on teardown. Triad 144 codex FIX:
+     * also drop all per-plugin open-channel marks so a
+     * reconnect after re-load doesn't think old channels are
+     * still open.
      */
     fun closeForPlugin(pluginId: String) {
         clientsByPlugin.remove(pluginId)?.close()
+        val prefix = "$pluginId|"
+        openChannels.removeAll { it.startsWith(prefix) }
     }
 
     private fun wireIncoming(plugin: PluginInstance, channel: LiveChannel) {

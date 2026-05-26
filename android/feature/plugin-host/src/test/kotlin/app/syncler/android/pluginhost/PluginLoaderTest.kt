@@ -89,7 +89,8 @@ class PluginLoaderTest {
                 bundleFilePath: String,
                 bundleBytes: ByteArray,
                 manifestJson: String,
-            ): PluginInstance = PluginInstance(manifest, grantedCapabilities, bundleFilePath)
+                pluginRowId: String,
+            ): PluginInstance = PluginInstance(manifest, grantedCapabilities, bundleFilePath, pluginRowId = pluginRowId)
         },
     )
 
