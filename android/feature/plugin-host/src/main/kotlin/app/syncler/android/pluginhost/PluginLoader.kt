@@ -143,6 +143,17 @@ class PluginLoader(
                 bridgeDispatcher = bridgeDispatcher,
                 nativeConnection = nativeConnection,
             )
+            // Phase 12: capability infrastructure. The CapabilityActivityCoordinator
+            // requires an Application; if context isn't one, fall back to a
+            // null coordinator and the bridges will fail with no_foreground_activity
+            // at call time. (Service-style contexts are an edge case in v0.1.)
+            val capGrantStore = app.syncler.android.pluginhost.capabilities.CapabilityGrantStore(appContext)
+            val capHandleStore = app.syncler.android.pluginhost.capabilities.CapabilityHandleStore(appContext)
+            val capPrompter = app.syncler.android.pluginhost.capabilities.CapabilityGrantPrompter()
+            val capCoordinator = (appContext as? android.app.Application)?.let {
+                app.syncler.android.pluginhost.capabilities.CapabilityActivityCoordinator(it).also { c -> c.attach() }
+            }
+            val capAuditDao = capGrantStore.auditDaoForTest()
             return PluginLoader(
                 httpClient = buildPluginHttpClient(),
                 verifier = PluginSignatureVerifier(auditLogger),
@@ -156,10 +167,34 @@ class PluginLoader(
                     networkBridge = networkBridge,
                     storageBridge = StorageBridge(appContext, auditLogger),
                     notificationBridge = NotificationBridge(appContext),
-                    cameraBridge = CameraBridge(),
-                    galleryBridge = GalleryBridge(),
-                    fileBridge = FileBridge(),
-                    locationBridge = LocationBridge(appContext),
+                    cameraBridge = CameraBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        handleStore = capHandleStore,
+                        auditLogger = capAuditDao,
+                    ),
+                    galleryBridge = GalleryBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        handleStore = capHandleStore,
+                        auditLogger = capAuditDao,
+                    ),
+                    fileBridge = FileBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        handleStore = capHandleStore,
+                        auditLogger = capAuditDao,
+                    ),
+                    locationBridge = LocationBridge(
+                        context = appContext,
+                        coordinator = capCoordinator,
+                        grantStore = capGrantStore,
+                        prompter = capPrompter,
+                        auditLogger = capAuditDao,
+                    ),
                     messageBridge = MessageBridge(auditLogger),
                 ),
                 auditLogger = auditLogger,
