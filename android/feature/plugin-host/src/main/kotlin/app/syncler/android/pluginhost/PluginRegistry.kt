@@ -53,4 +53,14 @@ object PluginRegistry {
         instances.values.forEach(PluginInstance::destroy)
         instances.clear()
     }
+
+    /**
+     * V2 #11: route a user-triggered action (e.g. notification
+     * tap, settings UI button) into the plugin's `onAction` hook.
+     * No-ops if the plugin isn't currently loaded.
+     */
+    fun dispatchAction(pluginId: String, actionId: String, payloadJson: String) {
+        val instance = instances[pluginId] ?: return
+        instance.dispatchHook("onAction", payloadJson, actionId)
+    }
 }

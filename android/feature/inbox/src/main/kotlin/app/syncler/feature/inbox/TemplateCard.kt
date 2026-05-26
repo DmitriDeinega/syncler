@@ -213,6 +213,23 @@ class TemplateActionRunner @Inject constructor() {
     }
 
     suspend fun post(endpoint: String, payloadJson: String) {
+        // Legacy V1 fire-and-forget shape — preserved for the
+        // inbox UI's existing action button code path until the
+        // V2 #11 flow upgrade lands the request/response variant
+        // at the call site too.
+        postWithResponse(endpoint, payloadJson)
+    }
+
+    /**
+     * V2 #11 request/response variant: returns the HTTP status +
+     * body to the caller so a plugin's `ctx.messageRespond(...)`
+     * can surface success/failure back to plugin code.
+     *
+     * Returns null if the scheme check rejects (caller treats
+     * this as an io_error / blocked outcome) or if the network
+     * call throws.
+     */
+    suspend fun postWithResponse(endpoint: String, payloadJson: String): TemplateActionResponse? =
         withContext(Dispatchers.IO) {
             // Release builds reject cleartext outright. NetworkBridge does
             // the same check; we mirror it here so a leaked-template
@@ -222,7 +239,7 @@ class TemplateActionRunner @Inject constructor() {
                 (BuildConfig.DEBUG && endpoint.startsWith("http://"))
             if (!schemeOk) {
                 Timber.tag(TAG).w("template action POST %s blocked: non-HTTPS", endpoint)
-                return@withContext
+                return@withContext null
             }
             runCatching {
                 val request = Request.Builder()
@@ -230,6 +247,7 @@ class TemplateActionRunner @Inject constructor() {
                     .post(payloadJson.toRequestBody(JSON_MEDIA))
                     .build()
                 httpClient.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: ""
                     if (!response.isSuccessful) {
                         Timber.tag(TAG).w(
                             "template action POST %s failed: HTTP %d",
@@ -239,16 +257,19 @@ class TemplateActionRunner @Inject constructor() {
                     } else {
                         Timber.tag(TAG).i("template action POST %s ok", endpoint)
                     }
+                    TemplateActionResponse(status = response.code, body = body)
                 }
             }.onFailure {
                 Timber.tag(TAG).w(it, "template action POST %s threw", endpoint)
-            }
+            }.getOrNull()
         }
-    }
 
     private companion object {
         val JSON_MEDIA = "application/json".toMediaType()
     }
 }
+
+/** V2 #11: typed result for plugin-facing message.respond. */
+data class TemplateActionResponse(val status: Int, val body: String)
 
 private const val TAG = "TemplateCard"
