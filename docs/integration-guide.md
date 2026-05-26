@@ -35,12 +35,12 @@ Once a card is in a user's inbox, the host handles all of the following without 
 - **Bottom navigation** (Inbox / Senders / Settings) — the user is always one tap away from your card.
 - **Revocation UX** — if you revoke a plugin version with a `compromised` reason, the host refuses to execute the bundle on the device and shows a security banner instead. See §5.5.
 - **Live cards pin above events.** When mixed in the same inbox, live cards (`card_type: "live"`) sort above event cards (`card_type: "event"`), each subsorted by recency. The "Live" view in the drawer shows only live cards.
-- **Per-device dismiss (server-side filter).** When the user dismisses a message on device A, `/v1/messages/{id}/dismiss` writes a `DeliveryStatus` row keyed on `(message_id, device_id=A)`. Subsequent calls to `/v1/messages/inbox` from device A LEFT JOIN `DeliveryStatus` for `device_id=A` and filter rows where `dismissed_at IS NOT NULL` out of A's feed. The dismiss SSE event still fans out to *all* of the user's devices, but the server-side filter is per-device — devices B, C, etc. receive the hint and refresh, but their own feeds keep the row until they dismiss it themselves. V1 design: dismiss is a per-device gesture (some users want a card visible elsewhere); cross-device "dismiss everywhere" is a V1.5 add.
+- **Per-device dismiss (server-side filter).** When the user dismisses a message on device A, `/v1/messages/{id}/dismiss` writes a `DeliveryStatus` row keyed on `(message_id, device_id=A)`. Subsequent calls to `/v1/messages/inbox` from device A LEFT JOIN `DeliveryStatus` for `device_id=A` and filter rows where `dismissed_at IS NOT NULL` out of A's feed. The dismiss SSE event still fans out to *all* of the user's devices, but the server-side filter is per-device — devices B, C, etc. receive the hint and refresh, but their own feeds keep the row until they dismiss it themselves. Dismiss is a per-device gesture by design — some users want a card visible elsewhere; a cross-device "dismiss everywhere" toggle is on the roadmap.
 - **Real-time hints over SSE.** Foreground devices keep an authenticated Server-Sent Events stream open to `/v1/events`. The server pushes content-blind hints — `inbox.changed`, `state.changed`, `dismiss`, `card.upsert`, `card.delete` — and the client re-fetches over REST in response. The actual payloads still flow over the existing pull endpoints; SSE is the wakeup signal, not the data channel. Backgrounded devices fall back to FCM.
-- **Two-way live channel (V3 #14).** Plugins can open a long-lived authenticated WebSocket via `platform.live.connect(channel)` for sub-second bidirectional messaging. The host owns the WS lifecycle (heartbeat, reconnect, rate limit, revocation-driven close); your plugin code just calls `connect / send / close` and an `onLiveMessage` hook fires per incoming frame. The server is a routing pipe — frames carry your V2-encrypted envelopes opaquely. See §12.
-- **Field-level live-card patches (V3 #16).** Persistent live cards can be updated one field at a time with `client.patch_card(card_id, patches=[(field, value)])` — no whole-card re-encryption per tick. The host applies the patch on top of the existing card payload atomically; failed/missing patches in the chain fall back to the last full upsert. See §13.
-- **Guided lost-device recovery (V4 #18).** The Settings → Security → "I lost a device" flow walks the user through device revoke → master-key rotation → re-pair handoff as a single security-recovery wizard. The user no longer has to remember the three-step manual procedure from V1. See §11.
-- **Per-plugin user preferences (V4 #19).** The user can mute your plugin, override the displayed label, set notification cadence (realtime / 15-min / hourly / daily digest), and configure quiet hours — all without any plugin-side code. The OS notification is gated; the inbox row still updates so the user sees the missed event on next open. See §14.
+- **Two-way live channel.** Plugins can open a long-lived authenticated WebSocket via `platform.live.connect(channel)` for sub-second bidirectional messaging. The host owns the WS lifecycle (heartbeat, reconnect, rate limit, revocation-driven close); your plugin code just calls `connect / send / close` and an `onLiveMessage` hook fires per incoming frame. The server is a routing pipe — frames carry your V2-encrypted envelopes opaquely. See §12.
+- **Field-level live-card patches.** Persistent live cards can be updated one field at a time with `client.patch_card(card_id, patches=[(field, value)])` — no whole-card re-encryption per tick. The host applies the patch on top of the existing card payload atomically; failed/missing patches in the chain fall back to the last full upsert. See §13.
+- **Guided lost-device recovery.** The Settings → Security → "I lost a device" flow walks the user through device revoke → master-key rotation → re-pair handoff as a single security-recovery wizard. See §11.
+- **Per-plugin user preferences.** The user can mute your plugin, override the displayed label, set notification cadence (realtime / 15-min / hourly / daily digest), and configure quiet hours — all without any plugin-side code. The OS notification is gated; the inbox row still updates so the user sees the missed event on next open. See §14.
 
 You don't need to opt into any of these. Populate `hostPreview` and they all work.
 
@@ -731,85 +731,136 @@ The device verifies the downloaded bundle against the row's SHA-256 `bundle_hash
 
 Archive/delete are user-organization states synced through the encrypted user-state blob. They do not remove the server copy, and archive does not store a local message body beyond the server's retention window.
 
-## 11. Lost or compromised devices (V4 #18 guided flow)
+## 11. Lost or compromised devices
 
-V4 #18 wrapped the three-step manual procedure into a single Settings flow. The user opens **Settings → Security → "I lost a device"** on a trusted device and the host walks them through:
+The host now wraps the revoke + rotate sequence into a single guided flow. The user opens **Settings → Security → "I lost a device"** on a trusted device and walks through:
 
 1. **Pick the lost device** from the enrolled-devices list (current device is excluded).
 2. **Preflight** — the flow confirms the rotation endpoint is reachable before any irreversible step.
-3. **Confirm revoke** — full-screen warning. POST `/v1/auth/devices/{device_id}/revoke` runs server-side; idempotent (a concurrent revoke on another trusted device just reads back as "already revoked").
+3. **Confirm revoke** — full-screen warning. `POST /v1/auth/devices/{device_id}/revoke` runs server-side; idempotent (a concurrent revoke on another trusted device just reads back as "already revoked").
 4. **Rotation recommended** — the host explains why rotation is the security completion step (the lost device may still hold the user's master-key wrap). Two buttons: "Rotate now" / "Skip for now".
-5. **Rotate** — user re-enters their master password. The flow calls `POST /v1/account/rotate-master-key/{challenge, commit}` and rewraps every per-sender pairing under the new key.
+5. **Rotate** — user re-enters their master password. The flow calls `POST /v1/account/rotate-master-key/challenge` followed by `POST /v1/account/rotate-master-key`, rewrapping every per-sender pairing entry the host holds locally under the new master key.
 6. **Done** — summary lists the senders that need re-pair (best-effort inferred from the lost device's recent inbox traffic) with deep-links into the existing pairing flow.
 
 If the user picks "Skip for now" at step 4, a home-screen banner appears for **30 days** ("You revoked a device but didn't rotate your master key — rotate now"). After 30 days the banner auto-clears so a user who genuinely doesn't want to rotate isn't nagged forever. Spec: `docs/lost-device-flow.md`.
 
-**What you need to do as an integrator**: nothing. The flow is host-internal. Your sender's pairing keys ride the existing rotation rewrap path; on next message after rotation the device decrypts under the new key transparently.
+**What you need to do as an integrator**: no sender-side API change. Host rewraps the local per-sender pairing material under the new master key during step 5; subsequent messages from your sender decrypt transparently. **However**: if the user's pairing with your sender was only set up on the lost device (and never synced down to another device before the loss), the host has nothing to rewrap and the user must re-pair through your existing pairing flow. The "Done" summary surfaces this case as a deep-link checklist.
 
-**Past cached data caveat (unchanged)**: messages already cached on the lost device remain encrypted under the previous master key. If the lost device is compromised AND the master key is extracted from secure storage, that historical data is unrecoverable. Syncler does not support remote wipe.
+**Past cached data caveat**: messages already cached on the lost device remain encrypted under the previous master key. If the lost device is compromised AND the master key is extracted from secure storage, that historical data is unrecoverable. Syncler does not support remote wipe.
 
-## 12. Two-way live channel (V3 #14)
+## 12. Two-way live channel
 
-V3 #14 added a multiplexed authenticated WebSocket so plugins can push and receive sub-second messages without polling. Server is a routing pipe — your **V2 envelopes ride opaque through the channel**; the WS sees only routing metadata + heartbeat frames.
+Use this when you need sub-second bidirectional messaging — score tickers, presence updates, chat hints, control signals. The host opens an authenticated WebSocket per plugin row; your **V2 envelopes ride opaque through the channel**, so the server stays content-blind. Don't use this for state of record (the inbox is still the authoritative path).
 
-### Wire shape (you don't usually touch this directly)
+### Wire contract — what every sender needs to know
 
-- WS endpoint: `wss://api.syncler.app/v1/live/plugin/{plugin_row_id}`.
-- Auth is two-step: device exchanges its JWT for a 256-bit single-use **connect token** via `POST /v1/live/connect-token`, then opens the WS with `Sec-WebSocket-Protocol: syncler.v1, bearer.<token>`. Tokens expire in 60s and are single-use (`SET EX 60 NX` + `GETDEL`).
-- Multiplex: a single WS carries multiple **channels** (named strings). Each frame is a JSON envelope with `{type, id, channel, payload}`. Frame types: `open`, `close`, `message`, `ack`, `error`, `ping`, `pong`.
-- Heartbeat: server sends `ping` every 30s; if no inbound frame arrives within 60s the server closes the socket with code `4408`.
-- Rate limit: 16 KB/s sustained per socket, 64 KB burst. Exceeded → close `4429`.
-- Revocation: when the user revokes the device's pairing with your sender, the server publishes on a control bus; every WS subscribing to that pairing closes `4401` immediately.
+```
+WS endpoint:   wss://api.syncler.app/v1/live/plugin/{plugin_row_id}
+WS subprotocol: Sec-WebSocket-Protocol: syncler.v1, bearer.<connect_token>
+```
 
-### Plugin side (TypeScript SDK)
+The connect token is a 256-bit single-use bearer minted by `POST /v1/live/connect-token` (the device's regular JWT auths the mint, the WS only sees the opaque token). Tokens expire after 60 seconds. The device side handles minting; you don't touch this from your sender.
 
-```ts
-import { platform } from "@syncler/plugin-sdk";
+Every frame is a JSON object:
 
-async function run() {
-  const channel = await platform.live.connect("ticker");
-  channel.onMessage((envelopeBytes) => {
-    // envelopeBytes is the opaque V2-sealed payload from your sender.
-    // Decrypt with your existing V2 helpers.
-    handleIncoming(envelopeBytes);
-  });
-  await channel.send(buildOutgoingV2Envelope());
-  // ...later
-  await channel.close();
+```json
+{
+  "type":    "message",
+  "id":      "client-or-server-generated-id",
+  "channel": "ticker",
+  "payload": "<base64 of your V2 envelope>"
 }
 ```
 
-V3 #15 added `platform.live.subscribe(channel, handler)` as one-line sugar over `connect + onMessage`. Use whichever fits.
+Frame `type` values: `open`, `close`, `message`, `ack`, `error`, `ping`, `pong`. A single WS multiplexes many named channels.
 
-### Sender side — pushing into the live channel
+Server enforces:
+- **Heartbeat** — server `ping` every 30s, closes `4408` if no inbound frame in 60s.
+- **Rate limit** — 16 KB/s sustained, 64 KB burst per socket; over-budget closes `4429`.
+- **Revocation** — when the user revokes their pairing with your sender, every device's WS for that plugin row closes `4401` immediately. No grace period.
 
-Your backend can fan-out to all of a user's connected devices for a given plugin row:
+### Pushing from your sender into the live channel
 
-```python
-client.live_push(
-    user_id="...",
-    plugin_row_id="...",
-    channel="ticker",
-    envelope=build_v2_envelope(payload, recipients=user_devices),
-)
+Your backend POSTs a signed envelope to a per-plugin-row endpoint and the server fans it out to every active device WS for that user:
+
+```
+POST https://api.syncler.app/v1/live/plugin/{plugin_row_id}/push
+Content-Type: application/json
 ```
 
-This POSTs to `/v1/live/plugin/{plugin_row_id}/push` with an **Ed25519-signed body** (server verifies against your registered key) and the server publishes on the user-scoped topic `user:{user_id}:plugin:{plugin_row_id}`. Every device's open WS for that plugin row receives the frame.
+Body:
 
-### Sender side — receiving from devices
+```json
+{
+  "sender_id":                 "<your sender UUID>",
+  "user_id":                   "<recipient user UUID>",
+  "channel":                   "ticker",
+  "envelope":                  "<base64 of the V2 envelope>",
+  "envelope_signature":        "<base64 Ed25519 signature over canonical(envelope+routing fields)>"
+}
+```
 
-Devices can send TO your backend over the live channel too. Two delivery paths land at your service:
+The canonical signing bytes match `docs/crypto-spec.md §11.8` (sorted-keys JSON over `{channel, envelope, plugin_row_id, sender_id, user_id}`). Server verifies against your registered Ed25519 public key, then publishes on the user-scoped topic `user:{user_id}:plugin:{plugin_row_id}`.
 
-1. **Direct frame**: the device calls `channel.send(envelopeBytes)` → server routes back to senders subscribed to the same topic (none, today — sender-side WS is not a v0.1 surface; this is the catch-up via #2).
-2. **Webhook forwarder**: register a `liveInboundUrl` in your plugin manifest at publish time. The server POSTs every device-originated frame to that URL with an **Ed25519 signature** the server holds the private half of (you fetch the server's public key at registration time). Three retries with backoff (1s / 4s / 16s); 5s per-attempt timeout. If signing isn't configured server-side, forwarding fails LOUDLY rather than silently dropping authenticity.
+Today the Python SDK does not ship a typed `live_push` helper — drive the raw POST until that lands. The TypeScript SDK exposes the device-side `platform.live.connect/send/close` surface but not a sender helper either.
 
-Privacy: the webhook body contains the device's V2 envelope (opaque to the server) + a server-generated `device_pseudonym = HMAC(device_id, sender_id)` — your service can correlate "same device, same sender" without ever seeing real device IDs across senders.
+### Receiving from devices on your sender
 
-Spec: `docs/live-channel.md`. Open the spec when you implement the live channel; it pins the frame schema + auth flow.
+Devices push back to you via a server-operated webhook forwarder. Two prerequisites:
 
-## 13. Field-level live-card patches (V3 #16)
+1. **Register a `liveInboundUrl`** in your plugin manifest at publish time. The TypeScript SDK manifest exposes this field; the Python SDK does not yet — for now Python integrators set it through the raw `/v1/plugins/publish` body until `Client.publish_plugin` grows the parameter.
+2. **Fetch the server's Ed25519 public key** from the registration response and pin it in your service. Every webhook POST you receive is signed under the matching private key.
 
-For persistent live cards (`card_type: "live"`) that change frequently — scoreboards, typing indicators, presence dots — V3 #16 adds `client.patch_card(...)` so you don't pay the per-tick full-card seal cost. The wire frame is opaque (server NEVER sees the field path or the new value); per-recipient HPKE-sealed JSON patches ride inside.
+When a device sends a frame, the server delivers to your endpoint:
+
+```
+POST <liveInboundUrl>
+Content-Type: application/json
+X-Syncler-Signature: <base64 Ed25519 over the body>
+```
+
+Body:
+
+```json
+{
+  "plugin_row_id":     "...",
+  "channel":           "...",
+  "device_pseudonym":  "<hex HMAC(device_id, sender_id)>",
+  "envelope":          "<base64 V2 envelope from the device>",
+  "received_at":       "2026-05-26T22:01:34Z"
+}
+```
+
+Privacy notes:
+- The envelope is opaque — server cannot decrypt; only the targeted user's devices can.
+- `device_pseudonym` lets you correlate "same device, same sender" across messages without ever learning the real device ID and without that pseudonym matching one held by any other sender.
+- Three retries with exponential backoff (1s → 4s → 16s); 5s per-attempt timeout. If the server's signing key isn't configured, the forwarder fails LOUDLY rather than dropping the signature.
+
+Spec deep-dive: `docs/live-channel.md`. Read it before shipping a live integration — it pins the multiplex frame schema, the close-code table, and the connect-token contract in full.
+
+### Operator note (production)
+
+The server's live fan-out is backed by a Redis transport in any multi-worker deployment (`LIVE_BACKPLANE=redis` + `REDIS_URL`). For single-worker dev the default `memory` backplane works without Redis. The integrator doesn't pick this; the operator does. Spec: `docs/live-backplane.md`.
+
+## 13. Field-level live-card patches
+
+For persistent live cards (`card_type: "live"`) that change frequently — scoreboards, typing indicators, presence dots — use `client.patch_card(...)` instead of paying the per-tick full-card seal cost of `upsert_card`. The wire frame is opaque (server NEVER sees the field path or the new value); per-recipient HPKE-sealed JSON patches ride inside.
+
+### When to use which
+
+Use `upsert_card` when:
+- You're publishing the card for the first time.
+- The card's identity (`card_key`, `card_type`) or schema changed.
+- The `hostPreview` block changes (title / subtitle / summary).
+- You need to extend the TTL beyond the current `expires_at`.
+- You're recovering from a sequencing mistake — a new upsert resets the patch chain.
+
+Use `patch_card` when:
+- The card exists (an `upsert_card` already landed) and only a small set of fields needs to change.
+- Your update rate is high enough that re-sealing the whole payload per tick hurts.
+- You can maintain **contiguous `patch_seq`** numbering (one publisher per card; no gaps).
+
+If you can't guarantee contiguous publishing — e.g. multiple worker processes might race on the same `(card_id, base_seq)` — fall back to `upsert_card` per tick. The server rejects gaps and replays with `409`; a non-publisher process trying to patch usually loses that race.
 
 ### Sender side
 
@@ -846,23 +897,32 @@ Disconnected devices catch up on the next `/v1/messages/inbox` pull. The inbox r
 
 Spec: `docs/live-card-patch.md`. **Privacy invariant**: the outer wire frame never carries plaintext field paths or values, ever. Confirm if your usage drifts.
 
-## 14. Per-plugin user preferences (V4 #19)
+## 14. Per-plugin user preferences
 
-The user controls these per-plugin settings from the host UI (no plugin-side code). All sync cross-device through the encrypted user-state blob.
+The user controls these per-plugin settings from the host UI. There's no integration step — your sender keeps calling the same publish + send APIs, and the host gates notifications transparently. They sync across the user's devices through the existing encrypted user-state blob.
 
 | Preference | Behavior |
 |---|---|
 | **Label override** | Free-form 64-char string. Falls back to your manifest's `name`. |
-| **Notification cadence** | `realtime` (default) / `batched_15m` / `batched_1h` / `digest_daily`. Non-realtime cadences suppress the immediate OS notification; the inbox row still updates so the user sees the missed events on next open. Wall-clock-aligned batching boundaries (V0.2 ships WorkManager-scheduled wake-ups; v0.1 ships gate suppression only). |
+| **Notification cadence** | `realtime` (default) / `batched_15m` / `batched_1h` / `digest_daily`. Non-realtime cadences **suppress the immediate OS notification**; the inbox row still updates so the user sees the missed events on next inbox open. Wall-clock-aligned batched delivery (one notification fired per boundary) is on the roadmap; today only the suppression half ships. |
 | **Quiet hours** | Configurable start + end local-hour window in the user's saved IANA timezone (NOT the device's current timezone — a traveler keeps their home quiet hours). Wraps midnight when start > end. Suppresses **notifications only**; data ingestion continues normally so inbox + live-card state stay current. |
 | **Mute** | Per-plugin mute; independent of the per-sender mute. Both must be off for a notification to fire. |
 
-**What you need to do as an integrator**: nothing. Your sender's `send_to / upsert_card / patch_card / live_push` paths are unchanged. The notification adapter gates on prefs before posting; if it suppresses, the message still arrives in the inbox.
+**What you need to do as an integrator**: nothing. Your sender's `send_to / upsert_card / patch_card / live push` paths are unchanged. The notification adapter gates on prefs before posting; if it suppresses, the message still arrives in the inbox.
 
-Cross-device CAS merge follows the existing user-state lockstep contract — last-writer-wins on `modified_at` for the whole `PluginSettings` row. Two devices concurrently editing prefs for the same plugin: the later write wins whole-row (intermediate mute toggles can be lost, but no row corruption). This is the v0.1 trade-off — field-level prefs merge is V0.2 if needed.
+Cross-device sync follows the existing user-state lockstep contract — last-writer-wins on `modified_at` for the whole settings row. Two devices concurrently editing prefs for the same plugin: the later write wins whole-row (intermediate mute toggles can be lost, but no row corruption). Field-level merge is on the roadmap if real concurrent-edit pressure appears.
 
-Spec: `docs/plugin-prefs.md`. The plugin SDK has NO API to read or write prefs (intentional — prefs are user policy, not plugin policy).
+Spec: `docs/plugin-prefs.md`. The plugin SDK has NO API to read or write prefs — they're user policy, not plugin policy.
+
+## 15. Surfaces not covered in this guide
+
+The platform ships a few execution surfaces beyond `script` and `template` that aren't a public integration target yet. Mentioning them so you don't go looking:
+
+- **`native_kotlin` plugins** — signed DEX-loaded plugins running in an isolated Android process. Available to Syncler-internal first-party plugins; the public SDK + signing pipeline for partners ships later.
+- **`script_fast`** — a Javy/QuickJS runtime alternative to the WebView for pure-logic plugins. Same wire contract as `script`; different host execution path. Not partner-ready.
+
+For partner integrations today, `renderer: "script"` and `renderer: "template"` are the two options.
 
 ---
 
-**Eleven sections.** If you needed more than that to integrate, the SDK has a DX problem — file a finding back at the Syncler team.
+**Fifteen sections.** If you needed more than that to integrate, the SDK has a DX problem — file a finding back at the Syncler team.
