@@ -1,0 +1,43 @@
+**Findings**
+
+1. **FIX: `/v1/cards/patch` loses stale-recipient retry semantics.**  
+   In [server/app/routers/cards.py](D:/Projects/syncler/server/app/routers/cards.py:338), patch uses the same classifier as upsert, but returns `detail=classification.message` for all classifier errors. The Python SDK retry path only recognizes `detail.error == "stale_recipient_set"` in [sdk-python/syncler/client.py](D:/Projects/syncler/sdk-python/syncler/client.py:468), so `patch_card()` will not refetch/reseal on stale recipient sets. Mirror the upsert response shape/header from [server/app/routers/cards.py](D:/Projects/syncler/server/app/routers/cards.py:91).
+
+2. **FIX: duplicate concurrent `patch_seq` can 500 instead of 409.**  
+   The endpoint checks `last_patch_seq`, adds `CardPatch`, then commits without catching PK collision in [server/app/routers/cards.py](D:/Projects/syncler/server/app/routers/cards.py:320) and [server/app/routers/cards.py](D:/Projects/syncler/server/app/routers/cards.py:356). Two concurrent identical `(plugin, card, base, patch_seq)` requests can both pass the precheck; one commit wins and the loser likely raises `IntegrityError` as a 500. Catch it and map to `409 patch_seq_regression` or duplicate.
+
+3. **DESIGN/FIX before relying on catch-up: server accepts patch gaps.**  
+   The server allows any `patch_seq > last_patch_seq` in [server/app/routers/cards.py](D:/Projects/syncler/server/app/routers/cards.py:329), while Android refuses gaps in [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:386) and [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:514). A buggy sender can persist patch 7 when 1-6 do not exist; every device will drop live push and catch-up will halt forever until next whole-card upsert. If “trust sender sequence discipline” is intentional for v0.1, document it. I would prefer server-side contiguous CAS: require `patch_seq == last + 1`.
+
+4. **FIX/NIT: `card_patches` retention is missing from the actual retention job.**  
+   The migration documents 48h TTL and has a `created_at` index, but [server/app/jobs/retention.py](D:/Projects/syncler/server/app/jobs/retention.py:13) only deletes messages, live cards, pairings, rate limits, nonce replay, and rotation challenges. This is not privacy-breaking, but it is unbounded growth and leaves orphaned opaque envelopes after live-card expiry.
+
+**Per-Concern Verdicts**
+
+1. `applyCatchUpPatches` vs `acceptCardPatch`: **NIT leaning FIX soon.** The worst duplication has already been reduced: live uses `applyPatchDto`, catch-up uses `applyPatchToCardOrNull`, both share `applyReplaceOps`. Still, signature/decrypt/AAD logic is duplicated. Acceptable for v0.1, but refactor to a shared “verify/decrypt/apply against supplied card” core before more patch kinds.
+
+2. Live push race vs catch-up: **OK.** `refresh()` holds `pollMutex` from API call through catch-up replay and `_items.value` merge at [InboxRepository.kt](D:/Projects/syncler/android/feature/inbox/src/main/kotlin/app/syncler/feature/inbox/InboxRepository.kt:89). Live patch application also serializes on the same mutex before reading state.
+
+3. 48h GC: **FIX.** Not a blocker for privacy or sequence correctness, but I would add it before V3 #17 because Redis Streams will add more transport persistence complexity.
+
+4. Patch lifetime vs `LiveCard.expires_at`: **FIX/NIT.** Either FK cascade or retention delete is needed. Given the composite key lacks a direct FK today, adding `CardPatch` cleanup to retention is the minimum. FK cascade is cleaner if the schema can support it.
+
+5. `applyReplaceOps` reparses twice: **OK.** v0.1 acceptable. Atomicity is more important than hot-path micro-efficiency here.
+
+6. LiveBridge JSON peek every frame: **OK.** The parse is small and only on live frames. Optimize only if profiling shows this matters.
+
+7. SDK `field_paths` instead of manifest fetch: **DESIGN OK for v0.1.** It does not violate privacy. It does shift correctness to plugin authors, so docs should be explicit that `field_paths` must come from manifest declarations.
+
+8. `raw_patches` escape hatch: **DESIGN/NIT.** Acceptable as trusted-sender escape hatch for v0.1. Add optional SDK validation later when manifest data is available; server cannot validate without breaking privacy.
+
+9. Inline Moshi builders: **OK.** Not substantive.
+
+10. `LivePatchSink` NoOp composition root: **DESIGN/FIX follow-on.** Acceptable only if explicitly gated with V3 #14 live wiring. It means live patches are silently dropped today, with inbox catch-up as the real delivery path.
+
+11. No SDK base-seq precheck: **OK.** Server-side `409 stale_base_seq` is the right authority.
+
+12. No `expires_at` in card-patch AAD/HPKE: **OK.** `(card_id, base_seq, patch_seq)` is sufficient for replay/context binding, assuming server sequence CAS and parent-card lifetime enforcement. Adding `expires_at` would create another byte-identical cross-platform field without clear benefit.
+
+**Greenlight**
+
+Not greenlight as-is for V3 #17. I would apply the small server FIX list first: stale-recipient response parity, `IntegrityError` to 409, `card_patches` retention/orphan cleanup, and either contiguous server patch sequencing or an explicit v0.1 decision that malformed sender gaps can stall a patch chain until whole-card upsert. Privacy invariants and Android atomic apply look sound.
