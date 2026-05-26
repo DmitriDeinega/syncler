@@ -129,6 +129,14 @@ class PluginLoader(
             // here; tests / minimal builds use NoOp.
             livePatchSink: app.syncler.core.network.LivePatchSink =
                 app.syncler.core.network.LivePatchSink.NoOp,
+            // Triad 158 bug 2 FIX: take the host's existing
+            // Session so the LiveBridge's deviceJwtProvider
+            // resolves to the real device JWT instead of the
+            // throwing placeholder. Optional with a default
+            // of null so headless / minimal builds (and
+            // tests) keep working — the placeholder behavior
+            // is preserved only when no Session is wired.
+            session: app.syncler.core.auth.Session? = null,
         ): PluginLoader {
             val appContext = context.applicationContext
             val auditLogger = AuditLogger(appContext)
@@ -230,27 +238,35 @@ class PluginLoader(
                                 require(plugin.pluginRowId.isNotEmpty()) {
                                     "live channel requires pluginRowId on PluginInstance"
                                 }
-                                // V0.1: device JWT provider TBD —
-                                // production wiring needs a Session
-                                // dep injected here. Loudly log so
-                                // the gap doesn't slip past review.
+                                // Triad 158 bug 2 FIX: real device-JWT
+                                // provider now resolves through the
+                                // host's Session. When no session is
+                                // wired (test / headless build), keep
+                                // the loud placeholder so the wiring
+                                // gap can't slip past in production.
                                 return app.syncler.android.pluginhost.live.LiveChannelClient(
                                     baseUrl = "https://syncler.local",
                                     pluginRowId = plugin.pluginRowId,
                                     deviceJwtProvider = {
-                                        auditLogger.record(
-                                            plugin.manifest.id,
-                                            "live_no_session",
-                                            "deviceJwtProvider placeholder hit; live disabled",
-                                        )
-                                        timber.log.Timber.tag("LiveBridge").e(
-                                            "deviceJwtProvider placeholder reached — live channel " +
-                                                "wiring incomplete (V0.1)",
-                                        )
-                                        throw app.syncler.android.pluginhost.live.LiveChannelException(
-                                            "no_session",
-                                            "device session not wired into LiveBridge yet",
-                                        )
+                                        if (session == null) {
+                                            auditLogger.record(
+                                                plugin.manifest.id,
+                                                "live_no_session",
+                                                "no Session wired into PluginLoader.android(); live disabled",
+                                            )
+                                            timber.log.Timber.tag("LiveBridge").e(
+                                                "deviceJwtProvider: no Session wired — live channel unusable",
+                                            )
+                                            throw app.syncler.android.pluginhost.live.LiveChannelException(
+                                                "no_session",
+                                                "session not wired into PluginLoader.android()",
+                                            )
+                                        }
+                                        session.currentToken()
+                                            ?: throw app.syncler.android.pluginhost.live.LiveChannelException(
+                                                "no_session",
+                                                "no device JWT available (locked / signed out)",
+                                            )
                                     },
                                     httpClient = buildPluginHttpClient(),
                                     auditLogger = auditLogger,

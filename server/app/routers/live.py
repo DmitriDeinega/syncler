@@ -160,22 +160,25 @@ async def issue_connect_token(
 class LivePushRequest(BaseModel):
     """Sender posts a live update for an active plugin row.
 
-    V0.1 trusts the sender_id in the body and the V2-shape
-    envelope is treated as opaque bytes. V0.2 will add an
-    Ed25519 signature over the canonical envelope (mirroring
-    /v1/messages/send) — until then, the WS endpoint refuses
-    to accept the payload anyway because it carries no
-    recipient_envelopes that any device can open.
+    Triad 158 bug 1 FIX: gained `channel` because the server
+    must wrap the envelope into a multiplex `message` frame
+    before publishing (devices parse by frame.type — without
+    the wrap, devices dropped pushes silently).
 
-    `envelope` is the JSON-encoded V2 envelope shape with
-    per-device recipient_envelopes. Server is a dumb pipe —
-    no inspection; the fan-out just serializes the JSON to
-    every connected device for plugin_row_id. Each device's
-    runtime picks out its own recipient_envelope by device_id.
+    V0.1 trusts the sender_id in the envelope's signed
+    canonical bytes; V0.2 will add a POST-level Ed25519
+    signature mirroring /v1/messages/send. Until then, the
+    envelope's own recipient_envelopes are the auth boundary
+    — the server is a routing pipe.
+
+    `channel` matches the WS multiplex channel name the plugin
+    `connect()`'d to. Spec: docs/live-channel.md §"Outer
+    envelope (all frames)".
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    channel: str
     envelope: dict[str, Any]
 
 
@@ -212,6 +215,15 @@ async def push_live(
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid plugin_row_id")
 
+    # Triad 158 bug 1 FIX: validate channel name against the
+    # same regex the WS endpoint applies to device frames so
+    # invalid pushes are rejected at the API boundary instead
+    # of producing a dead-on-arrival frame.
+    if not _valid_channel_name(body.channel):
+        raise HTTPException(
+            status_code=400, detail="invalid channel name"
+        )
+
     plugin_result = await db.execute(
         select(Plugin).where(Plugin.id == plugin_row_uuid)
     )
@@ -220,8 +232,27 @@ async def push_live(
         raise HTTPException(status_code=404, detail="plugin not found")
 
     envelope_json = json.dumps(body.envelope, separators=(",", ":"))
-    if len(envelope_json) > MAX_FRAME_BYTES:
+    # Triad 158 bug 1 FIX: cap the inner envelope BEFORE
+    # wrapping — base64 inflates ~33% so the outer frame on
+    # the wire stays under MAX_FRAME_BYTES.
+    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
+    if len(envelope_json) > inner_cap:
         raise HTTPException(status_code=413, detail="envelope too large")
+
+    # Triad 158 bug 1 FIX: wrap the V2 envelope in a multiplex
+    # `message` frame so the device's LiveChannelClient
+    # dispatches it by `frame.type == "message"` (spec
+    # docs/live-channel.md §"Message"). Pre-fix the raw
+    # envelope JSON was published unwrapped and silently
+    # ignored on the device side.
+    import base64 as _b64
+    frame = {
+        "type": "message",
+        "channel": body.channel,
+        "id": uuid.uuid4().hex,
+        "payload": _b64.b64encode(envelope_json.encode()).decode(),
+    }
+    frame_json = json.dumps(frame, separators=(",", ":"))
 
     # Triad 144 gemini CRITICAL fix: fan out to (user, plugin)
     # topics only. Each paired user gets the envelope on its
@@ -238,7 +269,7 @@ async def push_live(
     delivered = 0
     for user_id in paired_user_ids:
         delivered += await hub.publish_ephemeral(
-            plugin_topic(str(user_id), plugin_row_id), envelope_json
+            plugin_topic(str(user_id), plugin_row_id), frame_json
         )
     return LivePushResponse(delivered=delivered)
 

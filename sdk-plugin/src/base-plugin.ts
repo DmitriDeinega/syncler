@@ -59,4 +59,39 @@ export abstract class BasePlugin {
   async onDismiss(_deviceId: string): Promise<DismissAction | void> {
     return undefined;
   }
+
+  /**
+   * V3 #14 — fires per inbound live-channel `message` frame
+   * the host received on this plugin row. `envelopeBase64`
+   * is the opaque V2-style envelope sealed for this device;
+   * decode + open it with the V2 helpers in
+   * `@syncler/plugin-sdk`. Override to react; defaults to
+   * no-op so plugins that only use the inbox path don't
+   * need to implement it.
+   *
+   * Spec: docs/live-channel.md "Message" frame.
+   */
+  async onLiveMessage(_channel: string, _envelopeBase64: string): Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * V3 #14 — fires when the host receives an `error` frame
+   * for a live channel (rate-limit, channel_name_invalid,
+   * etc.). `code` is the error string from the server.
+   * Defaults to no-op; override to surface diagnostics.
+   */
+  async onLiveError(_channel: string, _code: string): Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * V3 #14 — fires when the host closes a live channel
+   * (either side initiated; not the same as the WebSocket
+   * closing). Override to clear local state; defaults to
+   * no-op.
+   */
+  async onLiveClosed(_channel: string): Promise<void> {
+    return undefined;
+  }
 }

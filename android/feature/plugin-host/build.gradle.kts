@@ -41,6 +41,7 @@ room {
 }
 
 dependencies {
+    implementation(project(":core:auth"))
     implementation(project(":core:crypto"))
     implementation(project(":core:storage"))
     implementation(project(":core:network"))
