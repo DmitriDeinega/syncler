@@ -727,6 +727,15 @@ fix — previously the server only enforced a length cap, letting the SDK
 catch malformed identifiers but accepting them server-side."""
 
 
+_NATIVE_ENTRY_CLASS_REGEX = re.compile(
+    r"^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$"
+)
+"""Phase 11: Java/Kotlin fully-qualified binary class name. Segments may
+start with letter/underscore/$; subsequent chars permit digits. Used for
+``PluginPublishRequest.entry_class`` validation. Spec:
+docs/plugin-host-native-kotlin.md §entry_class."""
+
+
 class PluginPublishRequest(BaseModel):
     sender_id: UUID
     plugin_identifier: Annotated[str, Field(min_length=1, max_length=200)]
@@ -741,12 +750,17 @@ class PluginPublishRequest(BaseModel):
     # published before the template renderer existed — their canonical
     # publish envelope does not include this field, so the conditional
     # serialization in `_publish_envelope` keeps their signature valid.
-    renderer: Literal["script", "template"] = "script"
+    renderer: Literal["script", "template", "native_kotlin"] = "script"
     template: TemplateObject | None = None
     # Phase 3b: card_type ("event" or "live") and optional card_key_path
     # for live cards.
     card_type: Literal["event", "live"] = "event"
     card_key_path: str | None = None
+    # Phase 11: native Kotlin entry-point class + SDK ABI version.
+    # Both required iff renderer == "native_kotlin"; both forbidden
+    # otherwise. Spec: docs/plugin-host-native-kotlin.md.
+    entry_class: str | None = None
+    native_sdk_abi: int | None = None
     sender_signature: str  # base64 Ed25519 over canonical publish body
 
     @field_validator("manifest_hash")
@@ -799,14 +813,41 @@ class PluginPublishRequest(BaseModel):
             )
         return value
 
+    @field_validator("entry_class")
+    @classmethod
+    def validate_entry_class(cls, value: str | None) -> str | None:
+        # Phase 11: Java/Kotlin binary class name. Segments can start
+        # with letter/underscore/$; subsequent chars allow digits.
+        # No $ in segments (used only between nested classes). Length
+        # cap 256 chars.
+        if value is None:
+            return value
+        if len(value) > 256:
+            raise ValueError("entry_class must be ≤ 256 chars")
+        if not _NATIVE_ENTRY_CLASS_REGEX.match(value):
+            raise ValueError(
+                f"entry_class {value!r} must be a fully-qualified "
+                "binary class name (e.g. com.example.MyPlugin)"
+            )
+        return value
+
+    @field_validator("native_sdk_abi")
+    @classmethod
+    def validate_native_sdk_abi(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        if value < 1:
+            raise ValueError("native_sdk_abi must be >= 1")
+        return value
+
     @model_validator(mode="after")
     def validate_renderer_template_pairing(self) -> "PluginPublishRequest":
         # The pairing rules live here (not on TemplateObject) because the
         # action-endpoint check needs the surrounding `endpoints` glob list.
         if self.renderer == "template" and self.template is None:
             raise ValueError("template required when renderer == 'template'")
-        if self.renderer == "script" and self.template is not None:
-            raise ValueError("template must be omitted when renderer == 'script'")
+        if self.renderer != "template" and self.template is not None:
+            raise ValueError("template must be omitted when renderer != 'template'")
         if self.template is not None:
             for action in self.template.actions:
                 # Phase 5d: action endpoints must be HTTPS, or HTTP targeting
@@ -829,6 +870,18 @@ class PluginPublishRequest(BaseModel):
         # stable identity from the payload.
         if self.card_type == "live" and not self.card_key_path:
             raise ValueError("card_key_path required when card_type == 'live'")
+        # Phase 11: native_kotlin renderer requires both entry_class and
+        # native_sdk_abi. Other renderers must NOT supply them.
+        if self.renderer == "native_kotlin":
+            if self.entry_class is None:
+                raise ValueError("entry_class required when renderer == 'native_kotlin'")
+            if self.native_sdk_abi is None:
+                raise ValueError("native_sdk_abi required when renderer == 'native_kotlin'")
+        else:
+            if self.entry_class is not None:
+                raise ValueError("entry_class must be omitted when renderer != 'native_kotlin'")
+            if self.native_sdk_abi is not None:
+                raise ValueError("native_sdk_abi must be omitted when renderer != 'native_kotlin'")
         return self
 
 
@@ -862,11 +915,15 @@ class PluginLatestResponse(BaseModel):
     # Phase 3a. Defaults to "script" so pre-Phase-3a stored rows (where the
     # backfilled server default fills NULL with "script") and pre-Phase-3a
     # clients (which ignore the field) both see the WebView path.
-    renderer: Literal["script", "template"] = "script"
+    renderer: Literal["script", "template", "native_kotlin"] = "script"
     template: TemplateObject | None = None
     # Phase 3b: card_type ("event" or "live") and optional card_key_path.
     card_type: Literal["event", "live"] = "event"
     card_key_path: str | None = None
+    # Phase 11: native_kotlin renderer fields. Both null for script /
+    # template; both populated for native_kotlin.
+    entry_class: str | None = None
+    native_sdk_abi: int | None = None
 
 
 # M11.4: classified revocation reasons. Devices use this to decide UX:

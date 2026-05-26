@@ -72,6 +72,13 @@ def _publish_envelope(payload: PluginPublishRequest) -> bytes:
         envelope["card_type"] = payload.card_type
     if payload.card_key_path is not None:
         envelope["card_key_path"] = payload.card_key_path
+    # Phase 11: native Kotlin plugin fields. Conditionally included
+    # so older publishes (script / template) sign over byte-identical
+    # envelopes to before.
+    if payload.entry_class is not None:
+        envelope["entry_class"] = payload.entry_class
+    if payload.native_sdk_abi is not None:
+        envelope["native_sdk_abi"] = payload.native_sdk_abi
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -131,6 +138,8 @@ async def publish(
             template=(payload.template.model_dump(mode="json") if payload.template else None),
             card_type=payload.card_type,
             card_key_path=payload.card_key_path,
+            entry_class=payload.entry_class,
+            native_sdk_abi=payload.native_sdk_abi,
         )
     except InvalidVersionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -180,6 +189,10 @@ async def latest(
         revocation_reason=plugin.revocation_reason,
         renderer=plugin.renderer,
         template=plugin.template,
+        card_type=plugin.card_type,
+        card_key_path=plugin.card_key_path,
+        entry_class=plugin.entry_class,
+        native_sdk_abi=plugin.native_sdk_abi,
     )
 
 
@@ -226,6 +239,10 @@ async def by_id(
         revocation_reason=plugin.revocation_reason,
         renderer=plugin.renderer,
         template=plugin.template,
+        card_type=plugin.card_type,
+        card_key_path=plugin.card_key_path,
+        entry_class=plugin.entry_class,
+        native_sdk_abi=plugin.native_sdk_abi,
     )
 
 

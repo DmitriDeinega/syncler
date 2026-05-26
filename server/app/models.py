@@ -165,9 +165,10 @@ class Plugin(Base):
     # M11.4: optional classification of why this plugin row was revoked.
     # See revoke endpoint for the accepted enum and per-reason UX contract.
     revocation_reason: Mapped[str | None] = mapped_column(Text)
-    # Phase 3a: "script" (legacy WebView bundle) or "template" (native
-    # Compose renderer). Backfilled to "script" for pre-existing rows so
-    # the latest endpoint can safely return a non-null value.
+    # Phase 3a / Phase 11: "script" (WebView JS), "template" (native
+    # host-side Compose render), or "native_kotlin" (Phase 11 — signed
+    # DEX in isolated process). Backfilled to "script" for pre-Phase-3a
+    # rows so the latest endpoint can safely return a non-null value.
     renderer: Mapped[str] = mapped_column(Text, nullable=False, server_default="script")
     # Phase 3a: the template manifest block when renderer == "template".
     # Null otherwise. The publish-time validator in routers/plugins.py
@@ -177,6 +178,13 @@ class Plugin(Base):
     # for live cards to extract their stable identity from the payload.
     card_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="event")
     card_key_path: Mapped[str | None] = mapped_column(Text)
+    # Phase 11: native Kotlin plugins declare entry_class (fully-
+    # qualified binary class name implementing SynclerPlugin) and
+    # native_sdk_abi (integer matching host's NATIVE_SDK_ABI constant).
+    # Both required when renderer == "native_kotlin"; forbidden
+    # otherwise. Spec: docs/plugin-host-native-kotlin.md.
+    entry_class: Mapped[str | None] = mapped_column(Text)
+    native_sdk_abi: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

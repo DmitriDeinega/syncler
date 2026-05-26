@@ -114,6 +114,8 @@ async def publish_plugin(
     template: dict | None = None,
     card_type: str = "event",
     card_key_path: str | None = None,
+    entry_class: str | None = None,
+    native_sdk_abi: int | None = None,
 ) -> Plugin:
     new_key = _parse_version(version)
 
@@ -121,6 +123,19 @@ async def publish_plugin(
         if not template:
             raise InvalidTemplateError("template object is required for renderer='template'")
         _validate_template(template, endpoints)
+    elif renderer == "native_kotlin":
+        # Phase 11: native plugins require entry_class + native_sdk_abi
+        # (validator in schemas.py already enforces this, but the
+        # service layer re-checks so anyone calling this function
+        # directly catches the contract).
+        if not entry_class:
+            raise InvalidTemplateError(
+                "entry_class is required for renderer='native_kotlin'"
+            )
+        if native_sdk_abi is None:
+            raise InvalidTemplateError(
+                "native_sdk_abi is required for renderer='native_kotlin'"
+            )
     elif renderer != "script":
         raise InvalidTemplateError(f"unknown renderer type: {renderer}")
 
@@ -163,6 +178,8 @@ async def publish_plugin(
         template=template,
         card_type=card_type,
         card_key_path=card_key_path,
+        entry_class=entry_class,
+        native_sdk_abi=native_sdk_abi,
         capabilities=capabilities,
         endpoints=endpoints,
     )
