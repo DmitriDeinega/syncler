@@ -282,6 +282,94 @@ object V2Aad {
         ),
     )
 
+    /**
+     * V3 #16 — payload AAD for envelope_kind="card_patch".
+     * Binds the encrypted patches list to (card_id, base_seq,
+     * patch_seq) instead of expires_at/min_plugin_version; the
+     * patch inherits the parent card's lifetime so no per-patch
+     * TTL is on the envelope.
+     */
+    fun cardPatchPayloadAad(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardId: String,
+        baseSeq: Long,
+        patchSeq: Long,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "base_seq" to baseSeq,
+            "card_id" to cardId,
+            "envelope_kind" to "card_patch",
+            "patch_seq" to patchSeq,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /** V3 #16 — per-recipient HPKE info for envelope_kind="card_patch". */
+    fun cardPatchHpkeInfo(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardId: String,
+        baseSeq: Long,
+        patchSeq: Long,
+        payloadNonceB64: String,
+        payloadCiphertextSha256Hex: String,
+        deviceId: String,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "base_seq" to baseSeq,
+            "card_id" to cardId,
+            "device_id" to deviceId,
+            "envelope_kind" to "card_patch",
+            "patch_seq" to patchSeq,
+            "payload_ciphertext_sha256" to payloadCiphertextSha256Hex,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
+    /**
+     * V3 #16 — canonical Ed25519-signed bytes for card_patch.
+     * Mirrors server's build_card_patch_envelope_bytes in
+     * app/services/envelopes_v2.py. recipient_envelopes MUST
+     * be sorted by lowercase device_id.
+     */
+    fun cardPatchSignedEnvelopeBytes(
+        senderId: String,
+        userId: String,
+        pluginId: String,
+        cardId: String,
+        baseSeq: Long,
+        patchSeq: Long,
+        payloadNonceB64: String,
+        payloadCiphertextB64: String,
+        recipientEnvelopesSerialized: List<Map<String, String>>,
+        recipientDirectoryVersion: Long,
+    ): ByteArray = canonicalJsonBytes(
+        mapOf(
+            "base_seq" to baseSeq,
+            "card_id" to cardId,
+            "envelope_kind" to "card_patch",
+            "patch_seq" to patchSeq,
+            "payload_ciphertext" to payloadCiphertextB64,
+            "payload_nonce" to payloadNonceB64,
+            "plugin_id" to pluginId,
+            "protocol_version" to 2,
+            "recipient_directory_version" to recipientDirectoryVersion,
+            "recipient_envelopes" to recipientEnvelopesSerialized,
+            "sender_id" to senderId,
+            "user_id" to userId,
+        ),
+    )
+
     /** Per-recipient HPKE info for live_card_upsert per spec §11.3. */
     fun liveCardHpkeInfo(
         senderId: String,

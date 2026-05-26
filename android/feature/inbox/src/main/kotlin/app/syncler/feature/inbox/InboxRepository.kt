@@ -7,8 +7,11 @@ import app.syncler.core.crypto.Hpke
 import app.syncler.core.crypto.Signing
 import app.syncler.core.crypto.V2Aad
 import app.syncler.core.crypto.base64ToBytes
+import app.syncler.core.network.CardPatchEntryDto
+import app.syncler.core.network.CardPatchEnvelopeDto
 import app.syncler.core.network.InboxFeedItemDto
 import app.syncler.core.network.InboxFeedResponseDto
+import app.syncler.core.network.LivePatchSink
 import app.syncler.core.network.MessageInboxItemDto
 import app.syncler.core.network.RecipientEnvelopeDto
 import app.syncler.core.network.SynclerApi
@@ -50,7 +53,7 @@ class InboxRepository @Inject constructor(
     private val pairedSenderStore: PairedSenderStore,
     private val deviceIdentityStore: DeviceIdentityStore,
     private val deviceEncryptionKeyStore: DeviceEncryptionKeyStore,
-) {
+) : LivePatchSink {
     private val _items = MutableStateFlow<List<InboxItem>>(emptyList())
     val items: StateFlow<List<InboxItem>> = _items.asStateFlow()
 
@@ -135,12 +138,23 @@ class InboxRepository @Inject constructor(
                     return@mapNotNull null
                 }
 
+                // V3 #16 catch-up: replay any patches the
+                // server inlined for this live card. Patches
+                // arrive sorted by patch_seq for the current
+                // base_seq; apply them in order on top of the
+                // freshly decrypted upsert payload.
+                val withPatches = if (dto.envelopeKind == "live_card_upsert") {
+                    applyCatchUpPatches(decrypted, dto.patches.orEmpty())
+                } else {
+                    decrypted
+                }
+
                 // Resolve plugin bundle by historical row UUID (NOT by current
                 // /latest) so old messages render against the exact bundle
                 // they were validated for. Codex review 40: a sender publishing
                 // v2 must not retroactively change v1 messages' render output.
                 val plugin = fetchPluginByRowOrNull(dto.pluginId)
-                decrypted.copy(
+                withPatches.copy(
                     bundleJs = plugin?.bundleJs,
                     declaredEndpoints = plugin?.endpoints.orEmpty(),
                     renderer = plugin?.renderer ?: "script",
@@ -264,6 +278,425 @@ class InboxRepository @Inject constructor(
         _items.value = pollMutex.withLock {
             _items.value.filterNot { it.type == "live" && it.senderId == senderId && it.cardKey == cardKey }
         }
+    }
+
+    /**
+     * V3 #16 — entry point for incoming `card.patch` envelopes
+     * arriving on the live channel. LiveBridge routes
+     * card_patch frames here instead of fanning them out to
+     * the plugin so the host's InboxItem state stays
+     * authoritative.
+     *
+     * Spec: docs/live-card-patch.md. The decrypt + sequence-
+     * check + replace-op-apply contract is identical to the
+     * inbox-catch-up path; this just adapts the wire JSON
+     * into a [CardPatchEnvelopeDto].
+     *
+     * Failures (parse, signature, decrypt, stale/gap seq,
+     * unknown path) are logged and swallowed — patches fail
+     * closed, never partially mutate the card.
+     */
+    override suspend fun acceptCardPatch(envelopeJson: String) {
+        val dto = runCatching {
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            moshi.adapter(CardPatchEnvelopeDto::class.java).fromJson(envelopeJson)
+        }.getOrNull() ?: run {
+            Timber.tag(TAG).w("dropping malformed card_patch envelope")
+            return
+        }
+        applyPatchDto(dto)
+    }
+
+    /**
+     * V3 #16 — shared apply path used by both the live-channel
+     * sink (acceptCardPatch) and the inbox catch-up loop
+     * (refresh consuming `dto.patches`). Returns the patched
+     * InboxItem when applied, null on any rejection (logged).
+     *
+     * Atomic semantics per spec privacy invariant: ANY failure
+     * (sequence rejection, signature mismatch, decrypt failure,
+     * unknown JSONPath in any op) discards the entire patch.
+     * Local InboxItem state never sees partial mutation.
+     */
+    private suspend fun applyPatchDto(dto: CardPatchEnvelopeDto): InboxItem? {
+        val userId = session.currentUserId() ?: return null
+        if (dto.userId.equals(userId, ignoreCase = true).not()) {
+            Timber.tag(TAG).w("dropping card_patch for foreign user %s", dto.userId)
+            return null
+        }
+
+        val candidates = pairedSenderStore.pairedSenders.value
+            .groupBy { it.senderId }[dto.senderId].orEmpty()
+        if (candidates.isEmpty()) {
+            Timber.tag(TAG).w("dropping card_patch: no paired sender %s", dto.senderId)
+            return null
+        }
+
+        // Signature first — same invariant as event/upsert.
+        val sortedRecipients = dto.recipientEnvelopes
+            .map { mapOf(
+                "device_id" to it.deviceId.lowercase(),
+                "hpke_ciphertext" to it.hpkeCiphertext,
+                "hpke_kem_output" to it.hpkeKemOutput,
+            ) }
+            .sortedBy { it.getValue("device_id") }
+        val canonicalBytes = V2Aad.cardPatchSignedEnvelopeBytes(
+            senderId = dto.senderId,
+            userId = userId,
+            pluginId = dto.pluginId,
+            cardId = dto.cardId,
+            baseSeq = dto.baseSeq,
+            patchSeq = dto.patchSeq,
+            payloadNonceB64 = dto.payloadNonce,
+            payloadCiphertextB64 = dto.payloadCiphertext,
+            recipientEnvelopesSerialized = sortedRecipients,
+            recipientDirectoryVersion = dto.recipientDirectoryVersion,
+        )
+        val signatureBytes = runCatching { dto.envelopeSignature.base64ToBytes() }.getOrNull() ?: run {
+            Timber.tag(TAG).w("card_patch bad signature encoding")
+            return null
+        }
+        val sigOk = candidates.any { paired ->
+            runCatching { Signing.verify(paired.senderPublicKey, canonicalBytes, signatureBytes) }
+                .getOrDefault(false)
+        }
+        if (!sigOk) {
+            Timber.tag(TAG).w("card_patch signature rejected for sender %s", dto.senderId)
+            return null
+        }
+
+        return pollMutex.withLock {
+            val existing = _items.value
+            val card = existing.firstOrNull {
+                it.type == "live" &&
+                    it.senderId.equals(dto.senderId, ignoreCase = true) &&
+                    it.pluginId.equals(dto.pluginId, ignoreCase = true) &&
+                    it.id.equals(dto.cardId, ignoreCase = true)
+            }
+            if (card == null) {
+                Timber.tag(TAG).d(
+                    "card_patch %s/%s base=%d patch=%d arrived before upsert; dropping",
+                    dto.cardId, dto.senderId, dto.baseSeq, dto.patchSeq,
+                )
+                return@withLock null
+            }
+            val currentBase = card.sequenceNumber ?: 0L
+            val lastPatch = card.lastPatchSequence ?: 0L
+            if (dto.baseSeq < currentBase) {
+                Timber.tag(TAG).d("card_patch stale base_seq %d < %d", dto.baseSeq, currentBase)
+                return@withLock null
+            }
+            if (dto.baseSeq > currentBase) {
+                Timber.tag(TAG).w(
+                    "card_patch ahead of base (got %d, have %d); refresh needed",
+                    dto.baseSeq, currentBase,
+                )
+                return@withLock null
+            }
+            if (dto.patchSeq <= lastPatch) {
+                Timber.tag(TAG).d("card_patch replay/late: %d <= %d", dto.patchSeq, lastPatch)
+                return@withLock null
+            }
+            if (dto.patchSeq != lastPatch + 1L) {
+                Timber.tag(TAG).w(
+                    "card_patch gap: expected %d, got %d; refresh needed",
+                    lastPatch + 1L, dto.patchSeq,
+                )
+                return@withLock null
+            }
+
+            // Decrypt the per-recipient HPKE-sealed CEK +
+            // AES-GCM payload — same shape as event/live_card
+            // open path but with the card_patch AAD/info.
+            val deviceId = deviceIdentityStore.read() ?: return@withLock null
+            val ownEnv = dto.recipientEnvelopes.firstOrNull {
+                it.deviceId.equals(deviceId, ignoreCase = true)
+            } ?: run {
+                Timber.tag(TAG).d("card_patch has no envelope for this device")
+                return@withLock null
+            }
+            val payloadNonceB64 = dto.payloadNonce
+            val payloadCiphertextSha256Hex = Hpke.sha256Hex(
+                dto.payloadCiphertext.base64ToBytes()
+            )
+            val keypair = deviceEncryptionKeyStore.getOrCreateKeypair()
+            val cek = runCatching {
+                Hpke.openCekForDevice(
+                    privateKeyRaw = keypair.privateKey,
+                    hpkeKemOutput = ownEnv.hpkeKemOutput.base64ToBytes(),
+                    hpkeCiphertext = ownEnv.hpkeCiphertext.base64ToBytes(),
+                    info = V2Aad.cardPatchHpkeInfo(
+                        senderId = dto.senderId,
+                        userId = userId,
+                        pluginId = dto.pluginId,
+                        cardId = dto.cardId,
+                        baseSeq = dto.baseSeq,
+                        patchSeq = dto.patchSeq,
+                        payloadNonceB64 = payloadNonceB64,
+                        payloadCiphertextSha256Hex = payloadCiphertextSha256Hex,
+                        deviceId = deviceId,
+                    ),
+                )
+            }.getOrElse {
+                Timber.tag(TAG).w(it, "card_patch HPKE open failed")
+                return@withLock null
+            }
+            val plaintext = runCatching {
+                val nonce = dto.payloadNonce.base64ToBytes()
+                val ct = dto.payloadCiphertext.base64ToBytes()
+                Aead.decrypt(
+                    cek, nonce + ct,
+                    V2Aad.cardPatchPayloadAad(
+                        senderId = dto.senderId,
+                        userId = userId,
+                        pluginId = dto.pluginId,
+                        cardId = dto.cardId,
+                        baseSeq = dto.baseSeq,
+                        patchSeq = dto.patchSeq,
+                    ),
+                ).toString(Charsets.UTF_8)
+            }.getOrElse {
+                Timber.tag(TAG).w(it, "card_patch AES-GCM decrypt failed")
+                return@withLock null
+            }
+
+            // Atomic apply on a deep clone — any unknown path
+            // discards the entire batch (spec privacy invariant).
+            val mutated = runCatching {
+                applyReplaceOpsOrThrow(card.payloadJson, plaintext)
+            }.getOrElse {
+                Timber.tag(TAG).w(it, "card_patch op apply failed")
+                return@withLock null
+            }
+
+            val updated = card.copy(
+                payloadJson = mutated,
+                lastPatchSequence = dto.patchSeq,
+                hostPreview = HostPreviewParser.parse(mutated),
+            )
+            _items.value = existing.map { if (it === card) updated else it }
+            updated
+        }
+    }
+
+    /**
+     * V3 #16 — inbox-pull catch-up applier. For each persisted
+     * patch the server inlined on the live-card item, apply
+     * the same decrypt + sequence-check + replace-op flow as
+     * the live-channel sink. Failed/skipped patches halt the
+     * chain (the device falls back to refetching on next
+     * refresh; spec "Catch-up surface" gap handling).
+     *
+     * Returns the InboxItem with `payloadJson` and
+     * `lastPatchSequence` updated by every applied patch.
+     */
+    private suspend fun applyCatchUpPatches(
+        card: InboxItem,
+        patches: List<CardPatchEntryDto>,
+    ): InboxItem {
+        if (patches.isEmpty()) return card
+        val moshi = com.squareup.moshi.Moshi.Builder()
+            .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+        val adapter = moshi.adapter(CardPatchEnvelopeDto::class.java)
+        var current = card
+        val expectedBase = card.sequenceNumber ?: 0L
+        for (entry in patches.sortedBy { it.patchSeq }) {
+            if (entry.baseSeq != expectedBase) {
+                Timber.tag(TAG).w(
+                    "catch-up patch base_seq %d != card base %d; halting chain",
+                    entry.baseSeq, expectedBase,
+                )
+                return current
+            }
+            val expectedPatchSeq = (current.lastPatchSequence ?: 0L) + 1L
+            if (entry.patchSeq != expectedPatchSeq) {
+                Timber.tag(TAG).w(
+                    "catch-up patch gap: expected %d got %d; halting chain",
+                    expectedPatchSeq, entry.patchSeq,
+                )
+                return current
+            }
+            val dto = runCatching { adapter.fromJson(entry.envelopeJson) }.getOrNull()
+                ?: run {
+                    Timber.tag(TAG).w("catch-up patch envelope malformed; halting chain")
+                    return current
+                }
+            // The shared sink path validates signature +
+            // sequence + decrypts + applies — but it operates
+            // on _items.value, which we haven't populated yet
+            // here. Build a transient apply by reusing the
+            // single-op routine directly.
+            val applied = applyPatchToCardOrNull(current, dto) ?: run {
+                Timber.tag(TAG).w("catch-up patch failed apply; halting chain")
+                return current
+            }
+            current = applied
+        }
+        return current
+    }
+
+    /**
+     * V3 #16 — pure-function variant of acceptCardPatch that
+     * operates on the supplied InboxItem rather than walking
+     * `_items.value`. Used by the catch-up path during
+     * refresh() before the card has been inserted into the
+     * state flow. Returns null on any rejection.
+     */
+    private fun applyPatchToCardOrNull(
+        card: InboxItem,
+        dto: CardPatchEnvelopeDto,
+    ): InboxItem? {
+        val userId = session.currentUserId() ?: return null
+        if (!dto.userId.equals(userId, ignoreCase = true)) return null
+        if (!dto.senderId.equals(card.senderId, ignoreCase = true)) return null
+        if (!dto.pluginId.equals(card.pluginId, ignoreCase = true)) return null
+        if (!dto.cardId.equals(card.id, ignoreCase = true)) return null
+
+        val candidates = pairedSenderStore.pairedSenders.value
+            .groupBy { it.senderId }[dto.senderId].orEmpty()
+        if (candidates.isEmpty()) return null
+
+        val sortedRecipients = dto.recipientEnvelopes
+            .map { mapOf(
+                "device_id" to it.deviceId.lowercase(),
+                "hpke_ciphertext" to it.hpkeCiphertext,
+                "hpke_kem_output" to it.hpkeKemOutput,
+            ) }
+            .sortedBy { it.getValue("device_id") }
+        val canonicalBytes = V2Aad.cardPatchSignedEnvelopeBytes(
+            senderId = dto.senderId,
+            userId = userId,
+            pluginId = dto.pluginId,
+            cardId = dto.cardId,
+            baseSeq = dto.baseSeq,
+            patchSeq = dto.patchSeq,
+            payloadNonceB64 = dto.payloadNonce,
+            payloadCiphertextB64 = dto.payloadCiphertext,
+            recipientEnvelopesSerialized = sortedRecipients,
+            recipientDirectoryVersion = dto.recipientDirectoryVersion,
+        )
+        val signatureBytes = runCatching { dto.envelopeSignature.base64ToBytes() }.getOrNull() ?: return null
+        val sigOk = candidates.any { paired ->
+            runCatching { Signing.verify(paired.senderPublicKey, canonicalBytes, signatureBytes) }
+                .getOrDefault(false)
+        }
+        if (!sigOk) return null
+
+        val deviceId = deviceIdentityStore.read() ?: return null
+        val ownEnv = dto.recipientEnvelopes.firstOrNull {
+            it.deviceId.equals(deviceId, ignoreCase = true)
+        } ?: return null
+        val keypair = deviceEncryptionKeyStore.getOrCreateKeypair()
+        val payloadNonceB64 = dto.payloadNonce
+        val payloadCiphertextSha256Hex = Hpke.sha256Hex(
+            dto.payloadCiphertext.base64ToBytes()
+        )
+        val cek = runCatching {
+            Hpke.openCekForDevice(
+                privateKeyRaw = keypair.privateKey,
+                hpkeKemOutput = ownEnv.hpkeKemOutput.base64ToBytes(),
+                hpkeCiphertext = ownEnv.hpkeCiphertext.base64ToBytes(),
+                info = V2Aad.cardPatchHpkeInfo(
+                    senderId = dto.senderId,
+                    userId = userId,
+                    pluginId = dto.pluginId,
+                    cardId = dto.cardId,
+                    baseSeq = dto.baseSeq,
+                    patchSeq = dto.patchSeq,
+                    payloadNonceB64 = payloadNonceB64,
+                    payloadCiphertextSha256Hex = payloadCiphertextSha256Hex,
+                    deviceId = deviceId,
+                ),
+            )
+        }.getOrNull() ?: return null
+        val plaintext = runCatching {
+            val nonce = dto.payloadNonce.base64ToBytes()
+            val ct = dto.payloadCiphertext.base64ToBytes()
+            Aead.decrypt(
+                cek, nonce + ct,
+                V2Aad.cardPatchPayloadAad(
+                    senderId = dto.senderId,
+                    userId = userId,
+                    pluginId = dto.pluginId,
+                    cardId = dto.cardId,
+                    baseSeq = dto.baseSeq,
+                    patchSeq = dto.patchSeq,
+                ),
+            ).toString(Charsets.UTF_8)
+        }.getOrNull() ?: return null
+
+        val mutated = runCatching {
+            applyReplaceOpsOrThrow(card.payloadJson, plaintext)
+        }.getOrNull() ?: return null
+
+        return card.copy(
+            payloadJson = mutated,
+            lastPatchSequence = dto.patchSeq,
+            hostPreview = HostPreviewParser.parse(mutated),
+        )
+    }
+
+    /**
+     * V3 #16 — replace-ops applier. Parses the decrypted patch
+     * batch (`{"patches": [...]}`), walks each op, and mutates
+     * a DEEP CLONE of payloadJson. Returns the new JSON string
+     * on success.
+     *
+     * Throws on:
+     *   - missing/invalid `patches` array
+     *   - op != "replace" (V0.1 supports replace only)
+     *   - path doesn't match `$.foo(.bar)*` syntax
+     *   - any path segment doesn't exist in the target
+     *
+     * The caller's runCatching turns the throw into a clean
+     * "discard the whole batch" rejection.
+     */
+    private fun applyReplaceOpsOrThrow(payloadJson: String, patchPlaintext: String): String {
+        val root = org.json.JSONObject(payloadJson)
+        // Deep clone so a mid-batch failure can't mutate root.
+        val clone = org.json.JSONObject(root.toString())
+        val ops = org.json.JSONObject(patchPlaintext).optJSONArray("patches")
+            ?: error("patch batch missing 'patches' array")
+        for (i in 0 until ops.length()) {
+            val op = ops.optJSONObject(i) ?: error("op[$i] not an object")
+            val kind = op.optString("op")
+            require(kind == "replace") { "op[$i] unsupported kind=$kind" }
+            val path = op.optString("path")
+            val value = op.opt("value") ?: error("op[$i] missing value")
+            applyReplaceOrThrow(clone, path, value)
+        }
+        return clone.toString()
+    }
+
+    /**
+     * Walk `$.a.b.c` against [target], require every segment to
+     * exist, then overwrite the leaf. Throws on any malformed
+     * input — caller treats the throw as "discard the batch".
+     */
+    private fun applyReplaceOrThrow(
+        target: org.json.JSONObject,
+        path: String,
+        value: Any,
+    ) {
+        require(path.startsWith("$.")) { "path must start with \$.; got $path" }
+        val segments = path.substring(2).split('.')
+        require(segments.isNotEmpty() && segments.none { it.isEmpty() }) {
+            "malformed path $path"
+        }
+        var current: org.json.JSONObject = target
+        for (i in 0 until segments.size - 1) {
+            val seg = segments[i]
+            require(current.has(seg)) { "path $path missing segment $seg" }
+            val next = current.opt(seg)
+            require(next is org.json.JSONObject) { "path $path segment $seg not an object" }
+            current = next
+        }
+        val leaf = segments.last()
+        require(current.has(leaf)) { "path $path missing leaf $leaf" }
+        current.put(leaf, value)
     }
 
     /**
@@ -656,6 +1089,12 @@ data class InboxItem(
      * Sequence number for live cards (M11.5). Null for event messages.
      */
     val sequenceNumber: Long? = null,
+    /**
+     * V3 #16. Highest `patch_seq` applied to this live card at
+     * the current `sequenceNumber` (treat as 0 if null). Resets
+     * to 0 on each new upsert. Null for event messages.
+     */
+    val lastPatchSequence: Long? = null,
     /**
      * Last update time for live cards. Null for event messages.
      */

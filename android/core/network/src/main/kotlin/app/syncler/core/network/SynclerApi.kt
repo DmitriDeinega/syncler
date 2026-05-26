@@ -391,6 +391,56 @@ data class InboxFeedItemDto(
     @Json(name = "card_type") val cardType: String? = null,
     @Json(name = "sequence_number") val sequenceNumber: Long? = null,
     @Json(name = "updated_at") val updatedAt: String? = null,
+
+    /**
+     * V3 #16 catch-up payload: opaque per-patch envelope_json
+     * blobs ordered by patch_seq. The client re-parses each as
+     * a [CardPatchEnvelopeDto] before applying — server stores
+     * the patch envelope as a string so the server itself
+     * never inspects field paths/values (privacy invariant).
+     * Null/empty on event items and on live cards without any
+     * pending patches.
+     */
+    @Json(name = "patches") val patches: List<CardPatchEntryDto>? = null,
+)
+
+/**
+ * V3 #16 — inbox catch-up entry for one persisted card patch.
+ * Mirrors `server/app/schemas.py:LiveCardPatchInboxItem`.
+ *
+ * `envelopeJson` is the full V2-shape card_patch envelope the
+ * server stored at /v1/cards/patch time; the client parses it
+ * via [CardPatchEnvelopeDto] before verifying + decrypting.
+ */
+@JsonClass(generateAdapter = true)
+data class CardPatchEntryDto(
+    @Json(name = "base_seq") val baseSeq: Long,
+    @Json(name = "patch_seq") val patchSeq: Long,
+    @Json(name = "envelope_json") val envelopeJson: String,
+)
+
+/**
+ * V3 #16 — wire shape of a card_patch envelope (matches
+ * `server/app/schemas.py:LiveCardPatchRequestV2`). Arrives
+ * via two paths: the inbox catch-up `patches: [...]` field
+ * (each as `envelope_json` string) and the live channel
+ * ephemeral lane (each as a published-frame body).
+ */
+@JsonClass(generateAdapter = true)
+data class CardPatchEnvelopeDto(
+    @Json(name = "protocol_version") val protocolVersion: Int = 2,
+    @Json(name = "envelope_kind") val envelopeKind: String = "card_patch",
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "plugin_id") val pluginId: String,
+    @Json(name = "card_id") val cardId: String,
+    @Json(name = "base_seq") val baseSeq: Long,
+    @Json(name = "patch_seq") val patchSeq: Long,
+    @Json(name = "payload_nonce") val payloadNonce: String,
+    @Json(name = "payload_ciphertext") val payloadCiphertext: String,
+    @Json(name = "recipient_envelopes") val recipientEnvelopes: List<RecipientEnvelopeDto>,
+    @Json(name = "recipient_directory_version") val recipientDirectoryVersion: Long,
+    @Json(name = "envelope_signature") val envelopeSignature: String,
 )
 
 @JsonClass(generateAdapter = true)

@@ -6,6 +6,7 @@ import app.syncler.android.pluginhost.live.ChannelEvent
 import app.syncler.android.pluginhost.live.LiveChannel
 import app.syncler.android.pluginhost.live.LiveChannelClient
 import app.syncler.android.pluginhost.live.LiveChannelException
+import app.syncler.core.network.LivePatchSink
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,16 @@ class LiveBridge(
     private val clientFactory: LiveChannelClientFactory,
     private val auditLogger: AuditLogger,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /**
+     * V3 #16: when an incoming envelope has
+     * `envelope_kind="card_patch"`, the bridge routes it here
+     * instead of fanning out to the plugin. The host owns the
+     * InboxItem state the patch mutates — the plugin would
+     * have no place to put the result. Default NoOp keeps
+     * unit tests + early-wiring builds green; production
+     * passes `InboxRepository::applyLivePatch`.
+     */
+    private val livePatchSink: LivePatchSink = LivePatchSink.NoOp,
 ) {
     /**
      * Keyed by `plugin.manifest.id` (process-singleton-ish per
@@ -179,6 +190,27 @@ class LiveBridge(
             channel.incoming.collect { event ->
                 when (event) {
                     is ChannelEvent.Message -> {
+                        // V3 #16: card.patch envelopes are
+                        // host-routed (InboxRepository owns
+                        // the InboxItem the patch mutates).
+                        // Other envelope_kinds keep going to
+                        // the plugin's onLiveMessage hook
+                        // unchanged.
+                        val envelopeJson = event.envelopeBytes.toString(Charsets.UTF_8)
+                        val kind = peekEnvelopeKindOrNull(envelopeJson)
+                        if (kind == "card_patch") {
+                            runCatching {
+                                livePatchSink.acceptCardPatch(envelopeJson)
+                            }.onFailure { exc ->
+                                Timber.tag(TAG).w(exc, "card_patch sink threw")
+                                auditLogger.record(
+                                    plugin.manifest.id,
+                                    "live_patch_sink_error",
+                                    channel.name,
+                                )
+                            }
+                            return@collect
+                        }
                         val payload = JSONObject().apply {
                             put("channel", channel.name)
                             put(
@@ -224,6 +256,18 @@ class LiveBridge(
     private suspend fun clientChannelHandle(
         client: LiveChannelClient, channelName: String,
     ): LiveChannel? = runCatching { client.openChannel(channelName) }.getOrNull()
+
+    /**
+     * Pull only `envelope_kind` out of the incoming JSON so we
+     * can decide whether to route to the plugin or to the
+     * patch sink. Returns null on parse failure — the caller
+     * falls back to the plugin-dispatch path (existing
+     * behavior), so a malformed live frame still goes through
+     * its old route and the plugin can decide.
+     */
+    private fun peekEnvelopeKindOrNull(envelopeJson: String): String? =
+        runCatching { JSONObject(envelopeJson).optString("envelope_kind", "").ifEmpty { null } }
+            .getOrNull()
 
     companion object {
         private const val TAG = "LiveBridge"

@@ -120,7 +120,16 @@ class PluginLoader(
             )
             .build()
 
-        fun android(context: Context, scope: CoroutineScope): PluginLoader {
+        fun android(
+            context: Context,
+            scope: CoroutineScope,
+            // V3 #16: opt-in sink for incoming card.patch
+            // frames on the live channel. The app composition
+            // root passes InboxRepository::applyLivePatch
+            // here; tests / minimal builds use NoOp.
+            livePatchSink: app.syncler.core.network.LivePatchSink =
+                app.syncler.core.network.LivePatchSink.NoOp,
+        ): PluginLoader {
             val appContext = context.applicationContext
             val auditLogger = AuditLogger(appContext)
             // OkHttp's default connectionSpecs is [MODERN_TLS, COMPATIBLE_TLS]
@@ -249,6 +258,7 @@ class PluginLoader(
                             }
                         },
                         auditLogger = auditLogger,
+                        livePatchSink = livePatchSink,
                     ),
                 ),
                 auditLogger = auditLogger,
