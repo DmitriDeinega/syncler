@@ -531,12 +531,29 @@ class StateConflictBody(BaseModel):
 # instead of a WebView bundle. The publish-time validator enforces the
 # schema constraints below so the client never has to render a malformed
 # template at message time (Phase 3a in `.triad/50-agreement-and-plan.md`).
-_TEMPLATE_LAYOUTS: frozenset[str] = frozenset({"standard_card"})
+_TEMPLATE_LAYOUTS: frozenset[str] = frozenset({
+    "standard_card",
+    # V2 #12 additions:
+    "compact_row",       # single-line dense: leading + trailing
+    "score_card",        # large numeric score + label
+    "stat_grid",         # 2x2 statistics grid
+})
 _LAYOUT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "standard_card": frozenset({"title"}),
+    "compact_row": frozenset({"leading"}),
+    "score_card": frozenset({"score", "label"}),
+    "stat_grid": frozenset({"title"}),
 }
 _LAYOUT_OPTIONAL_FIELDS: dict[str, frozenset[str]] = {
     "standard_card": frozenset({"subtitle", "body"}),
+    "compact_row": frozenset({"trailing", "subtitle"}),
+    "score_card": frozenset({"caption"}),
+    "stat_grid": frozenset({
+        "stat1_label", "stat1_value",
+        "stat2_label", "stat2_value",
+        "stat3_label", "stat3_value",
+        "stat4_label", "stat4_value",
+    }),
 }
 # Only $.dotted.path navigation is supported in V1 (no array indexing, no
 # wildcards, no filters). Keep the surface tight so the client-side resolver

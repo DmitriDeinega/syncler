@@ -90,6 +90,34 @@ fun TemplateCard(
                 actions = template.actions,
                 onActionTap = { action -> onAction(action.id, action.endpoint) },
             )
+            "compact_row" -> CompactRow(
+                leading = template.fields["leading"]?.path?.let { resolveJsonPath(payload, it) },
+                trailing = template.fields["trailing"]?.path?.let { resolveJsonPath(payload, it) },
+                subtitle = template.fields["subtitle"]?.path?.let { resolveJsonPath(payload, it) },
+                actions = template.actions,
+                onActionTap = { action -> onAction(action.id, action.endpoint) },
+            )
+            "score_card" -> ScoreCard(
+                score = template.fields["score"]?.path?.let { resolveJsonPath(payload, it) },
+                label = template.fields["label"]?.path?.let { resolveJsonPath(payload, it) },
+                caption = template.fields["caption"]?.path?.let { resolveJsonPath(payload, it) },
+                actions = template.actions,
+                onActionTap = { action -> onAction(action.id, action.endpoint) },
+            )
+            "stat_grid" -> StatGrid(
+                title = template.fields["title"]?.path?.let { resolveJsonPath(payload, it) },
+                stats = listOf(1, 2, 3, 4).mapNotNull { i ->
+                    val labelPath = template.fields["stat${i}_label"]?.path
+                    val valuePath = template.fields["stat${i}_value"]?.path
+                    val labelVal = labelPath?.let { resolveJsonPath(payload, it) }
+                    val valueVal = valuePath?.let { resolveJsonPath(payload, it) }
+                    if (labelVal != null || valueVal != null) {
+                        StatEntry(labelVal ?: "", valueVal ?: "")
+                    } else null
+                },
+                actions = template.actions,
+                onActionTap = { action -> onAction(action.id, action.endpoint) },
+            )
             else -> {
                 // Defense-in-depth — the server validator would have rejected
                 // any other layout, but if a future server-side relaxation
@@ -142,6 +170,158 @@ private fun StandardCard(
                         ) {
                             Text(action.label)
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * V2 #12 — `compact_row`. Single-line dense layout: leading
+ * text on the left, trailing on the right, optional subtitle
+ * below. Designed for high-density feeds (stock tickers, sports
+ * scores in-game, etc.).
+ */
+@Composable
+private fun CompactRow(
+    leading: String?,
+    trailing: String?,
+    subtitle: String?,
+    actions: List<TemplateActionDto>,
+    onActionTap: (TemplateActionDto) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                if (!leading.isNullOrBlank()) {
+                    Text(leading, style = MaterialTheme.typography.titleMedium)
+                }
+                if (!trailing.isNullOrBlank()) {
+                    Text(trailing, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            if (!subtitle.isNullOrBlank()) {
+                Text(subtitle, style = MaterialTheme.typography.bodySmall)
+            }
+            if (actions.isNotEmpty()) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    actions.forEach { action ->
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onActionTap(action) },
+                        ) {
+                            Text(action.label)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * V2 #12 — `score_card`. Large numeric score (e.g. game score,
+ * stock %, sensor reading) with a smaller label and optional
+ * caption.
+ */
+@Composable
+private fun ScoreCard(
+    score: String?,
+    label: String?,
+    caption: String?,
+    actions: List<TemplateActionDto>,
+    onActionTap: (TemplateActionDto) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (!score.isNullOrBlank()) {
+                Text(score, style = MaterialTheme.typography.displayMedium)
+            }
+            if (!label.isNullOrBlank()) {
+                Text(label, style = MaterialTheme.typography.titleMedium)
+            }
+            if (!caption.isNullOrBlank()) {
+                Text(caption, style = MaterialTheme.typography.bodySmall)
+            }
+            if (actions.isNotEmpty()) {
+                actions.forEach { action ->
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onActionTap(action) },
+                    ) {
+                        Text(action.label)
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal data class StatEntry(val label: String, val value: String)
+
+/**
+ * V2 #12 — `stat_grid`. Title at the top + up to 4 stat tiles
+ * (label/value pairs) in a 2x2 grid. Suitable for game stats,
+ * health metrics, KPI dashboards.
+ */
+@Composable
+private fun StatGrid(
+    title: String?,
+    stats: List<StatEntry>,
+    actions: List<TemplateActionDto>,
+    onActionTap: (TemplateActionDto) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (!title.isNullOrBlank()) {
+                Text(title, style = MaterialTheme.typography.titleLarge)
+            }
+            // Render the (up to 4) stats in 2-column rows.
+            stats.chunked(2).forEach { row ->
+                androidx.compose.foundation.layout.Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    row.forEach { stat ->
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(stat.label, style = MaterialTheme.typography.bodySmall)
+                            Text(stat.value, style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                    // Pad if odd count.
+                    if (row.size == 1) {
+                        androidx.compose.foundation.layout.Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+            if (actions.isNotEmpty()) {
+                actions.forEach { action ->
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { onActionTap(action) },
+                    ) {
+                        Text(action.label)
                     }
                 }
             }

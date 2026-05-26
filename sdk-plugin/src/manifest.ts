@@ -111,9 +111,22 @@ const allDismissBehaviors = new Set<string>(Object.values(DismissBehavior));
 // a new layout here MUST track the server change in lockstep.
 const layoutRequiredFields: Record<string, ReadonlySet<string>> = {
   standard_card: new Set(['title']),
+  // V2 #12 additions — mirror server/app/schemas.py
+  // _LAYOUT_REQUIRED_FIELDS in lockstep.
+  compact_row: new Set(['leading']),
+  score_card: new Set(['score', 'label']),
+  stat_grid: new Set(['title']),
 };
 const layoutOptionalFields: Record<string, ReadonlySet<string>> = {
   standard_card: new Set(['subtitle', 'body']),
+  compact_row: new Set(['trailing', 'subtitle']),
+  score_card: new Set(['caption']),
+  stat_grid: new Set([
+    'stat1_label', 'stat1_value',
+    'stat2_label', 'stat2_value',
+    'stat3_label', 'stat3_value',
+    'stat4_label', 'stat4_value',
+  ]),
 };
 
 let activeManifest: PluginManifest | undefined;

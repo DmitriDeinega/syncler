@@ -97,17 +97,33 @@ class PluginNotFoundError(PluginError):
     """No plugin with that identifier."""
 
 
+_LAYOUT_REQUIRED_FIELDS_SERVICE: dict[str, frozenset[str]] = {
+    "standard_card": frozenset({"title"}),
+    "compact_row": frozenset({"leading"}),
+    "score_card": frozenset({"score", "label"}),
+    "stat_grid": frozenset({"title"}),
+}
+
+
 def _validate_template(template: dict, declared_endpoints: list[str]) -> None:
     layout = template.get("layout")
-    if layout != "standard_card":
+    if layout not in _LAYOUT_REQUIRED_FIELDS_SERVICE:
         raise InvalidTemplateError(f"unknown or missing layout: {layout}")
 
     fields = template.get("fields", {})
     if not isinstance(fields, dict):
         raise InvalidTemplateError("fields must be a dictionary")
 
-    if "title" not in fields:
-        raise InvalidTemplateError("missing required field: title")
+    for required in _LAYOUT_REQUIRED_FIELDS_SERVICE[layout]:
+        if required not in fields:
+            # Standard_card historically returned just "missing
+            # required field: title" — preserve that exact wording
+            # for the existing test suite.
+            if layout == "standard_card" and required == "title":
+                raise InvalidTemplateError("missing required field: title")
+            raise InvalidTemplateError(
+                f"missing required field for layout {layout}: {required}"
+            )
 
     for name, config in fields.items():
         if not isinstance(config, dict) or "path" not in config:
