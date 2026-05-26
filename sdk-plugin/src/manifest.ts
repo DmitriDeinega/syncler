@@ -80,6 +80,15 @@ export interface PluginManifest {
    * V1 validates only `startsWith("$")` server-side.
    */
   cardKeyPath?: string;
+  /**
+   * V3 #14 — sender's live-channel inbound webhook URL.
+   * When set, the host forwards device-originated live channel
+   * frames to this URL, signed with the server's Ed25519 key.
+   * Omit for plugins that use sender → device push only. HTTPS
+   * required in production (HTTP allowed in dev). Spec:
+   * docs/live-channel.md "Inbound webhook".
+   */
+  liveInboundUrl?: string;
 }
 
 /**

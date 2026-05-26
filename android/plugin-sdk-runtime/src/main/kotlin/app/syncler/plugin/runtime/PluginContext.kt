@@ -74,9 +74,50 @@ interface PluginContext {
      * release is faster.
      */
     suspend fun releaseHandle(handle: String): Result<Unit>
+
+    /**
+     * V3 #14 (ABI 3): open a multiplexed channel on the live
+     * WebSocket between this device and the plugin's sender.
+     *
+     * Returns a [LiveChannelHandle] the plugin uses for
+     * send / close / incoming-flow. The channel name is an
+     * in-band tag both plugin + sender agree on; the server
+     * doesn't interpret it beyond multiplexing.
+     *
+     * Channel payloads ride opaque V2-style envelopes — the
+     * plugin's bundle is responsible for sealing on send and
+     * opening on receive. Best-effort + ephemeral delivery
+     * per `docs/live-channel.md` "Frame ordering + delivery
+     * semantics"; missed messages are NOT replayed across
+     * reconnects. CRDT-safe ordering requires V3 #17 work.
+     *
+     * Spec failure modes (Result.failure carries the SDK
+     * error code string):
+     *  - no_foreground_session — device JWT unavailable.
+     *  - mint_token_failed_NNN — connect-token mint failed.
+     *  - ws_failure / network_error — WS open failed.
+     *  - channel_limit_exceeded — > 10 channels per socket.
+     *  - channel_name_invalid — failed the regex.
+     */
+    suspend fun liveConnect(channel: String): Result<LiveChannelHandle>
 }
 
 data class FileBytesChunk(val bytes: ByteArray, val eof: Boolean)
+
+/**
+ * V3 #14 (ABI 3) plugin-facing handle. The actual WebSocket
+ * lives in the host's `LiveChannelClient`; this interface is
+ * the surface plugin code uses.
+ */
+interface LiveChannelHandle {
+    val channel: String
+
+    /** Suspend until the server acks the send (best-effort). */
+    suspend fun send(envelope: ByteArray): Result<Unit>
+
+    /** Idempotent — releasing an unknown channel succeeds. */
+    suspend fun close(): Result<Unit>
+}
 
 /**
  * Host-owned key/value store scoped to the plugin's

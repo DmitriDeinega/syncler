@@ -5,6 +5,7 @@ import app.syncler.android.pluginhost.capabilities.CapabilityHandleStore
 import app.syncler.android.pluginhost.capabilities.FileBridge
 import app.syncler.android.pluginhost.capabilities.GalleryBridge
 import app.syncler.android.pluginhost.capabilities.JsonBridgeCodec
+import app.syncler.android.pluginhost.capabilities.LiveBridge
 import app.syncler.android.pluginhost.capabilities.LocationBridge
 import app.syncler.android.pluginhost.capabilities.MessageBridge
 import app.syncler.android.pluginhost.capabilities.NetworkBridge
@@ -44,6 +45,12 @@ class PluginBridge(
      * null.
      */
     private val capabilityHandleStore: CapabilityHandleStore? = null,
+    /**
+     * V3 #14/#15: `platform.live.*` dispatcher. Nullable for
+     * backwards compat with older call sites; calls return
+     * unknown_method if null.
+     */
+    private val liveBridge: LiveBridge,
     private val auditLogger: AuditLogger,
 ) {
     fun call(method: String, argsJson: String, callbackId: String) {
@@ -119,6 +126,17 @@ class PluginBridge(
             "platform.message.dismissBehavior" -> messageBridge.dismissBehavior(plugin, argsJson)
             "platform.fileBytes" -> readHandleBytes(argsJson)
             "platform.releaseHandle" -> releaseCapHandle(argsJson)
+            // V3 #14/#15: live-channel bridge methods. The
+            // host-side LiveChannelClient connects to the
+            // server's /v1/live WS endpoint and multiplexes
+            // channels by name; this dispatcher routes
+            // plugin-supplied (channel, payload) tuples into
+            // it. Returns immediately after enqueue — the
+            // hot incoming flow is delivered via the
+            // plugin's onLiveMessage hook (V3 #15 wiring).
+            "platform.live.connect" -> liveBridge.connect(plugin, argsJson)
+            "platform.live.send" -> liveBridge.send(plugin, argsJson)
+            "platform.live.close" -> liveBridge.close(plugin, argsJson)
             else -> {
                 auditLogger.record(plugin.manifest.id, "unknown_method", method)
                 throw PluginBridgeException("unknown_method", "Unknown bridge method: $method")

@@ -209,6 +209,32 @@ class PluginLoader(
                     ),
                     messageBridge = MessageBridge(auditLogger),
                     capabilityHandleStore = capHandleStore,
+                    liveBridge = app.syncler.android.pluginhost.capabilities.LiveBridge(
+                        clientFactory = object : app.syncler.android.pluginhost.capabilities.LiveChannelClientFactory {
+                            override fun build(
+                                plugin: app.syncler.android.pluginhost.PluginInstance,
+                            ): app.syncler.android.pluginhost.live.LiveChannelClient {
+                                // V0.1: device JWT provider TBD —
+                                // production wiring needs a Session
+                                // dep injected here; for now use a
+                                // placeholder that always throws so
+                                // the plugin sees a clean error.
+                                return app.syncler.android.pluginhost.live.LiveChannelClient(
+                                    baseUrl = "https://syncler.local",
+                                    pluginRowId = plugin.manifest.id,
+                                    deviceJwtProvider = {
+                                        throw app.syncler.android.pluginhost.live.LiveChannelException(
+                                            "no_session",
+                                            "device session not wired into LiveBridge yet",
+                                        )
+                                    },
+                                    httpClient = buildPluginHttpClient(),
+                                    auditLogger = auditLogger,
+                                )
+                            }
+                        },
+                        auditLogger = auditLogger,
+                    ),
                 ),
                 auditLogger = auditLogger,
             )
@@ -277,6 +303,8 @@ class SandboxedPluginInstanceFactory(
     private val locationBridge: LocationBridge,
     private val messageBridge: MessageBridge,
     private val capabilityHandleStore: app.syncler.android.pluginhost.capabilities.CapabilityHandleStore? = null,
+    /** V3 #14/#15 — process-singleton `platform.live.*` dispatcher. */
+    private val liveBridge: app.syncler.android.pluginhost.capabilities.LiveBridge,
 ) : PluginInstanceFactory {
 
     override suspend fun create(
@@ -310,6 +338,7 @@ class SandboxedPluginInstanceFactory(
             locationBridge = locationBridge,
             messageBridge = messageBridge,
             capabilityHandleStore = capabilityHandleStore,
+            liveBridge = liveBridge,
             auditLogger = auditLogger,
         )
         bridgeDispatcher.registerBridge(sandboxToken, bridge)

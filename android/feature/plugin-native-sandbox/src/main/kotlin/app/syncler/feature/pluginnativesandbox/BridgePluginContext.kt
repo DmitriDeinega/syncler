@@ -161,6 +161,44 @@ internal class BridgePluginContext(
         ) { Result.success(Unit) }
 
     /**
+     * V3 #14 (ABI 3): open a live channel. The actual
+     * WebSocket is held by the host's LiveChannelClient; this
+     * call just registers our intent and returns a typed
+     * handle that round-trips send/close back through the
+     * bridge.
+     */
+    override suspend fun liveConnect(
+        channel: String,
+    ): Result<app.syncler.plugin.runtime.LiveChannelHandle> =
+        bridgeRoundTrip(
+            "platform.live.connect",
+            "{\"channel\":${escape(channel)}}",
+        ) { json ->
+            if (isError(json)) {
+                Result.failure(IllegalStateException(extractError(json)))
+            } else {
+                Result.success(
+                    BridgeLiveChannelHandle(
+                        channelName = channel,
+                        context = this,
+                    ),
+                )
+            }
+        }
+
+    internal suspend fun liveSendBridge(channel: String, envelope: ByteArray): Result<Unit> =
+        bridgeRoundTrip(
+            "platform.live.send",
+            "{\"channel\":${escape(channel)},\"envelope\":\"${base64(envelope)}\"}",
+        ) { Result.success(Unit) }
+
+    internal suspend fun liveCloseBridge(channel: String): Result<Unit> =
+        bridgeRoundTrip(
+            "platform.live.close",
+            "{\"channel\":${escape(channel)}}",
+        ) { Result.success(Unit) }
+
+    /**
      * Suspends until the host delivers a bridge result for the
      * generated callbackId. Cancellation removes the pending
      * entry so a late result doesn't try to resume a dead
@@ -459,4 +497,28 @@ internal class BridgePluginContext(
     companion object {
         private const val TAG = "PluginNativeBridge"
     }
+}
+
+/**
+ * V3 #14 (ABI 3) — plugin-facing live channel handle. The
+ * actual WebSocket lives in the host's LiveChannelClient;
+ * send/close round-trip back through the same bridgeCall
+ * AIDL path BridgePluginContext uses for every other
+ * platform.* call.
+ *
+ * Incoming messages arrive via the plugin's `onLiveMessage`
+ * hook (dispatched by the host's LiveBridge into the
+ * sandbox's PluginCoordinator → PluginInstance), NOT on this
+ * handle directly. The plugin's SynclerPlugin impl overrides
+ * `onLiveMessage` to receive them.
+ */
+internal class BridgeLiveChannelHandle(
+    private val channelName: String,
+    private val context: BridgePluginContext,
+) : app.syncler.plugin.runtime.LiveChannelHandle {
+    override val channel: String get() = channelName
+    override suspend fun send(envelope: ByteArray): Result<Unit> =
+        context.liveSendBridge(channelName, envelope)
+    override suspend fun close(): Result<Unit> =
+        context.liveCloseBridge(channelName)
 }
