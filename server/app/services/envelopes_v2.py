@@ -270,6 +270,35 @@ def build_live_card_upsert_envelope_bytes(payload: Any) -> bytes:
     )
 
 
+def build_card_patch_envelope_bytes(payload: Any) -> bytes:
+    """V3 #16 — canonical Ed25519 signing input for
+    ``envelope_kind="card_patch"``.
+
+    Spec: docs/live-card-patch.md. The patches themselves are
+    INSIDE the encrypted payload_ciphertext; this signing
+    envelope only commits to the routing/sequence metadata +
+    the encrypted bytes.
+    """
+    return _canonical_json(
+        {
+            "base_seq": payload.base_seq,
+            "card_id": str(payload.card_id),
+            "envelope_kind": "card_patch",
+            "patch_seq": payload.patch_seq,
+            "payload_ciphertext": payload.payload_ciphertext,
+            "payload_nonce": payload.payload_nonce,
+            "plugin_id": str(payload.plugin_id),
+            "protocol_version": payload.protocol_version,
+            "recipient_directory_version": payload.recipient_directory_version,
+            "recipient_envelopes": _serialize_recipient_envelopes(
+                payload.recipient_envelopes
+            ),
+            "sender_id": str(payload.sender_id),
+            "user_id": str(payload.user_id),
+        }
+    )
+
+
 def build_live_card_delete_envelope_bytes(payload: Any) -> bytes:
     """Canonical Ed25519 signing input for ``envelope_kind="live_card_delete"``.
     Spec §11.6.

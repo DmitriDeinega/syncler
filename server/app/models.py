@@ -288,6 +288,27 @@ class LiveCard(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
+class CardPatch(Base):
+    """V3 #16 sidecar — persisted V2 envelopes carrying
+    field-level patches between cards.upsert events. The
+    envelope_json column is OPAQUE to the server (per-device
+    HPKE blobs + sender signature); we route + replay it.
+
+    Spec: docs/live-card-patch.md.
+    """
+
+    __tablename__ = "card_patches"
+
+    plugin_row_id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    card_id: Mapped[UUID] = mapped_column(UUID_TYPE, primary_key=True)
+    base_seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    patch_seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    envelope_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class EncryptedUserState(Base):
     __tablename__ = "encrypted_user_state"
 

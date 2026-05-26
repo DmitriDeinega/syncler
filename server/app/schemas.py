@@ -1230,6 +1230,64 @@ class MessageSendRequestV2(BaseModel):
         return self
 
 
+class LiveCardPatchRequestV2(BaseModel):
+    """V3 #16 — field-level patch wire (POST /v1/cards/patch).
+
+    Spec: docs/live-card-patch.md. The patches themselves
+    live inside the per-recipient HPKE-sealed envelopes; the
+    server only validates routing metadata + sender signature
+    + sequence + recipient-set rules.
+
+    Privacy invariant: the outer wire frame MUST NOT carry
+    plaintext field paths or values (both triad 145 reviewers).
+    """
+
+    protocol_version: Literal[2]
+    envelope_kind: Literal["card_patch"]
+    sender_id: UUID
+    user_id: UUID
+    plugin_id: UUID  # plugin row UUID (matches LiveCard.plugin_id)
+    card_id: UUID    # LiveCard.id this patch targets
+    base_seq: Annotated[int, Field(ge=0)]
+    patch_seq: Annotated[int, Field(ge=0)]
+    payload_nonce: str
+    payload_ciphertext: str
+    recipient_envelopes: Annotated[
+        list[RecipientEnvelopeWire], Field(min_length=1, max_length=32)
+    ]
+    recipient_directory_version: Annotated[int, Field(ge=0)]
+    envelope_signature: str
+
+    @field_validator("payload_nonce")
+    @classmethod
+    def validate_payload_nonce(cls, value: str) -> str:
+        decode_base64(value, field_name="payload_nonce", exact=12)
+        return value
+
+    @field_validator("payload_ciphertext")
+    @classmethod
+    def validate_payload_ciphertext(cls, value: str) -> str:
+        decode_base64(value, field_name="payload_ciphertext", minimum=16)
+        return value
+
+    @field_validator("envelope_signature")
+    @classmethod
+    def validate_envelope_signature(cls, value: str) -> str:
+        decode_base64(value, field_name="envelope_signature", exact=64)
+        return value
+
+    @model_validator(mode="after")
+    def reject_duplicate_devices(self) -> "LiveCardPatchRequestV2":
+        seen: set[UUID] = set()
+        for env in self.recipient_envelopes:
+            if env.device_id in seen:
+                raise ValueError(
+                    f"duplicate recipient device_id in card_patch: {env.device_id}"
+                )
+            seen.add(env.device_id)
+        return self
+
+
 class LiveCardUpsertRequestV2(BaseModel):
     """Live-card upsert wire (POST /v1/cards/upsert) per spec §11.5."""
 

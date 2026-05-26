@@ -14,6 +14,7 @@ from app.models import Sender
 from app.schemas import (
     LiveCardDeleteRequestV2,
     LiveCardInboxItemV2,
+    LiveCardPatchRequestV2,
     LiveCardUpsertRequestV2,
     RecipientEnvelopeWire,
     StaleRecipientSetError,
@@ -30,6 +31,7 @@ from app.services.cards import (
 )
 from app.services.envelopes_v2 import (
     RecipientSetError,
+    build_card_patch_envelope_bytes,
     build_live_card_delete_envelope_bytes,
     build_live_card_upsert_envelope_bytes,
     classify_recipient_set,
@@ -225,3 +227,150 @@ async def delete(
         },
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+
+# V3 #16 — field-level card patch.
+
+
+@router.post("/patch", status_code=status.HTTP_202_ACCEPTED)
+async def patch(
+    payload: LiveCardPatchRequestV2,
+    request: Request,
+    _: None = Depends(rate_limit("card_upsert_ip")),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """V3 #16 — field-level patch on a live card.
+
+    The wire frame carries opaque V2-shape envelopes; the
+    server NEVER sees plaintext field paths or values. We
+    validate routing metadata, sender signature, recipient-
+    set rules, and sequence (base_seq must match the card's
+    current sequence_number; patch_seq must be > the last
+    persisted patch for that base).
+
+    Spec: docs/live-card-patch.md.
+    """
+    from app.models import CardPatch, LiveCard, Pairing
+    from sqlalchemy import select, and_
+    import json as _json
+
+    try:
+        sender: Sender = await get_active_sender(db, payload.sender_id)
+    except SenderNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sender not found") from exc
+    except SenderRevokedError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="sender revoked") from exc
+
+    envelope_bytes = build_card_patch_envelope_bytes(payload)
+    signature = decode_base64(
+        payload.envelope_signature, field_name="envelope_signature", exact=64
+    )
+    if not verify_message_envelope(sender.public_key, envelope_bytes, signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid envelope signature"
+        )
+
+    request.state.sender_id = str(payload.sender_id)
+    request.state.user_id = str(payload.user_id)
+    from app.middleware.rate_limit import check_rate_limit
+    from app.middleware.rate_limit_config import RATE_LIMITS
+    await check_rate_limit(db, request, RATE_LIMITS["card_upsert"])
+
+    # Pairing check — same shape as upsert. Service-side
+    # would mirror this but inline keeps the patch fast path
+    # under one logical block.
+    pairing_result = await db.execute(
+        select(Pairing).where(
+            and_(
+                Pairing.user_id == payload.user_id,
+                Pairing.sender_id == payload.sender_id,
+                Pairing.revoked_at.is_(None),
+            )
+        )
+    )
+    if pairing_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not paired")
+
+    # Lookup the LiveCard to validate base_seq.
+    card_result = await db.execute(
+        select(LiveCard).where(
+            and_(
+                LiveCard.id == payload.card_id,
+                LiveCard.user_id == payload.user_id,
+                LiveCard.plugin_id == payload.plugin_id,
+            )
+        )
+    )
+    card = card_result.scalar_one_or_none()
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="card not found")
+    if card.sequence_number != payload.base_seq:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "stale_base_seq",
+                "current_card_seq": card.sequence_number,
+            },
+        )
+
+    # Sequence CAS via PK collision. Last persisted patch_seq
+    # must be < incoming.
+    last_patch_result = await db.execute(
+        select(CardPatch.patch_seq).where(
+            and_(
+                CardPatch.plugin_row_id == payload.plugin_id,
+                CardPatch.card_id == payload.card_id,
+                CardPatch.base_seq == payload.base_seq,
+            )
+        ).order_by(CardPatch.patch_seq.desc()).limit(1)
+    )
+    last_patch_seq = last_patch_result.scalar_one_or_none() or 0
+    if payload.patch_seq <= last_patch_seq:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "patch_seq_regression",
+                "last_patch_seq": last_patch_seq,
+            },
+        )
+
+    classification = await classify_recipient_set(
+        db,
+        user_id=payload.user_id,
+        recipient_envelopes=payload.recipient_envelopes,
+        sender_directory_version=payload.recipient_directory_version,
+    )
+    if isinstance(classification, RecipientSetError):
+        raise HTTPException(
+            status_code=classification.http_status,
+            detail=classification.message,
+        )
+
+    # Persist for inbox catch-up. The envelope_json is opaque
+    # to the server — we store the V2 envelope shape so a
+    # disconnected device can replay it later.
+    envelope_json = _json.dumps(
+        payload.model_dump(mode="json"), separators=(",", ":"), sort_keys=True
+    )
+    db.add(
+        CardPatch(
+            plugin_row_id=payload.plugin_id,
+            card_id=payload.card_id,
+            base_seq=payload.base_seq,
+            patch_seq=payload.patch_seq,
+            envelope_json=envelope_json,
+        )
+    )
+    await db.commit()
+
+    # Live channel fan-out (V3 #14 ephemeral lane). Devices
+    # currently connected receive the envelope; disconnected
+    # devices catch up via the inbox.
+    from app.live.hub import get_hub, plugin_topic
+    await get_hub().publish_ephemeral(
+        plugin_topic(str(payload.user_id), str(payload.plugin_id)),
+        envelope_json,
+    )
+
+    return Response(status_code=status.HTTP_202_ACCEPTED)

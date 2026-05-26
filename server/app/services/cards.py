@@ -151,6 +151,19 @@ async def upsert_live_card_v2(
         )
         db.add(card)
 
+    # V3 #16: purge any patches for this card before commit
+    # (gemini FIX) — a new upsert obsoletes the entire patch
+    # chain past it. Devices catch up from the new card_seq,
+    # not from any stale patches still in the table.
+    from app.models import CardPatch
+    from sqlalchemy import delete as sql_delete
+    await db.execute(
+        sql_delete(CardPatch).where(
+            CardPatch.plugin_row_id == card.plugin_id,
+            CardPatch.card_id == card.id,
+        )
+    )
+
     await db.commit()
     await db.refresh(card)
     return card
