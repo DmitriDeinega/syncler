@@ -38,6 +38,13 @@ class PluginNotificationService : Service() {
     @Inject lateinit var pipeline: PluginMessagePipeline
     @Inject lateinit var notifications: NotificationFactory
 
+    /**
+     * V4 #19 — per-plugin notification gate. Suppresses
+     * post(...) on muted plugins / quiet hours / non-realtime
+     * cadence. Spec: docs/plugin-prefs.md.
+     */
+    @Inject lateinit var gate: PluginNotificationGate
+
     private val supervisor = SupervisorJob()
     private val scope = CoroutineScope(supervisor + Dispatchers.IO)
     private val activeJobs = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Job, Boolean>())
@@ -71,7 +78,20 @@ class PluginNotificationService : Service() {
                     Timber.tag(TAG).w("plugin pipeline timed out for message=%s", messageId)
                     notifications.postDeliveryFailed(this@PluginNotificationService, messageId)
                 } else {
-                    outcome.notification?.let { notifications.post(this@PluginNotificationService, it) }
+                    outcome.notification?.let { notification ->
+                        // V4 #19 — gate the post on per-plugin prefs.
+                        // pluginId here is the manifest identifier
+                        // (matches the PluginSettings map key).
+                        val decision = gate.shouldPost(pluginId)
+                        if (decision == PluginNotificationGate.Decision.ALLOW) {
+                            notifications.post(this@PluginNotificationService, notification)
+                        } else {
+                            Timber.tag(TAG).i(
+                                "notification suppressed for plugin=%s reason=%s",
+                                pluginId, decision,
+                            )
+                        }
+                    }
                     if (outcome.requiresUpdate) {
                         notifications.postUpdateRequired(
                             context = this@PluginNotificationService,
