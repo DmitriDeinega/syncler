@@ -781,7 +781,7 @@ Server enforces:
 
 ### Pushing from your sender into the live channel
 
-Your backend POSTs a signed envelope to a per-plugin-row endpoint and the server fans it out to every active device WS for that user:
+Your backend POSTs an opaque V2 envelope to the plugin-row's push endpoint. The server fans it out to every currently-connected device WS belonging to a paired user under your sender:
 
 ```
 POST https://api.syncler.app/v1/live/plugin/{plugin_row_id}/push
@@ -792,51 +792,99 @@ Body:
 
 ```json
 {
-  "sender_id":                 "<your sender UUID>",
-  "user_id":                   "<recipient user UUID>",
-  "channel":                   "ticker",
-  "envelope":                  "<base64 of the V2 envelope>",
-  "envelope_signature":        "<base64 Ed25519 signature over canonical(envelope+routing fields)>"
+  "envelope": {
+    "...":                                "the standard V2 envelope object",
+    "sender_id":                          "<your sender UUID>",
+    "envelope_kind":                      "event",
+    "payload_nonce":                      "...",
+    "payload_ciphertext":                 "...",
+    "recipient_envelopes":                [ ... per-device HPKE envelopes ... ],
+    "envelope_signature":                 "..."
+  }
 }
 ```
 
-The canonical signing bytes match `docs/crypto-spec.md §11.8` (sorted-keys JSON over `{channel, envelope, plugin_row_id, sender_id, user_id}`). Server verifies against your registered Ed25519 public key, then publishes on the user-scoped topic `user:{user_id}:plugin:{plugin_row_id}`.
+The envelope itself is the same V2 shape you'd hand to `send_to(...)` — sealed for each of the user's devices with their per-device HPKE keys, signed by your Ed25519 key over the canonical bytes (`docs/crypto-spec.md §11.8`). The push endpoint treats the envelope as opaque; the authenticity gate is the envelope signature the devices verify, not a separate POST-level signature. Server fans out to **every paired user under your sender** for `plugin_row_id`, and each device picks its own `recipient_envelope` to decrypt. Devices that have no matching `recipient_envelope` on the frame just ignore it.
 
-Today the Python SDK does not ship a typed `live_push` helper — drive the raw POST until that lands. The TypeScript SDK exposes the device-side `platform.live.connect/send/close` surface but not a sender helper either.
+Response: `202 {"delivered": <int>}` where `delivered` counts the per-user topics the server published to. It is NOT a per-device delivery count.
+
+Today neither the Python nor TypeScript SDK ships a typed `live_push` helper — drive the raw POST until they do.
 
 ### Receiving from devices on your sender
 
-Devices push back to you via a server-operated webhook forwarder. Two prerequisites:
+Devices push back to you via a server-operated webhook forwarder. Prerequisites:
 
-1. **Register a `liveInboundUrl`** in your plugin manifest at publish time. The TypeScript SDK manifest exposes this field; the Python SDK does not yet — for now Python integrators set it through the raw `/v1/plugins/publish` body until `Client.publish_plugin` grows the parameter.
-2. **Fetch the server's Ed25519 public key** from the registration response and pin it in your service. Every webhook POST you receive is signed under the matching private key.
+1. **Register a `liveInboundUrl`** in your plugin manifest at publish time. The TypeScript SDK manifest exposes this field; the Python `Client.publish_plugin(...)` does not yet expose `live_inbound_url`, so Python integrators must drive the raw `POST /v1/plugins/publish` body to set it until the helper grows the parameter.
+2. **Obtain the server's Ed25519 webhook-signing public key out-of-band.** The current API does not include the server's signing public key in the publish response. For v0.1 deployments, ask the Syncler operator for the key (an admin / well-known endpoint is planned). Pin it in your service; you'll verify `X-Syncler-Signature` against it.
 
-When a device sends a frame, the server delivers to your endpoint:
+When a device sends a frame on the live channel, the server delivers to your endpoint:
 
 ```
 POST <liveInboundUrl>
 Content-Type: application/json
-X-Syncler-Signature: <base64 Ed25519 over the body>
+X-Syncler-Signature: <base64 Ed25519 signature over the raw body bytes>
 ```
 
-Body:
+Body (compact JSON; this is exactly what `X-Syncler-Signature` covers):
 
 ```json
 {
   "plugin_row_id":     "...",
   "channel":           "...",
-  "device_pseudonym":  "<hex HMAC(device_id, sender_id)>",
-  "envelope":          "<base64 V2 envelope from the device>",
-  "received_at":       "2026-05-26T22:01:34Z"
+  "envelope":          "<string — JSON-encoded V2 envelope from the device>",
+  "received_at":       1748296894,
+  "device_pseudonym":  "<base64url, ≤32 chars>"
 }
 ```
 
-Privacy notes:
-- The envelope is opaque — server cannot decrypt; only the targeted user's devices can.
-- `device_pseudonym` lets you correlate "same device, same sender" across messages without ever learning the real device ID and without that pseudonym matching one held by any other sender.
-- Three retries with exponential backoff (1s → 4s → 16s); 5s per-attempt timeout. If the server's signing key isn't configured, the forwarder fails LOUDLY rather than dropping the signature.
+Notes for verification + integration:
+- `received_at` is integer **epoch seconds** (not ISO 8601).
+- `device_pseudonym` is `HMAC-SHA256(server_signing_seed, "{device_id}|{sender_id}")` truncated to 32 chars of base64url. It is stable per (device, sender) and uncorrelated across senders.
+- `envelope` is a **string** carrying the device's V2 envelope JSON verbatim, NOT a base64 wrapper. You parse the string to get the V2 fields and HPKE-open the recipient envelope addressed to your sender.
+- Verify `X-Syncler-Signature` over the **raw POST body bytes** (the compact-JSON serialization the server signed). Do not re-serialize before verifying.
+- Three retries with exponential backoff (1s → 4s → 16s); 5s per-attempt timeout. If the server's signing seed is unset, the forwarder logs LOUDLY and refuses to deliver rather than silently dropping the signature header.
 
 Spec deep-dive: `docs/live-channel.md`. Read it before shipping a live integration — it pins the multiplex frame schema, the close-code table, and the connect-token contract in full.
+
+### Plugin-side (device) live channel snippet
+
+Inside your plugin bundle (`src/plugin.ts`):
+
+```ts
+import { platform, BasePlugin } from "@syncler/plugin-sdk";
+
+export class TickerPlugin extends BasePlugin {
+  async onMessage(payload: unknown) {
+    // …regular event/live-card handling…
+    await platform.live.connect("ticker");
+  }
+
+  async onLiveMessage(channel: string, envelopeBase64: string) {
+    // envelopeBase64 is the opaque V2 envelope your sender pushed
+    // (or another device pushed via the webhook forwarder). Open
+    // it with the V2 helpers in @syncler/plugin-sdk and react.
+    const envelope = JSON.parse(atob(envelopeBase64));
+    // …decrypt + render…
+  }
+
+  async sendTick(value: string) {
+    const envelope = await buildOutgoingV2Envelope(value);
+    await platform.live.send("ticker", btoa(envelope));
+  }
+
+  async onUnload() {
+    await platform.live.close("ticker");
+  }
+}
+registerPlugin(new TickerPlugin());
+```
+
+Key contract points:
+- `platform.live.connect(channelName)` opens (or reuses) the WS for this plugin row and starts the named channel. Idempotent — calling twice on the same channel just returns the same handle.
+- Incoming frames arrive at your `onLiveMessage(channel, envelopeBase64)` hook (NOT through a callback registered on a handle). The hook is plugin-global — switch on `channel` if you've connected to more than one.
+- `platform.live.send(channel, envelopeBase64)` MUST be preceded by a `connect`. Calling `send` on an un-connected channel returns `channel_not_open`.
+- `platform.live.close(channel)` is idempotent. Closing one channel does NOT tear down the underlying WS for other channels.
+- `platform.live.subscribe(channelName)` is a one-line alias for `connect` that emphasizes read-only intent; same wire path, same hook.
 
 ### Operator note (production)
 
