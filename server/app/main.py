@@ -6,6 +6,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+import logging
+
 from app import __version__
 from app.config import get_settings
 from app.db import dispose_engine, init_engine
@@ -23,13 +25,35 @@ from app.routers import (
     state,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_engine()
+    # V3 #17: when LIVE_BACKPLANE=redis, ping Redis at
+    # startup so a mis-configured deploy fails LOUDLY at
+    # boot instead of accepting requests that all 5xx once
+    # a real backplane op hits Redis. Spec: docs/live-
+    # backplane.md "Failure modes — fail closed".
+    settings = get_settings()
+    if settings.live_backplane == "redis":
+        from app.redis_client import ensure_connected_or_raise
+        await ensure_connected_or_raise()
+    elif settings.environment == "production":
+        # Spec "Configuration": memory backplane in
+        # production is loud-warning-only for V0.1 (hard
+        # refusal is V0.2).
+        logger.warning(
+            "live_backplane=memory in production — multi-worker SSE/WS "
+            "fan-out will NOT cross worker boundaries. Set LIVE_BACKPLANE=redis."
+        )
     try:
         yield
     finally:
+        if settings.live_backplane == "redis":
+            from app.redis_client import close_redis
+            await close_redis()
         await dispose_engine()
 
 
