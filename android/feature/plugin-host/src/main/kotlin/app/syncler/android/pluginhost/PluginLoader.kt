@@ -244,8 +244,13 @@ class PluginLoader(
                                 // wired (test / headless build), keep
                                 // the loud placeholder so the wiring
                                 // gap can't slip past in production.
+                                // Triad 159 codex FIX: use the same
+                                // SERVER_BASE_URL the REST + SSE
+                                // clients use — the previous hard-
+                                // coded "https://syncler.local"
+                                // dead-ended any real WS connect.
                                 return app.syncler.android.pluginhost.live.LiveChannelClient(
-                                    baseUrl = "https://syncler.local",
+                                    baseUrl = app.syncler.core.network.BuildConfig.SERVER_BASE_URL,
                                     pluginRowId = plugin.pluginRowId,
                                     deviceJwtProvider = {
                                         if (session == null) {

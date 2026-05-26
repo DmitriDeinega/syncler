@@ -83,12 +83,29 @@ async def _drop_database(database_url: str) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def test_database() -> Iterator[str]:
+    """Session-scoped DB scaffold. Tries to recreate the test
+    database; on connection failure (PG dev box down), yields
+    the URL anyway so PG-independent tests still run — only
+    the fixtures that actually open `engine` / `db_session`
+    will then fail downstream.
+    Triad 159 codex FIX: previously raised ConnectionRefusedError
+    blanket-blocking even the in-process unit tests like
+    test_v3_14_push_frame.py.
+    """
     database_url = _test_database_url()
-    asyncio.run(_recreate_database(database_url))
+    pg_available = True
+    try:
+        asyncio.run(_recreate_database(database_url))
+    except (OSError, ConnectionError, ConnectionRefusedError):
+        pg_available = False
     try:
         yield database_url
     finally:
-        asyncio.run(_drop_database(database_url))
+        if pg_available:
+            try:
+                asyncio.run(_drop_database(database_url))
+            except (OSError, ConnectionError, ConnectionRefusedError):
+                pass
 
 
 @pytest.fixture

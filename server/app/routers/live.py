@@ -232,19 +232,14 @@ async def push_live(
         raise HTTPException(status_code=404, detail="plugin not found")
 
     envelope_json = json.dumps(body.envelope, separators=(",", ":"))
-    # Triad 158 bug 1 FIX: cap the inner envelope BEFORE
-    # wrapping — base64 inflates ~33% so the outer frame on
-    # the wire stays under MAX_FRAME_BYTES.
-    inner_cap = (MAX_FRAME_BYTES * 3) // 4 - 64
-    if len(envelope_json) > inner_cap:
-        raise HTTPException(status_code=413, detail="envelope too large")
 
-    # Triad 158 bug 1 FIX: wrap the V2 envelope in a multiplex
-    # `message` frame so the device's LiveChannelClient
-    # dispatches it by `frame.type == "message"` (spec
-    # docs/live-channel.md §"Message"). Pre-fix the raw
-    # envelope JSON was published unwrapped and silently
-    # ignored on the device side.
+    # Triad 158 bug 1 FIX (+ triad 159 codex FIX on the cap
+    # math): wrap the V2 envelope in a multiplex `message`
+    # frame so devices dispatch by `frame.type == "message"`
+    # (spec docs/live-channel.md §"Message"). The previous
+    # pre-wrap cap underestimated the frame overhead +
+    # base64 padding; instead, build the frame and check
+    # the final outer size directly.
     import base64 as _b64
     frame = {
         "type": "message",
@@ -253,6 +248,8 @@ async def push_live(
         "payload": _b64.b64encode(envelope_json.encode()).decode(),
     }
     frame_json = json.dumps(frame, separators=(",", ":"))
+    if len(frame_json) > MAX_FRAME_BYTES:
+        raise HTTPException(status_code=413, detail="envelope too large")
 
     # Triad 144 gemini CRITICAL fix: fan out to (user, plugin)
     # topics only. Each paired user gets the envelope on its
