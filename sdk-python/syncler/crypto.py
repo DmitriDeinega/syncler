@@ -271,28 +271,46 @@ def build_v2_payload_aad(
     sender_id: str,
     user_id: str,
     plugin_id: str,
-    expires_at: str,
-    min_plugin_version: str,
+    expires_at: str | None = None,
+    min_plugin_version: str | None = None,
     card_key: str | None = None,
     card_type: str | None = None,
     sequence_number: int | None = None,
+    card_id: str | None = None,
+    base_seq: int | None = None,
+    patch_seq: int | None = None,
 ) -> bytes:
-    """Spec §11.7. Shared payload AAD (same for every recipient)."""
+    """Spec §11.7. Shared payload AAD (same for every recipient).
+
+    V3 #16: ``envelope_kind="card_patch"`` binds the encrypted
+    body to (card_id, base_seq, patch_seq) instead of
+    expires_at/min_plugin_version — patches don't carry a TTL
+    on the envelope; their lifetime is the parent card's.
+    """
     aad: dict[str, Any] = {
         "envelope_kind": envelope_kind,
-        "expires_at": expires_at,
-        "min_plugin_version": min_plugin_version,
         "plugin_id": _canonical_uuid(plugin_id),
         "protocol_version": 2,
         "sender_id": _canonical_uuid(sender_id),
         "user_id": _canonical_uuid(user_id),
     }
-    if envelope_kind == "live_card_upsert":
-        if card_key is None or card_type is None or sequence_number is None:
-            raise ValueError("live_card_upsert aad needs card_key/card_type/sequence_number")
-        aad["card_key"] = card_key
-        aad["card_type"] = card_type
-        aad["sequence_number"] = sequence_number
+    if envelope_kind == "card_patch":
+        if card_id is None or base_seq is None or patch_seq is None:
+            raise ValueError("card_patch aad needs card_id/base_seq/patch_seq")
+        aad["card_id"] = _canonical_uuid(card_id)
+        aad["base_seq"] = base_seq
+        aad["patch_seq"] = patch_seq
+    else:
+        if expires_at is None or min_plugin_version is None:
+            raise ValueError("non-patch aad needs expires_at/min_plugin_version")
+        aad["expires_at"] = expires_at
+        aad["min_plugin_version"] = min_plugin_version
+        if envelope_kind == "live_card_upsert":
+            if card_key is None or card_type is None or sequence_number is None:
+                raise ValueError("live_card_upsert aad needs card_key/card_type/sequence_number")
+            aad["card_key"] = card_key
+            aad["card_type"] = card_type
+            aad["sequence_number"] = sequence_number
     return canonical_json(aad)
 
 
@@ -302,22 +320,26 @@ def build_v2_hpke_info(
     sender_id: str,
     user_id: str,
     plugin_id: str,
-    expires_at: str,
-    min_plugin_version: str,
     payload_nonce_b64: str,
     payload_ciphertext_sha256_hex: str,
     device_id: str,
+    expires_at: str | None = None,
+    min_plugin_version: str | None = None,
     card_key: str | None = None,
     card_type: str | None = None,
     sequence_number: int | None = None,
+    card_id: str | None = None,
+    base_seq: int | None = None,
+    patch_seq: int | None = None,
 ) -> bytes:
     """Spec §11.3. Per-recipient HPKE info. Card fields are OMITTED
-    (not null) for envelope_kind="event"."""
+    (not null) for envelope_kind="event".
+
+    V3 #16: ``card_patch`` binds info to (card_id, base_seq,
+    patch_seq) — same shape choice as the payload AAD."""
     info: dict[str, Any] = {
         "device_id": _canonical_uuid(device_id),
         "envelope_kind": envelope_kind,
-        "expires_at": expires_at,
-        "min_plugin_version": min_plugin_version,
         "payload_ciphertext_sha256": payload_ciphertext_sha256_hex,
         "payload_nonce": payload_nonce_b64,
         "plugin_id": _canonical_uuid(plugin_id),
@@ -325,12 +347,23 @@ def build_v2_hpke_info(
         "sender_id": _canonical_uuid(sender_id),
         "user_id": _canonical_uuid(user_id),
     }
-    if envelope_kind == "live_card_upsert":
-        if card_key is None or card_type is None or sequence_number is None:
-            raise ValueError("live_card_upsert info needs card_key/card_type/sequence_number")
-        info["card_key"] = card_key
-        info["card_type"] = card_type
-        info["sequence_number"] = sequence_number
+    if envelope_kind == "card_patch":
+        if card_id is None or base_seq is None or patch_seq is None:
+            raise ValueError("card_patch info needs card_id/base_seq/patch_seq")
+        info["card_id"] = _canonical_uuid(card_id)
+        info["base_seq"] = base_seq
+        info["patch_seq"] = patch_seq
+    else:
+        if expires_at is None or min_plugin_version is None:
+            raise ValueError("non-patch info needs expires_at/min_plugin_version")
+        info["expires_at"] = expires_at
+        info["min_plugin_version"] = min_plugin_version
+        if envelope_kind == "live_card_upsert":
+            if card_key is None or card_type is None or sequence_number is None:
+                raise ValueError("live_card_upsert info needs card_key/card_type/sequence_number")
+            info["card_key"] = card_key
+            info["card_type"] = card_type
+            info["sequence_number"] = sequence_number
     return canonical_json(info)
 
 
@@ -342,11 +375,14 @@ def seal_v2_envelopes(
     sender_id: str,
     user_id: str,
     plugin_id: str,
-    expires_at: str,
-    min_plugin_version: str,
+    expires_at: str | None = None,
+    min_plugin_version: str | None = None,
     card_key: str | None = None,
     card_type: str | None = None,
     sequence_number: int | None = None,
+    card_id: str | None = None,
+    base_seq: int | None = None,
+    patch_seq: int | None = None,
 ) -> V2PublishMaterial:
     """Spec §11.4 / §11.5 sender-side seal.
 
@@ -372,6 +408,9 @@ def seal_v2_envelopes(
         card_key=card_key,
         card_type=card_type,
         sequence_number=sequence_number,
+        card_id=card_id,
+        base_seq=base_seq,
+        patch_seq=patch_seq,
     )
     payload_ciphertext = AESGCM(cek).encrypt(payload_nonce, plaintext, payload_aad)
 
@@ -393,6 +432,9 @@ def seal_v2_envelopes(
             card_key=card_key,
             card_type=card_type,
             sequence_number=sequence_number,
+            card_id=card_id,
+            base_seq=base_seq,
+            patch_seq=patch_seq,
         )
         pk = X25519PublicKey.from_public_bytes(device.encryption_public_key)
         enc_concat_ct = V2_HPKE_SUITE.encrypt(
@@ -499,6 +541,46 @@ def assemble_live_card_upsert_envelope_v2(
             ),
             "sender_id": _canonical_uuid(sender_id),
             "sequence_number": sequence_number,
+            "user_id": _canonical_uuid(user_id),
+        }
+    )
+
+
+def assemble_card_patch_envelope_v2(
+    *,
+    sender_id: str,
+    user_id: str,
+    plugin_id: str,
+    card_id: str,
+    base_seq: int,
+    patch_seq: int,
+    payload_nonce_b64: str,
+    payload_ciphertext_b64: str,
+    recipient_envelopes: list[V2RecipientEnvelope],
+    recipient_directory_version: int,
+) -> bytes:
+    """V3 #16 — Ed25519 signing input for envelope_kind="card_patch".
+
+    Mirrors server-side ``build_card_patch_envelope_bytes`` in
+    app/services/envelopes_v2.py. The patches themselves live
+    inside the per-recipient HPKE ciphertext; the canonical
+    envelope only commits to routing + sequence metadata.
+    """
+    return canonical_json(
+        {
+            "base_seq": base_seq,
+            "card_id": _canonical_uuid(card_id),
+            "envelope_kind": "card_patch",
+            "patch_seq": patch_seq,
+            "payload_ciphertext": payload_ciphertext_b64,
+            "payload_nonce": payload_nonce_b64,
+            "plugin_id": _canonical_uuid(plugin_id),
+            "protocol_version": 2,
+            "recipient_directory_version": recipient_directory_version,
+            "recipient_envelopes": _serialize_recipient_envelopes_for_signing(
+                recipient_envelopes
+            ),
+            "sender_id": _canonical_uuid(sender_id),
             "user_id": _canonical_uuid(user_id),
         }
     )

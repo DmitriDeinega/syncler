@@ -28,6 +28,7 @@ from syncler.broker_storage import BrokerStorage
 from syncler.crypto import (
     DirectoryDevice,
     V2RecipientEnvelope,
+    assemble_card_patch_envelope_v2,
     assemble_directory_fetch_envelope,
     assemble_envelope,
     assemble_event_envelope_v2,
@@ -629,6 +630,132 @@ class Client:
             return resp.json()
 
         raise SynclerError("upsert_card exhausted retries without verdict")
+
+    def patch_card(
+        self,
+        *,
+        user_id: str,
+        plugin_id: str,
+        card_id: str,
+        base_seq: int,
+        patch_seq: int,
+        patches: list[tuple[str, str]] | None = None,
+        raw_patches: list[dict[str, Any]] | None = None,
+        field_paths: dict[str, str] | None = None,
+    ) -> None:
+        """V3 #16 — field-level patch on a live card.
+
+        Spec: docs/live-card-patch.md. The wire frame is opaque;
+        every patch op is HPKE-sealed per recipient device.
+
+        Two input forms:
+
+        - ``patches=[("home_score", "42"), ...]`` — typed sugar.
+          Each ``(name, value)`` is mapped to JSONPath via
+          ``field_paths`` (``{"home_score": "$.home_score"}``).
+          Plugin authors never type ``$.x`` manually.
+        - ``raw_patches=[{"op": "replace", "path": "$.x", "value": "v"}]``
+          — escape hatch for senders that build ops themselves.
+
+        ``base_seq`` MUST equal the current ``card_seq`` of the
+        target card (server returns 409 stale_base_seq otherwise).
+        ``patch_seq`` MUST be greater than the last persisted
+        ``patch_seq`` for ``(card_id, base_seq)``.
+        """
+        if patches is None and raw_patches is None:
+            raise ValueError("patch_card needs patches=... or raw_patches=...")
+        if patches is not None and raw_patches is not None:
+            raise ValueError("patch_card: pass either patches or raw_patches, not both")
+
+        if patches is not None:
+            if field_paths is None:
+                raise ValueError("patches=... requires field_paths={name: jsonpath}")
+            ops: list[dict[str, Any]] = []
+            for name, value in patches:
+                if name not in field_paths:
+                    raise ValueError(
+                        f"unknown patch field {name!r}; not in field_paths"
+                    )
+                ops.append({"op": "replace", "path": field_paths[name], "value": value})
+        else:
+            ops = list(raw_patches or [])
+
+        self._require_sender_id()
+        user_id = _canon_uuid(user_id)
+        plugin_id = _canon_uuid(plugin_id)
+        card_id = _canon_uuid(card_id)
+
+        plaintext = json.dumps({"patches": ops}, separators=(",", ":")).encode("utf-8")
+
+        for attempt in range(2):
+            directory = self.fetch_device_directory(
+                user_id, force_refresh=(attempt > 0)
+            )
+            if not directory.devices:
+                raise RecipientUnreachableError("user has no active devices")
+
+            material = seal_v2_envelopes(
+                plaintext=plaintext,
+                devices=directory.devices,
+                envelope_kind="card_patch",
+                sender_id=self._canonical_sender_id(),
+                user_id=user_id,
+                plugin_id=plugin_id,
+                card_id=card_id,
+                base_seq=base_seq,
+                patch_seq=patch_seq,
+            )
+
+            envelope_bytes = assemble_card_patch_envelope_v2(
+                sender_id=self._canonical_sender_id(),
+                user_id=user_id,
+                plugin_id=plugin_id,
+                card_id=card_id,
+                base_seq=base_seq,
+                patch_seq=patch_seq,
+                payload_nonce_b64=b64(material.payload_nonce),
+                payload_ciphertext_b64=b64(material.payload_ciphertext),
+                recipient_envelopes=material.recipient_envelopes,
+                recipient_directory_version=directory.directory_version,
+            )
+            signature = self.private_key.sign(envelope_bytes)
+
+            body = {
+                "protocol_version": 2,
+                "envelope_kind": "card_patch",
+                "sender_id": self._canonical_sender_id(),
+                "user_id": user_id,
+                "plugin_id": plugin_id,
+                "card_id": card_id,
+                "base_seq": base_seq,
+                "patch_seq": patch_seq,
+                "payload_nonce": b64(material.payload_nonce),
+                "payload_ciphertext": b64(material.payload_ciphertext),
+                "recipient_envelopes": [
+                    {
+                        "device_id": env.device_id,
+                        "hpke_kem_output": b64(env.hpke_kem_output),
+                        "hpke_ciphertext": b64(env.hpke_ciphertext),
+                    }
+                    for env in material.recipient_envelopes
+                ],
+                "recipient_directory_version": directory.directory_version,
+                "envelope_signature": b64(signature),
+            }
+
+            resp = self.session.post(
+                f"{self.base_url}/v1/cards/patch", json=body, timeout=10,
+            )
+            if resp.status_code == 409 and self._is_stale_recipient_set(resp):
+                if attempt == 0:
+                    continue
+                raise SynclerError(
+                    "stale_recipient_set persisted after retry; concurrent device change?"
+                )
+            resp.raise_for_status()
+            return
+
+        raise SynclerError("patch_card exhausted retries without verdict")
 
     def delete_card(
         self,
