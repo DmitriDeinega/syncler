@@ -66,7 +66,11 @@ async def webhook_public_key() -> WebhookPublicKeyResponse:
             detail="server webhook signing seed not configured",
         )
     try:
-        seed = base64.b64decode(seed_b64)
+        # Triad 161 codex hardening: validate=True rejects
+        # base64 strings with non-alphabet bytes (otherwise
+        # b64decode silently drops them and may accept a
+        # polluted 32-byte result).
+        seed = base64.b64decode(seed_b64, validate=True)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

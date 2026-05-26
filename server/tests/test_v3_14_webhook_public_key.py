@@ -103,6 +103,29 @@ async def test_webhook_public_key_503_when_seed_wrong_length(
     assert resp.status_code == 503
 
 
+async def test_webhook_public_key_rejects_polluted_base64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Triad 161 codex hardening: with validate=True, base64
+    # decode rejects strings containing non-alphabet characters
+    # (here, whitespace mixed in). Without validate=True,
+    # b64decode would silently drop the whitespace and could
+    # accept a polluted 32-byte result.
+    private = Ed25519PrivateKey.generate()
+    seed_bytes = private.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    clean_b64 = base64.b64encode(seed_bytes).decode("ascii")
+    # Inject whitespace mid-string — invalid base64 alphabet.
+    polluted = clean_b64[:5] + "  " + clean_b64[5:]
+    app = _seeded_app(polluted, monkeypatch)
+    with TestClient(app) as client:
+        resp = client.get("/v1/server/webhook-public-key")
+    assert resp.status_code == 503
+
+
 async def test_webhook_public_key_does_not_require_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

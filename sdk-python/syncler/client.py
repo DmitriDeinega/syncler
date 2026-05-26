@@ -874,26 +874,6 @@ class Client:
         except (ValueError, TypeError, AttributeError):
             return 0
 
-    # Triad 160 gemini bonus — first-run validation helper. A
-    # partner doing initial integration can call this to confirm
-    # their sender_id is registered and reachable WITHOUT performing
-    # a mutation (publish_plugin / send_to require state changes).
-    def get_sender_info(self) -> dict[str, Any]:
-        """Fetch the registered sender record by its current sender_id.
-
-        Returns the server's view of the sender — useful for
-        first-run validation that the SDK is correctly configured
-        + the network path is open. Raises on 404 (sender not
-        registered) or any other non-2xx.
-        """
-        self._require_sender_id()
-        resp = self.session.get(
-            f"{self.base_url}/v1/senders/{self._canonical_sender_id()}",
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
     # Accepted classifications for the optional ``reason`` field on revoke.
     # The host renders different UX per reason: silent for ``superseded``,
     # security alert with refuse-to-execute for ``compromised``, neutral
