@@ -301,10 +301,23 @@ class InProcessBroadcastHub:
 
 
 # Process-singleton hub. Tests reset via `set_hub(...)`.
-_HUB: BroadcastHub = InProcessBroadcastHub()
+# V3 #17: factory dispatches on `LIVE_BACKPLANE` config —
+# memory (default) keeps the V0.1 in-process behavior;
+# redis swaps to RedisBroadcastHub (PUB/SUB ephemeral +
+# control, Streams ordered). Spec: docs/live-backplane.md.
+_HUB: BroadcastHub | None = None
 
 
 def get_hub() -> BroadcastHub:
+    global _HUB
+    if _HUB is None:
+        from app.config import get_settings
+        backend = get_settings().live_backplane
+        if backend == "redis":
+            from app.live.hub_redis import RedisBroadcastHub
+            _HUB = RedisBroadcastHub()
+        else:
+            _HUB = InProcessBroadcastHub()
     return _HUB
 
 
