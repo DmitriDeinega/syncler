@@ -168,9 +168,39 @@ class InboxViewModel @Inject constructor(
         eventStream.stop()
     }
 
-    fun runTemplateAction(actionId: String, endpoint: String, payloadJson: String) {
+    /**
+     * V2 #11 + triad 142 closeout #2 FIX (both reviewers):
+     * route the action through the plugin's `onAction` hook
+     * FIRST so plugins can interpose; fall back to a
+     * fire-and-forget POST only when the plugin isn't loaded.
+     *
+     * Codex 142 #2 + gemini #2 — full "load-or-dispatch, then
+     * fallback" is the eventual contract; V0.1 ships the
+     * dispatch-or-fallback variant because the plugin is
+     * usually loaded by the time a user interacts with its
+     * card (the template renderer fetches the manifest +
+     * loads the plugin eagerly when the card mounts). Adding
+     * an explicit load-retry step needs a PluginLoader handle
+     * injected into this ViewModel — left for a NIT follow-up.
+     */
+    fun runTemplateAction(
+        pluginId: String,
+        actionId: String,
+        endpoint: String,
+        payloadJson: String,
+    ) {
         viewModelScope.launch {
-            templateActionRunner.post(endpoint = endpoint, payloadJson = payloadJson)
+            val outcome = app.syncler.android.pluginhost.PluginRegistry
+                .dispatchAction(pluginId, actionId, payloadJson)
+            when (outcome) {
+                app.syncler.android.pluginhost.ActionDispatchOutcome.DISPATCHED -> Unit
+                app.syncler.android.pluginhost.ActionDispatchOutcome.PLUGIN_NOT_LOADED -> {
+                    // Plugin isn't currently loaded — preserve V1
+                    // behavior (the user tapped an action; we
+                    // honor the tap) by issuing the direct POST.
+                    templateActionRunner.post(endpoint = endpoint, payloadJson = payloadJson)
+                }
+            }
         }
     }
 
@@ -334,7 +364,14 @@ fun InboxScreen(
             onUnarchive = { viewModel.unarchive(selectedItem.id) },
             onDelete = { viewModel.delete(selectedItem.id) },
             onRevoke = { viewModel.revokeSender(selectedItem.senderId) },
-            onAction = { aid, endpoint -> viewModel.runTemplateAction(aid, endpoint, selectedItem.payloadJson) },
+            onAction = { aid, endpoint ->
+                viewModel.runTemplateAction(
+                    pluginId = selectedItem.pluginId,
+                    actionId = aid,
+                    endpoint = endpoint,
+                    payloadJson = selectedItem.payloadJson,
+                )
+            },
             onGetPairedSender = viewModel::getPairedSender,
             muteStore = viewModel.muteStore,
             modifier = modifier,

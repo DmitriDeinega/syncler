@@ -55,12 +55,38 @@ object PluginRegistry {
     }
 
     /**
-     * V2 #11: route a user-triggered action (e.g. notification
-     * tap, settings UI button) into the plugin's `onAction` hook.
-     * No-ops if the plugin isn't currently loaded.
+     * V2 #11 + triad 142 closeout #2: route a user-triggered
+     * action (notification tap, inbox action button, settings
+     * UI button) into the plugin's `onAction` hook.
+     *
+     * Triad 142 codex #2 + gemini #2 FIX: returns a structured
+     * outcome so the caller can fall back to fire-and-forget
+     * POST only when the plugin truly cannot dispatch (codex
+     * "load-or-dispatch first, fallback only after explicit
+     * failure").
      */
-    fun dispatchAction(pluginId: String, actionId: String, payloadJson: String) {
-        val instance = instances[pluginId] ?: return
+    fun dispatchAction(
+        pluginId: String,
+        actionId: String,
+        payloadJson: String,
+    ): ActionDispatchOutcome {
+        val instance = instances[pluginId]
+            ?: return ActionDispatchOutcome.PLUGIN_NOT_LOADED
         instance.dispatchHook("onAction", payloadJson, actionId)
+        return ActionDispatchOutcome.DISPATCHED
     }
+}
+
+/**
+ * Outcome of [PluginRegistry.dispatchAction]. Callers MUST
+ * branch on this to decide whether to fall back to a direct
+ * sender POST (`TemplateActionRunner.post`) when dispatch
+ * didn't reach the plugin.
+ */
+enum class ActionDispatchOutcome {
+    /** Plugin was loaded and the hook was queued. */
+    DISPATCHED,
+    /** Plugin not currently in the registry. Caller should
+     *  consider load-and-retry before falling back. */
+    PLUGIN_NOT_LOADED,
 }

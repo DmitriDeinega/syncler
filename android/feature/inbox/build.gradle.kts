@@ -34,6 +34,12 @@ dependencies {
     implementation(project(":core:crypto"))
     implementation(project(":core:network"))
     implementation(project(":core:storage"))
+    // V2 closeout triad 142 #2: action taps route into plugin's
+    // onAction hook via PluginRegistry.dispatchAction before
+    // falling back to fire-and-forget. Pulls plugin-host into
+    // the inbox compile classpath; no circular dep because
+    // plugin-host doesn't depend on inbox.
+    implementation(project(":feature:plugin-host"))
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.material3)
