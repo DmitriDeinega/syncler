@@ -22,6 +22,7 @@ from app.routers import (
     plugins,
     rotation,
     senders,
+    server_info,
     state,
 )
 
@@ -82,6 +83,8 @@ app.include_router(cards.router, prefix="/v1/cards")
 # V3 #14 — two-way live channel between plugins and senders.
 # Spec: docs/live-channel.md.
 app.include_router(live.router, prefix="/v1/live")
+# Triad 160: deployment discovery (webhook public key, etc.)
+app.include_router(server_info.router, prefix="/v1/server")
 
 
 @app.exception_handler(RequestValidationError)

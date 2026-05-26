@@ -249,30 +249,19 @@ class PluginLoader(
                                 // clients use — the previous hard-
                                 // coded "https://syncler.local"
                                 // dead-ended any real WS connect.
+                                // Triad 160 codex+gemini DESIGN: provider
+                                // logic extracted to a named class for
+                                // direct unit testing — see
+                                // SessionDeviceJwtProvider.
                                 return app.syncler.android.pluginhost.live.LiveChannelClient(
                                     baseUrl = app.syncler.core.network.BuildConfig.SERVER_BASE_URL,
                                     pluginRowId = plugin.pluginRowId,
-                                    deviceJwtProvider = {
-                                        if (session == null) {
-                                            auditLogger.record(
-                                                plugin.manifest.id,
-                                                "live_no_session",
-                                                "no Session wired into PluginLoader.android(); live disabled",
-                                            )
-                                            timber.log.Timber.tag("LiveBridge").e(
-                                                "deviceJwtProvider: no Session wired — live channel unusable",
-                                            )
-                                            throw app.syncler.android.pluginhost.live.LiveChannelException(
-                                                "no_session",
-                                                "session not wired into PluginLoader.android()",
-                                            )
-                                        }
-                                        session.currentToken()
-                                            ?: throw app.syncler.android.pluginhost.live.LiveChannelException(
-                                                "no_session",
-                                                "no device JWT available (locked / signed out)",
-                                            )
-                                    },
+                                    deviceJwtProvider =
+                                        app.syncler.android.pluginhost.live.SessionDeviceJwtProvider(
+                                            session = session,
+                                            pluginId = plugin.manifest.id,
+                                            auditLogger = auditLogger,
+                                        )::invoke,
                                     httpClient = buildPluginHttpClient(),
                                     auditLogger = auditLogger,
                                 )

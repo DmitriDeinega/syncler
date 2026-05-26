@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -492,6 +493,7 @@ class Client:
         template: dict[str, Any] | None = None,
         card_type: str = "event",
         card_key_path: str | None = None,
+        live_inbound_url: str | None = None,
     ) -> dict[str, Any]:
         """Publish a new plugin version. Returns the server response (with
         ``plugin_row_id`` which the sender then uses in messages).
@@ -502,6 +504,12 @@ class Client:
         Phase 3b: pass ``card_type="live"`` plus a ``card_key_path`` (JSONPath
         yielding the stable key for the card) to enable persistent,
         upsertable live cards.
+
+        Triad 160: pass ``live_inbound_url`` to register the URL the
+        server's webhook forwarder POSTs to for device → sender frames
+        on the V3 #14 live channel. Closes the TS/Python SDK parity gap
+        — the field has existed on the server schema since V3 #14 step 6
+        but only the TypeScript manifest exposed it.
         """
         self._require_sender_id()
         body: dict[str, Any] = {
@@ -524,6 +532,8 @@ class Client:
             body["card_type"] = card_type
         if card_key_path is not None:
             body["card_key_path"] = card_key_path
+        if live_inbound_url is not None:
+            body["live_inbound_url"] = live_inbound_url
 
         body["sender_signature"] = b64(self.private_key.sign(canonical_json(body)))
         resp = self.session.post(f"{self.base_url}/v1/plugins/publish", json=body, timeout=10)
@@ -808,6 +818,81 @@ class Client:
         }
         resp = self.session.post(f"{self.base_url}/v1/cards/delete", json=body, timeout=10)
         resp.raise_for_status()
+
+    # ---------------------------- Live channel -----------------------------
+
+    # Triad 160 — channel-name regex MUST match the server's
+    # `_valid_channel_name` so callers fail before the network
+    # round-trip instead of getting a 400.
+    _LIVE_CHANNEL_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+    _LIVE_CHANNEL_MAX_LEN = 64
+
+    def live_push(
+        self,
+        *,
+        plugin_row_id: str,
+        channel: str,
+        envelope: dict[str, Any],
+    ) -> int:
+        """V3 #14 — push an opaque V2 envelope into the live channel for
+        ``plugin_row_id``. The server wraps the envelope into a multiplex
+        ``message`` frame and fans out to every paired user's currently-
+        connected device WS.
+
+        ``envelope`` MUST already be sealed via the SDK's V2 helpers —
+        the live channel is a transport pipe, not a card/domain mutation
+        path, so this helper does NOT seal for you (mirrors the codex
+        160 verdict that "live push is fanout, not mutation"). Build
+        the envelope with :func:`syncler.crypto.seal_v2_envelopes` +
+        the canonical-signing helper that matches its envelope_kind,
+        then hand the dict here.
+
+        ``channel`` MUST match ``^[a-zA-Z0-9._-]+$`` and be ≤ 64 chars
+        (server rejects with 400 otherwise). The SDK pre-checks so the
+        call fails before crossing the network.
+
+        Returns the server's reported ``delivered`` count — the number
+        of user-scoped topics published to, NOT a per-device delivery
+        count. Best-effort telemetry only; the inbox path is the
+        authoritative catch-up for offline devices.
+        """
+        self._require_sender_id()
+        if not channel or len(channel) > self._LIVE_CHANNEL_MAX_LEN:
+            raise ValueError("channel must be 1..64 chars")
+        if not self._LIVE_CHANNEL_RE.match(channel):
+            raise ValueError("channel must match ^[a-zA-Z0-9._-]+$")
+        plugin_row_id = _canon_uuid(plugin_row_id)
+        body = {"channel": channel, "envelope": envelope}
+        resp = self.session.post(
+            f"{self.base_url}/v1/live/plugin/{plugin_row_id}/push",
+            json=body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        try:
+            return int(resp.json().get("delivered", 0))
+        except (ValueError, TypeError, AttributeError):
+            return 0
+
+    # Triad 160 gemini bonus — first-run validation helper. A
+    # partner doing initial integration can call this to confirm
+    # their sender_id is registered and reachable WITHOUT performing
+    # a mutation (publish_plugin / send_to require state changes).
+    def get_sender_info(self) -> dict[str, Any]:
+        """Fetch the registered sender record by its current sender_id.
+
+        Returns the server's view of the sender — useful for
+        first-run validation that the SDK is correctly configured
+        + the network path is open. Raises on 404 (sender not
+        registered) or any other non-2xx.
+        """
+        self._require_sender_id()
+        resp = self.session.get(
+            f"{self.base_url}/v1/senders/{self._canonical_sender_id()}",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     # Accepted classifications for the optional ``reason`` field on revoke.
     # The host renders different UX per reason: silent for ``superseded``,

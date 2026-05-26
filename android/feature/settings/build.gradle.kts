@@ -33,6 +33,9 @@ dependencies {
     implementation(project(":core:auth"))
     // V4 #18 — SynclerApi.revokeDevice for the lost-device flow.
     implementation(project(":core:network"))
+    // Triad 160 — PairedSenderStore for the sendersToReview list
+    // populated on the Done state.
+    implementation(project(":core:storage"))
     // V2 closeout triad 142 #1: PluginPermissionsCard surfaces
     // the CapabilityGrantStore.allGrants() + revoke flow.
     implementation(project(":feature:plugin-host"))

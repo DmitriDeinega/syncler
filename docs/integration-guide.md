@@ -770,6 +770,42 @@ Server enforces:
 - **Rate limit** — 16 KB/s sustained, 64 KB burst per socket; over-budget closes `4429`.
 - **Revocation** — when the user revokes their pairing with your sender, every device's WS for that plugin row closes `4401` immediately. No grace period.
 
+### The full live-channel integration loop
+
+For partners standing this up from scratch, the steps in order:
+
+1. **Publish your plugin with `live_inbound_url`.** Use the Python SDK helper:
+
+   ```python
+   client.publish_plugin(
+       ...,
+       live_inbound_url="https://your-service.example.com/syncler/live-inbound",
+   )
+   ```
+
+   The TypeScript manifest also exposes `liveInboundUrl` on the manifest object.
+
+2. **Fetch the server's webhook public key.** Unauthenticated, one-time at startup:
+
+   ```
+   GET https://api.syncler.app/v1/server/webhook-public-key
+   →  200 {"public_key_base64": "...", "algorithm": "ed25519"}
+   ```
+
+   Pin this key in your service. Returns `503` when the server's signing seed isn't configured (operator misconfig).
+
+3. **On every inbound webhook delivery**, verify `X-Syncler-Signature` over the raw POST body bytes using the pinned key. Reject anything that doesn't verify.
+
+4. **Push outbound frames** via the Python SDK helper:
+
+   ```python
+   client.live_push(
+       plugin_row_id="...",
+       channel="ticker",
+       envelope=sealed_v2_envelope_dict,  # already sealed via seal_v2_envelopes()
+   )
+   ```
+
 ### Pushing from your sender into the live channel
 
 Your backend POSTs an opaque V2 envelope to the plugin-row's push endpoint. The server fans it out to every currently-connected device WS belonging to a paired user under your sender:
@@ -802,14 +838,14 @@ The envelope is the same V2 shape you'd hand to `send_to(...)` — sealed for ea
 
 Response: `202 {"delivered": <int>}` where `delivered` counts the per-user topics the server published to. It is NOT a per-device delivery count.
 
-Today neither the Python nor TypeScript SDK ships a typed `live_push` helper — drive the raw POST until they do.
+The Python SDK ships `client.live_push(...)` for this — see "The full live-channel integration loop" above for the call shape. The TypeScript SDK doesn't yet ship a sender-side helper (it's a plugin-side SDK, not a sender-side one).
 
 ### Receiving from devices on your sender
 
 Devices push back to you via a server-operated webhook forwarder. Prerequisites:
 
-1. **Register a `liveInboundUrl`** in your plugin manifest at publish time. The TypeScript SDK manifest exposes this field; the Python `Client.publish_plugin(...)` does not yet expose `live_inbound_url`, so Python integrators must drive the raw `POST /v1/plugins/publish` body to set it until the helper grows the parameter.
-2. **Obtain the server's Ed25519 webhook-signing public key out-of-band.** The current API does not include the server's signing public key in the publish response. For v0.1 deployments, ask the Syncler operator for the key (an admin / well-known endpoint is planned). Pin it in your service; you'll verify `X-Syncler-Signature` against it.
+1. **Register a `liveInboundUrl`** in your plugin manifest at publish time. The TypeScript SDK manifest exposes this field as `liveInboundUrl`; the Python SDK accepts it as `live_inbound_url=` on `Client.publish_plugin(...)`.
+2. **Fetch the server's Ed25519 webhook-signing public key** via `GET /v1/server/webhook-public-key` (unauthenticated, public-by-design). Pin it in your service and verify `X-Syncler-Signature` against it on every inbound delivery.
 
 When a device sends a frame on the live channel, the server delivers to your endpoint:
 
