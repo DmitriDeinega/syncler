@@ -22,36 +22,47 @@ bloat.
 
 ## Identity key
 
-**Codex 149 #7 FIX** — keying by `plugin_row_id` is fragile
-if row IDs can be recreated. Compound stable identity:
+The encrypted user-state already carries
+`pluginSettings: Map<plugin_identifier, PluginSettings>`
+(granted_capabilities + dismiss_behavior_override) keyed
+by the manifest's `id` field. V4 #19 EXTENDS that existing
+PluginSettings row with the new prefs fields rather than
+introducing a parallel map.
 
-```
-plugin_identity := f"{sender_id}/{plugin_identifier}"
-```
+**v0.1 scope decision**: identity = `plugin_identifier`
+alone. Codex 149 #7 preferred `{sender_id}/{plugin_identifier}`
+for the case where two senders ship plugins with the same
+manifest id; in v0.1 we accept the (already-existing)
+trade-off — manifest ids are unique-by-convention and the
+two-senders-same-manifest collision is rare enough that
+extending to a compound key for v0.1 would be churn for no
+present benefit. The compound key is V0.2 if real collisions
+materialize.
 
-Where `plugin_identifier` is the manifest's `id` field (e.g.
-`com.example.scoreboard`). This survives:
-- `plugin_row_id` recreation on the same sender +
-  manifest (e.g. the sender re-publishes after a
-  bug fix).
-- Re-pair of the sender on a new device (sender_id is
-  stable per sender lifetime).
-- Server-side migration where row UUIDs might
-  regenerate.
-
-If we ever need to differentiate plugin versions for
-prefs, we can extend the key shape (`{sender_id}/{plugin_identifier}/{major_version}`)
-later; v0.1 collapses all versions of the same manifest ID under one prefs row.
+`plugin_identifier` survives: row UUID recreation on the
+same sender + manifest, re-pair of the sender on a new
+device, server-side migration. It DOES collide if two
+distinct senders publish with the same manifest id —
+documented as a v0.1 known limitation.
 
 ## Schema
+
+V4 #19 EXTENDS the existing `plugin_settings` map (which
+already held `granted_capabilities` + `dismiss_behavior_override`)
+rather than adding a parallel top-level map. The key is the
+manifest's `plugin_identifier` per the existing pattern (see
+"Identity key" section).
 
 ```jsonc
 {
   // existing user-state fields (paired_senders,
-  // dismissed_ids, …) unchanged
-  "plugin_prefs": {
-    "<sender_id>/<plugin_identifier>": {
-      "label_override": "Optional Name",
+  // dismissed_messages, muted_senders, …) unchanged.
+  "plugin_settings": {
+    "<plugin_identifier>": {
+      "granted_capabilities": ["network", "storage"],   // pre-V4
+      "dismiss_behavior_override": null,                 // pre-V4
+      "modified_at": "2026-05-26T22:00:00Z",             // pre-V4
+      "label_override": "Optional Name",                 // V4 #19
       "notification_cadence": "realtime|batched_15m|batched_1h|digest_daily",
       "quiet_hours": {
         "enabled": true,

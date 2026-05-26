@@ -49,7 +49,10 @@ class SecurityPrefs @Inject constructor(
         val raw = backing.getLong(KEY_REVOKED_WITHOUT_ROTATION_AT_MS, -1L)
         if (raw < 0L) return null
         val ageMs = clock.millis() - raw
-        if (ageMs > BANNER_TTL_DAYS * MS_PER_DAY) {
+        // Triad 150 codex NIT — ">=" matches the "once 30 days
+        // elapse" copy in the spec; ">" would leave the marker
+        // active at exactly 30 days.
+        if (ageMs >= BANNER_TTL_DAYS * MS_PER_DAY) {
             clearRevokedWithoutRotationAt()
             return null
         }

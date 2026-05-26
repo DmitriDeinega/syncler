@@ -52,8 +52,8 @@ DX track surfaced by external plugin-author review (lottery-claude, consultation
 
 ## V4 — UX polish
 
-18. **Guided lost-device rotation flow.** Click-through UX for: revoke lost device → re-pair on trusted devices → rotate master key (depends on V1.5 #3). Today the user does steps 1–2 by hand; this automates the sequence.
-19. **Per-plugin user preferences.** Notification cadence, label overrides, delivery-window scheduling, do-not-disturb integration — all surfaced from the host's settings sheet without plugin-side code.
+18. ~~**Guided lost-device rotation flow.**~~ **Core shipped V4 #18 (spec at `docs/lost-device-flow.md`, design triad 149).** `LostDeviceFlowViewModel` sealed-state machine wraps revoke + V1.5 #3 master-key rotation into a security-recovery wizard with a `CheckRotationReady` preflight gate (codex 149 #2 FIX), distinct 409 / already-revoked / stale-challenge state branches (codex #4), and a `SecurityPrefs.revokedWithoutRotationActiveSinceMs()` 30-day banner marker that auto-clears on TTL expiry (codex #3). Outstanding for full closeout: Compose screens for each state (UI is deferred behind the state machine; the headless flow + tests are in place); affected-sender inference for the re-pair handoff (the API surface is wired, current impl ships empty list).
+19. ~~**Per-plugin user preferences.**~~ **Core shipped V4 #19 (spec at `docs/plugin-prefs.md`, design triad 149).** `PluginSettings` extended in the encrypted user-state blob with `labelOverride`, `notificationCadence` (4-value enum with `realtime` fallback for unknowns), `quietHours` (saved-timezone-aware, midnight-wrap-aware), and `muted`. `PluginNotificationGate` consults prefs on every FCM-driven notification post; suppression reasons (MUTED / QUIET_HOURS / BATCHED) logged at INFO. `PluginPrefsRepository` wraps the UserStateMutator with typed writers. Schema bump V5 → V6. Forward-compat preserves unknown JSON keys on writeback (codex 149 #10). Outstanding: top-level Settings "Plugins" tab UI (V0.2); WorkManager-backed boundary-aligned batched-cadence wake-ups (V0.2 — v0.1 ships gate suppression only).
 
 ---
 

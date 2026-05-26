@@ -57,6 +57,21 @@ class SecurityPrefsTest {
     }
 
     @Test
+    fun `marker at exactly 30 days expires`() {
+        // Triad 150 codex NIT — at the boundary "30 days elapsed"
+        // is the spec's wording; the marker MUST expire, not
+        // linger one tick past the line.
+        val setAt = Instant.parse("2026-05-01T10:00:00Z")
+        val now = setAt.plusMillis(SecurityPrefs.MS_PER_DAY * SecurityPrefs.BANNER_TTL_DAYS)
+        val backing = InMemoryPrefs()
+        val prefsSet = SecurityPrefs(backing, Clock.fixed(setAt, ZoneId.of("UTC")))
+        prefsSet.setRevokedWithoutRotationAtNow()
+
+        val prefsRead = SecurityPrefs(backing, Clock.fixed(now, ZoneId.of("UTC")))
+        assertNull(prefsRead.revokedWithoutRotationActiveSinceMs())
+    }
+
+    @Test
     fun `clear removes the marker`() {
         val now = Instant.parse("2026-05-26T10:00:00Z")
         val (prefs, _) = build(Clock.fixed(now, ZoneId.of("UTC")))
