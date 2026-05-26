@@ -100,6 +100,20 @@ interface PluginContext {
      *  - channel_name_invalid — failed the regex.
      */
     suspend fun liveConnect(channel: String): Result<LiveChannelHandle>
+
+    /**
+     * V3 #15 — sugar over [liveConnect] for the common case
+     * "subscribe to a channel and react to incoming
+     * messages." Same wire path as [liveConnect]; the
+     * difference is purely ergonomic.
+     *
+     * The returned [LiveChannelHandle] is identical to the
+     * one [liveConnect] returns; callers can still send +
+     * close. Incoming messages arrive via the plugin's
+     * onLiveMessage hook (NOT on the handle), per spec.
+     */
+    suspend fun liveSubscribe(channel: String): Result<LiveChannelHandle> =
+        liveConnect(channel)
 }
 
 data class FileBytesChunk(val bytes: ByteArray, val eof: Boolean)

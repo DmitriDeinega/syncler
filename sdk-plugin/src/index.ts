@@ -130,6 +130,45 @@ export const platform = {
       );
     },
   },
+  /**
+   * V3 #14 — two-way WebSocket channel. Plugin's bundle code
+   * calls `connect(name)` to open / `send` an opaque V2
+   * envelope / `close` when done. Incoming messages reach
+   * the plugin's `onLiveMessage` hook (NOT this handle) — the
+   * SDK side just exposes the imperative connect / send /
+   * close surface.
+   *
+   * V3 #15 — `subscribe(name)` is sugar over `connect(name)`.
+   * Same wire shape; just emphasizes that the caller cares
+   * about reads, not writes.
+   *
+   * Delivery is best-effort + ephemeral; missed messages are
+   * NOT replayed across reconnects. Use the inbox path for
+   * authoritative state.
+   */
+  live: {
+    connect(channel: string) {
+      return callPlatform('live.connect', (bridge) =>
+        bridge.live.connect(channel),
+      );
+    },
+    subscribe(channel: string) {
+      // V3 #15 — sugar over connect(). Same wire path.
+      return callPlatform('live.connect', (bridge) =>
+        bridge.live.connect(channel),
+      );
+    },
+    send(channel: string, envelopeBase64: string) {
+      return callPlatform('live.send', (bridge) =>
+        bridge.live.send(channel, envelopeBase64),
+      );
+    },
+    close(channel: string) {
+      return callPlatform('live.close', (bridge) =>
+        bridge.live.close(channel),
+      );
+    },
+  },
   /** Host bridge version. */
   get version() {
     return getPlatformBridge().__version__;

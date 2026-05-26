@@ -104,6 +104,20 @@ export interface PlatformBridge {
     respond(actionId: string, payload: unknown): Promise<void>;
     dismissBehavior(behavior: DismissBehavior): void;
   };
+  /**
+   * V3 #14/#15 — two-way live channel. Bridge implementations
+   * route via the host's LiveChannelClient.
+   */
+  live: {
+    /** Open a multiplexed channel. */
+    connect(channel: string): Promise<{ channel: string; ok: boolean }>;
+    /** `subscribe` is sugar over `connect` (V3 #15 spec). */
+    subscribe?: (channel: string) => Promise<{ channel: string; ok: boolean }>;
+    /** Send an opaque base64'd envelope. */
+    send(channel: string, envelopeBase64: string): Promise<void>;
+    /** Idempotent. */
+    close(channel: string): Promise<void>;
+  };
   __version__: string;
 }
 
