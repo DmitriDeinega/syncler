@@ -2,11 +2,18 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import dispose_engine, get_db, init_engine
-from app.models import LiveCard, Message, Pairing, RateLimitEvent, RotationChallenge
+from app.models import (
+    CardPatch,
+    LiveCard,
+    Message,
+    Pairing,
+    RateLimitEvent,
+    RotationChallenge,
+)
 from app.services.nonce_replay import cleanup_expired_with_lock
 
 
@@ -15,6 +22,18 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
 
     messages = await session.execute(delete(Message).where(Message.expires_at < now))
     live_cards = await session.execute(delete(LiveCard).where(LiveCard.expires_at < now))
+    # Triad 146 codex FIX #4 — card_patches retention. Two passes:
+    # (1) age out anything older than 48h regardless of parent (spec TTL).
+    # (2) sweep orphans whose parent LiveCard just got pruned above —
+    #     the schema has no FK cascade, so we do it explicitly here.
+    card_patches_aged = await session.execute(
+        delete(CardPatch).where(CardPatch.created_at < now - timedelta(hours=48))
+    )
+    card_patches_orphan = await session.execute(
+        delete(CardPatch).where(
+            ~CardPatch.card_id.in_(select(LiveCard.id))
+        )
+    )
     pairings = await session.execute(
         delete(Pairing).where(
             Pairing.revoked_at.is_not(None),
@@ -39,6 +58,8 @@ async def prune_expired(session: AsyncSession) -> dict[str, int]:
     return {
         "messages": messages.rowcount or 0,
         "live_cards": live_cards.rowcount or 0,
+        "card_patches_aged": card_patches_aged.rowcount or 0,
+        "card_patches_orphan": card_patches_orphan.rowcount or 0,
         "pairings": pairings.rowcount or 0,
         "rate_limit_events": rate_limit_events.rowcount or 0,
         "nonce_replay": max(nonce_replay, 0),

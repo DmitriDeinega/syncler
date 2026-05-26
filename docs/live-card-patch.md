@@ -111,7 +111,13 @@ Retention:
 - **Purge immediately when a new `cards.upsert` arrives for
   the same `card_id`** (gemini FIX). The chain past the new
   upsert is by definition obsolete; never keep stale patches.
-- Periodic GC walks rows older than 48h.
+- **Purge when the parent `LiveCard` row is deleted** (V2
+  delete) or pruned (expires_at sweep) — schema has no FK
+  cascade, so the service layer + retention job sweep
+  explicitly. Triad 146 codex FIX #4.
+- Periodic GC walks rows older than 48h AND any rows whose
+  `card_id` no longer maps to a `LiveCard` row (orphan
+  sweep). Wired into `app/jobs/retention.py:prune_expired`.
 
 ### Catch-up surface
 
@@ -218,11 +224,17 @@ Server validates:
 4. `base_seq` matches the card's current upsert `card_seq`
    (server has authoritative card state from the previous
    `cards.upsert`). Mismatch → 409 stale_base_seq.
-5. `patch_seq > last_persisted_patch_seq` for that base.
-   Equal/lower → 409 patch_seq_regression.
+5. `patch_seq == last_persisted_patch_seq + 1` (contiguous
+   CAS — triad 146 codex FIX #3). Equal/lower → 409
+   patch_seq_regression; higher-than-next → 409
+   patch_seq_gap. The server is the authority: a sender
+   that skips a sequence number stalls until they catch up
+   (or publish a new whole-card upsert), and devices never
+   see a patch chain with holes.
 6. Sequence CAS via the index PK — concurrent patches with
    the same `(card_id, base_seq, patch_seq)` collide on
-   insert and the later one fails 409.
+   insert and the later one fails 409 patch_seq_collision
+   (the precheck races; the PK is the ground truth).
 
 On success:
 - Insert the row.

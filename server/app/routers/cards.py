@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto.signatures import verify_message_envelope
@@ -314,8 +315,12 @@ async def patch(
             },
         )
 
-    # Sequence CAS via PK collision. Last persisted patch_seq
-    # must be < incoming.
+    # Sequence CAS: triad 146 codex FIX #3 — server now enforces
+    # CONTIGUOUS patch_seq (== last + 1) so a buggy sender that
+    # persists patch 7 with 1-6 missing can't stall every device's
+    # chain. Android already refused gaps client-side; the server
+    # is now the authority. The PK on (plugin_row_id, card_id,
+    # base_seq, patch_seq) doubles as the concurrent-insert CAS.
     last_patch_result = await db.execute(
         select(CardPatch.patch_seq).where(
             and_(
@@ -326,12 +331,23 @@ async def patch(
         ).order_by(CardPatch.patch_seq.desc()).limit(1)
     )
     last_patch_seq = last_patch_result.scalar_one_or_none() or 0
-    if payload.patch_seq <= last_patch_seq:
+    expected_patch_seq = last_patch_seq + 1
+    if payload.patch_seq != expected_patch_seq:
+        # Both replay (<= last) and gap (> last+1) collapse to a
+        # single 409 with enough context for the SDK / device to
+        # diagnose. last_patch_seq=0 + got=1 only conflicts when
+        # the precheck races a concurrent insert; the PK CAS below
+        # turns that into a 409 too.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "code": "patch_seq_regression",
+                "code": (
+                    "patch_seq_regression"
+                    if payload.patch_seq <= last_patch_seq
+                    else "patch_seq_gap"
+                ),
                 "last_patch_seq": last_patch_seq,
+                "expected_patch_seq": expected_patch_seq,
             },
         )
 
@@ -342,9 +358,31 @@ async def patch(
         sender_directory_version=payload.recipient_directory_version,
     )
     if isinstance(classification, RecipientSetError):
+        # Triad 146 codex FIX #1 — mirror /v1/cards/upsert's
+        # stale-recipient response so the SDK retry path
+        # (`_is_stale_recipient_set` checks
+        # detail.error == "stale_recipient_set") triggers a
+        # directory refetch + reseal on `patch_card` too.
+        if classification.http_status == 409:
+            body = StaleRecipientSetError(
+                message=classification.message,
+                current_directory_version=classification.current_directory_version,
+                missing_device_ids=classification.missing_device_ids,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=body.model_dump(mode="json"),
+                headers={
+                    "X-Stale-Directory-Version": str(classification.current_directory_version),
+                },
+            )
         raise HTTPException(
             status_code=classification.http_status,
-            detail=classification.message,
+            detail={
+                "error": classification.code,
+                "message": classification.message,
+                "current_directory_version": classification.current_directory_version,
+            },
         )
 
     # Persist for inbox catch-up. The envelope_json is opaque
@@ -362,7 +400,20 @@ async def patch(
             envelope_json=envelope_json,
         )
     )
-    await db.commit()
+    # Triad 146 codex FIX #2 — two concurrent requests with the
+    # same (plugin, card, base, patch_seq) can both pass the
+    # precheck; the PK collision must surface as 409 not 500.
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "patch_seq_collision",
+                "patch_seq": payload.patch_seq,
+            },
+        ) from None
 
     # Live channel fan-out (V3 #14 ephemeral lane). Devices
     # currently connected receive the envelope; disconnected

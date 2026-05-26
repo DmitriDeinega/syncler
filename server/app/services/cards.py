@@ -197,6 +197,18 @@ async def delete_live_card_v2(
     card = result.scalar_one_or_none()
     if card is None:
         return False
+    # Triad 146 codex FIX #4 — sweep this card's patches before
+    # the LiveCard row goes away. Schema has no FK cascade; the
+    # retention orphan-sweep would catch these eventually but
+    # holding stale patches between sweeps is wasteful.
+    from app.models import CardPatch
+    from sqlalchemy import delete as sql_delete
+    await db.execute(
+        sql_delete(CardPatch).where(
+            CardPatch.plugin_row_id == card.plugin_id,
+            CardPatch.card_id == card.id,
+        )
+    )
     await db.delete(card)
     await db.commit()
     return True
@@ -223,10 +235,21 @@ async def prune_expired_cards(db: AsyncSession) -> int:
     """Delete cards past their expires_at."""
     now = datetime.now(UTC)
     expired = await db.execute(select(LiveCard).where(LiveCard.expires_at <= now))
-    count = 0
-    for card in expired.scalars().all():
+    cards = list(expired.scalars().all())
+    if not cards:
+        return 0
+    # Triad 146 codex FIX #4 — patches of expiring cards become
+    # orphans. Sweep them in the same transaction so the inbox
+    # response can't briefly reference a card that's gone.
+    from app.models import CardPatch
+    from sqlalchemy import delete as sql_delete
+    for card in cards:
+        await db.execute(
+            sql_delete(CardPatch).where(
+                CardPatch.plugin_row_id == card.plugin_id,
+                CardPatch.card_id == card.id,
+            )
+        )
         await db.delete(card)
-        count += 1
-    if count > 0:
-        await db.commit()
-    return count
+    await db.commit()
+    return len(cards)
