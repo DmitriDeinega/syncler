@@ -37,7 +37,7 @@ Once a card is in a user's inbox, the host handles all of the following without 
 - **Live cards pin above events.** When mixed in the same inbox, live cards (`card_type: "live"`) sort above event cards (`card_type: "event"`), each subsorted by recency. The "Live" view in the drawer shows only live cards.
 - **Per-device dismiss (server-side filter).** When the user dismisses a message on device A, `/v1/messages/{id}/dismiss` writes a `DeliveryStatus` row keyed on `(message_id, device_id=A)`. Subsequent calls to `/v1/messages/inbox` from device A LEFT JOIN `DeliveryStatus` for `device_id=A` and filter rows where `dismissed_at IS NOT NULL` out of A's feed. The dismiss SSE event still fans out to *all* of the user's devices, but the server-side filter is per-device — devices B, C, etc. receive the hint and refresh, but their own feeds keep the row until they dismiss it themselves. Dismiss is a per-device gesture by design — some users want a card visible elsewhere; a cross-device "dismiss everywhere" toggle is on the roadmap.
 - **Real-time hints over SSE.** Foreground devices keep an authenticated Server-Sent Events stream open to `/v1/events`. The server pushes content-blind hints — `inbox.changed`, `state.changed`, `dismiss`, `card.upsert`, `card.delete` — and the client re-fetches over REST in response. The actual payloads still flow over the existing pull endpoints; SSE is the wakeup signal, not the data channel. Backgrounded devices fall back to FCM.
-- **Two-way live channel.** Plugins can open a long-lived authenticated WebSocket via `platform.live.connect(channel)` for sub-second bidirectional messaging. The host owns the WS lifecycle (heartbeat, reconnect, rate limit, revocation-driven close); your plugin code just calls `connect / send / close` and an `onLiveMessage` hook fires per incoming frame. The server is a routing pipe — frames carry your V2-encrypted envelopes opaquely. See §12.
+- **Live channel.** Plugins can open a long-lived authenticated WebSocket via `platform.live.connect(channel)` for sub-second push from the sender to the device + outbound `send` from the device. The host owns the WS lifecycle (heartbeat, reconnect, rate limit, revocation-driven close); the server is a routing pipe — frames carry your V2-encrypted envelopes opaquely. Device-side inbound delivery for TypeScript plugins is outbound-only on the current SDK (see §12). See §12 for the full contract.
 - **Field-level live-card patches.** Persistent live cards can be updated one field at a time with `client.patch_card(card_id, patches=[(field, value)])` — no whole-card re-encryption per tick. The host applies the patch on top of the existing card payload atomically; failed/missing patches in the chain fall back to the last full upsert. See §13.
 - **Guided lost-device recovery.** The Settings → Security → "I lost a device" flow walks the user through device revoke → master-key rotation → re-pair handoff as a single security-recovery wizard. See §11.
 - **Per-plugin user preferences.** The user can mute your plugin, override the displayed label, set notification cadence (realtime / 15-min / hourly / daily digest), and configure quiet hours — all without any plugin-side code. The OS notification is gated; the inbox row still updates so the user sees the missed event on next open. See §14.
@@ -750,7 +750,9 @@ If the user picks "Skip for now" at step 4, a home-screen banner appears for **3
 
 ## 12. Two-way live channel
 
-Use this when you need sub-second bidirectional messaging — score tickers, presence updates, chat hints, control signals. The host opens an authenticated WebSocket per plugin row; your **V2 envelopes ride opaque through the channel**, so the server stays content-blind. Don't use this for state of record (the inbox is still the authoritative path).
+Use this when you need sub-second push from your backend to currently-connected devices, plus a device → sender callback path. The host opens an authenticated WebSocket per plugin row; your **V2 envelopes ride opaque through the channel**, so the server stays content-blind. Don't use this for state of record — the inbox is still the authoritative path.
+
+For TypeScript-SDK plugins today the device side is outbound-only (your plugin can `send`; inbound delivery from sender to device requires either the inbox/SSE path or — for fully-bidirectional needs — an SDK ABI bump that's not yet shipped). See the "Plugin-side" subsection below.
 
 ### Wire contract — what every sender needs to know
 
@@ -840,7 +842,7 @@ Body (compact JSON; this is exactly what `X-Syncler-Signature` covers):
 Notes for verification + integration:
 - `received_at` is integer **epoch seconds** (not ISO 8601).
 - `device_pseudonym` is `HMAC-SHA256(server_signing_seed, "{device_id}|{sender_id}")` truncated to 32 chars of base64url. It is stable per (device, sender) and uncorrelated across senders.
-- `envelope` is a **string** carrying the device's V2 envelope JSON verbatim, NOT a base64 wrapper. You parse the string to get the V2 fields and HPKE-open the recipient envelope addressed to your sender.
+- `envelope` is a **string** carrying whatever the device pushed verbatim — the server does NOT decode/re-encode it. Devices using the TypeScript SDK call `platform.live.send(channel, envelopeBase64)` and base64 the V2 envelope before sending, so in that path the webhook's `envelope` is the base64 form. The server treats it as opaque bytes either way; your receiver decodes the same way it was encoded on the device.
 - Verify `X-Syncler-Signature` over the **raw POST body bytes** (the compact-JSON serialization the server signed). Do not re-serialize before verifying.
 - Three retries with exponential backoff (1s → 4s → 16s); 5s per-attempt timeout. If the server's signing seed is unset, the forwarder logs LOUDLY and refuses to deliver rather than silently dropping the signature header.
 
@@ -851,40 +853,41 @@ Spec deep-dive: `docs/live-channel.md`. Read it before shipping a live integrati
 Inside your plugin bundle (`src/plugin.ts`):
 
 ```ts
-import { platform, BasePlugin } from "@syncler/plugin-sdk";
+import { BasePlugin, platform, registerPlugin } from "@syncler/plugin-sdk";
 
 export class TickerPlugin extends BasePlugin {
   async onMessage(payload: unknown) {
-    // …regular event/live-card handling…
+    // Standard event / live-card delivery still flows through
+    // here. After the first message lands, open the live
+    // channel for sub-second updates.
     await platform.live.connect("ticker");
   }
 
-  async onLiveMessage(channel: string, envelopeBase64: string) {
-    // envelopeBase64 is the opaque V2 envelope your sender pushed
-    // (or another device pushed via the webhook forwarder). Open
-    // it with the V2 helpers in @syncler/plugin-sdk and react.
-    const envelope = JSON.parse(atob(envelopeBase64));
-    // …decrypt + render…
+  async sendTick(envelopeBase64: string) {
+    // envelopeBase64 is your V2 envelope addressed to the
+    // sender — built with the V2 helpers in
+    // @syncler/plugin-sdk.
+    await platform.live.send("ticker", envelopeBase64);
   }
 
-  async sendTick(value: string) {
-    const envelope = await buildOutgoingV2Envelope(value);
-    await platform.live.send("ticker", btoa(envelope));
-  }
-
-  async onUnload() {
-    await platform.live.close("ticker");
+  async onAction(actionName: string, payload: unknown) {
+    // Action callbacks are unchanged.
   }
 }
+
 registerPlugin(new TickerPlugin());
 ```
 
 Key contract points:
-- `platform.live.connect(channelName)` opens (or reuses) the WS for this plugin row and starts the named channel. Idempotent — calling twice on the same channel just returns the same handle.
-- Incoming frames arrive at your `onLiveMessage(channel, envelopeBase64)` hook (NOT through a callback registered on a handle). The hook is plugin-global — switch on `channel` if you've connected to more than one.
-- `platform.live.send(channel, envelopeBase64)` MUST be preceded by a `connect`. Calling `send` on an un-connected channel returns `channel_not_open`.
+- `platform.live.connect(channelName)` opens (or reuses) the WS for this plugin row and starts the named channel. Idempotent — calling twice on the same channel just returns success.
+- `platform.live.send(channel, envelopeBase64)` MUST be preceded by `connect`. Calling `send` on an un-connected channel returns `channel_not_open`.
 - `platform.live.close(channel)` is idempotent. Closing one channel does NOT tear down the underlying WS for other channels.
-- `platform.live.subscribe(channelName)` is a one-line alias for `connect` that emphasizes read-only intent; same wire path, same hook.
+- `platform.live.subscribe(channelName)` is a one-line alias for `connect` that emphasizes read-only intent; same wire path.
+
+**Inbound delivery on the TypeScript SDK is outbound-only today.** The host receives device-bound live frames and dispatches them through an `onLiveMessage` hook on the Android plugin runtime, but the TypeScript `BasePlugin` does not yet expose that hook (the `DispatchHook` union on the SDK side covers `onMessage / onAction / onDismiss / render` only). Two paths for now:
+
+- If your plugin only needs to PUSH from the device → sender, the existing `platform.live.send` + the server-to-sender webhook forwarder is the full path. Use the inbox / SSE path for sender → device.
+- If you need device → device or full bidirectional, wait for the SDK ABI bump that wires the inbound hook through.
 
 ### Operator note (production)
 
