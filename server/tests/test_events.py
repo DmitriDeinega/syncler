@@ -21,11 +21,15 @@ from app.db import get_db
 from app.main import app
 from app.models import Base
 from app.services.events import (
-    EventBus,
+    InProcessEventBus,
     _reset_for_tests,
     encode_sse,
     get_event_bus,
 )
+# Backwards-compat alias for tests that constructed the
+# concrete in-process bus directly. V3 #17 renamed the
+# class for the Redis swap (docs/live-backplane.md).
+EventBus = InProcessEventBus
 
 
 def _b64(value: bytes) -> str:
