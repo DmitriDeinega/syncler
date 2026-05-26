@@ -39,6 +39,11 @@ data class PluginLoadParcel(
     val dismissBehavior: String,
     val timeoutMillis: Long,
     val diagnosticManifestJson: String,
+    // Phase 11 (WIRE_VERSION=2): native Kotlin plugin entry-point class
+    // name + SDK ABI version. Empty string / 0 for non-native plugins.
+    // Spec: docs/plugin-host-native-kotlin.md.
+    val entryClass: String = "",
+    val nativeSdkAbi: Int = 0,
 ) : Parcelable {
 
     override fun writeToParcel(dest: Parcel, flags: Int) {
@@ -63,6 +68,10 @@ data class PluginLoadParcel(
             diagnosticManifestJson
         }
         dest.writeString(safe)
+        // Phase 11 (WIRE_VERSION=2) appendix. Old readers ignore tail
+        // bytes per the wire-version doc; new readers consume both.
+        dest.writeString(entryClass)
+        dest.writeInt(nativeSdkAbi)
     }
 
     override fun describeContents(): Int = 0
@@ -72,8 +81,11 @@ data class PluginLoadParcel(
          * Wire format version. Bump only when reordering / removing
          * fields; new fields go at the end with a length-prefixed
          * appendix so old readers can ignore them.
+         *
+         * Version 2 (Phase 11): adds `entryClass` and `nativeSdkAbi`
+         * for the native Kotlin renderer.
          */
-        const val WIRE_VERSION = 1
+        const val WIRE_VERSION = 2
 
         /**
          * 64 KB cap per Phase 10a v3 IPC payload-caps decision. Binder
@@ -87,22 +99,41 @@ data class PluginLoadParcel(
             object : Parcelable.Creator<PluginLoadParcel> {
                 override fun createFromParcel(source: Parcel): PluginLoadParcel {
                     val version = source.readInt()
-                    require(version == WIRE_VERSION) {
+                    // Accept BOTH WIRE_VERSION 1 (Phase 10) and 2
+                    // (Phase 11). Version 1 readers ignore the
+                    // entry_class + native_sdk_abi appendix.
+                    require(version == 1 || version == WIRE_VERSION) {
                         "PluginLoadParcel wire version $version not supported by reader $WIRE_VERSION"
                     }
+                    val sandboxToken = source.readInt()
+                    val pluginId = source.readString().orEmpty()
+                    val pluginIdentifier = source.readString().orEmpty()
+                    val sver = source.readString().orEmpty()
+                    val renderer = source.readString().orEmpty()
+                    val bundleFilePath = source.readString().orEmpty()
+                    val bundleHashHex = source.readString().orEmpty()
+                    val declaredCapabilities = mutableListOf<String>().also(source::readStringList).toList()
+                    val declaredEndpoints = mutableListOf<String>().also(source::readStringList).toList()
+                    val dismissBehavior = source.readString().orEmpty()
+                    val timeoutMillis = source.readLong()
+                    val diagnosticManifestJson = source.readString().orEmpty()
+                    val entryClass = if (version >= 2) source.readString().orEmpty() else ""
+                    val nativeSdkAbi = if (version >= 2) source.readInt() else 0
                     return PluginLoadParcel(
-                        sandboxToken = source.readInt(),
-                        pluginId = source.readString().orEmpty(),
-                        pluginIdentifier = source.readString().orEmpty(),
-                        version = source.readString().orEmpty(),
-                        renderer = source.readString().orEmpty(),
-                        bundleFilePath = source.readString().orEmpty(),
-                        bundleHashHex = source.readString().orEmpty(),
-                        declaredCapabilities = mutableListOf<String>().also(source::readStringList).toList(),
-                        declaredEndpoints = mutableListOf<String>().also(source::readStringList).toList(),
-                        dismissBehavior = source.readString().orEmpty(),
-                        timeoutMillis = source.readLong(),
-                        diagnosticManifestJson = source.readString().orEmpty(),
+                        sandboxToken = sandboxToken,
+                        pluginId = pluginId,
+                        pluginIdentifier = pluginIdentifier,
+                        version = sver,
+                        renderer = renderer,
+                        bundleFilePath = bundleFilePath,
+                        bundleHashHex = bundleHashHex,
+                        declaredCapabilities = declaredCapabilities,
+                        declaredEndpoints = declaredEndpoints,
+                        dismissBehavior = dismissBehavior,
+                        timeoutMillis = timeoutMillis,
+                        diagnosticManifestJson = diagnosticManifestJson,
+                        entryClass = entryClass,
+                        nativeSdkAbi = nativeSdkAbi,
                     )
                 }
 

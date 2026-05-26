@@ -81,7 +81,7 @@ class PluginSandboxServiceTest {
         )
         val callback = RecordingHostCallback()
         val exc = assertThrowsIllegalState {
-            sandbox.loadPlugin(parcel, callback)
+            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
         }
         assertEquals(LoadFailureCodes.PARCEL_MALFORMED, exc.message)
     }
@@ -97,7 +97,7 @@ class PluginSandboxServiceTest {
         )
         val callback = RecordingHostCallback()
         val exc = assertThrowsIllegalState {
-            sandbox.loadPlugin(parcel, callback)
+            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
         }
         assertEquals(LoadFailureCodes.DIAGNOSTIC_FIELD_OVERSIZE, exc.message)
     }
@@ -112,7 +112,7 @@ class PluginSandboxServiceTest {
         )
         val callback = RecordingHostCallback()
         val exc = assertThrowsIllegalState {
-            sandbox.loadPlugin(parcel, callback)
+            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
         }
         assertEquals(LoadFailureCodes.BUNDLE_HASH_MISMATCH, exc.message)
     }
@@ -129,7 +129,7 @@ class PluginSandboxServiceTest {
         )
         val callback = RecordingHostCallback()
         val exc = assertThrowsIllegalState {
-            sandbox.loadPlugin(parcel, callback)
+            sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
         }
         assertEquals(LoadFailureCodes.UNSUPPORTED_RENDERER, exc.message)
     }
@@ -146,7 +146,7 @@ class PluginSandboxServiceTest {
         )
         val callback = RecordingHostCallback()
 
-        val returnedToken = sandbox.loadPlugin(parcel, callback)
+        val returnedToken = sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
         assertEquals(token, returnedToken)
         // Service is now in LOADING. WebView creation is posted to
         // :plugin's main looper; we don't wait for it.
@@ -177,13 +177,13 @@ class PluginSandboxServiceTest {
             bundleHash = sha256Hex(js.toByteArray()),
         )
         val firstCallback = RecordingHostCallback()
-        sandbox.loadPlugin(first, firstCallback)
+        sandbox.loadPlugin(first, firstCallback, /* bundleFd = */ null)
 
         try {
             val second = first.copy(pluginId = "plugin-concurrent-2")
             val secondCallback = RecordingHostCallback()
             val exc = assertThrowsIllegalState {
-                sandbox.loadPlugin(second, secondCallback)
+                sandbox.loadPlugin(second, secondCallback, /* bundleFd = */ null)
             }
             assertEquals(LoadFailureCodes.CONCURRENT_LOAD_IN_PROGRESS, exc.message)
         } finally {

@@ -75,7 +75,12 @@ class SandboxRouter(
         handles[parcel.sandboxToken] = handle
         try {
             val callback = PluginHostCallbackStub(parcel.sandboxToken)
-            val returnedToken = sandbox.loadPlugin(parcel, callback)
+            // Phase 11: `:plugin` is the JS subprocess and is NOT isolated,
+            // so it can still read `parcel.bundleFilePath` directly from
+            // /data/data/.../files/.... The native (DEX) loader goes
+            // through a different sandbox (PluginNativeSandboxService)
+            // which DOES need the FD. Pass null here.
+            val returnedToken = sandbox.loadPlugin(parcel, callback, /* bundleFd = */ null)
             check(returnedToken == parcel.sandboxToken) {
                 "sandbox returned token=$returnedToken but parcel.sandboxToken=" +
                     "${parcel.sandboxToken} — fatal sandbox bug"

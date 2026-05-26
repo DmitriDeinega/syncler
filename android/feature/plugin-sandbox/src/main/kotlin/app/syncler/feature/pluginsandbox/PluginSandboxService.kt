@@ -3,6 +3,7 @@ package app.syncler.feature.pluginsandbox
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import app.syncler.core.pluginaidl.IPluginHostCallback
 import app.syncler.core.pluginaidl.IPluginSandbox
 import app.syncler.core.pluginaidl.PluginLoadParcel
@@ -62,7 +63,20 @@ class PluginSandboxService : Service() {
         override fun loadPlugin(
             request: PluginLoadParcel,
             callback: IPluginHostCallback,
+            bundleFd: ParcelFileDescriptor?,
         ): Int {
+            // Phase 11: this service handles the JS (`script`) path. It
+            // is NOT isolated (`:plugin` process), so it reads the
+            // bundle from `request.bundleFilePath` directly. The native
+            // Kotlin path uses a separate, isolated PluginNativeSandbox
+            // service that consumes the bundleFd. If a JS load arrives
+            // with a non-null bundleFd, just close it — we won't need
+            // it, but leaking the FD into the JVM finalizer queue would
+            // be sloppy.
+            if (bundleFd != null) {
+                runCatching { bundleFd.close() }
+                    .onFailure { Timber.tag(TAG).w(it, "failed to close unused bundleFd") }
+            }
             validateParcel(request)
             // Same-token re-load is a host bug — we treat it as
             // CONCURRENT_LOAD_IN_PROGRESS to match the state-machine

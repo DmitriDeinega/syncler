@@ -1,5 +1,6 @@
 package app.syncler.core.pluginaidl;
 
+import android.os.ParcelFileDescriptor;
 import app.syncler.core.pluginaidl.PluginLoadParcel;
 import app.syncler.core.pluginaidl.IPluginHostCallback;
 
@@ -19,11 +20,26 @@ interface IPluginSandbox {
     //   - diagnostic_field_oversize
     //   - concurrent_load_in_progress
     //   - concurrent_unload_in_progress
+    //   - dex_too_large                 (Phase 11)
+    //   - unsupported_sdk_abi           (Phase 11)
+    //   - forbidden_package_prefix      (Phase 11)
+    //   - entry_class_not_found         (Phase 11)
+    //   - entry_class_invalid           (Phase 11)
     //
     // The IPluginHostCallback is registered as part of this call
     // so there's no race between token-return and the first
     // lifecycle event firing.
-    int loadPlugin(in PluginLoadParcel request, in IPluginHostCallback callback);
+    //
+    // Phase 11: `bundleFd` carries the DEX bytes for native plugins
+    // (the isolated process can't read host /data/data/... so the
+    // host opens the file in its own process and passes the FD).
+    // Null for JS (`script`) plugins — they keep using
+    // `PluginLoadParcel.bundleFilePath` since the `:plugin` process
+    // isn't isolated. See docs/plugin-host-native-kotlin.md.
+    int loadPlugin(
+        in PluginLoadParcel request,
+        in IPluginHostCallback callback,
+        in @nullable ParcelFileDescriptor bundleFd);
 
     // Begin unload. Fire-and-forget; sandbox will fire
     // IPluginHostCallback.onPluginUnloaded(sandboxToken) when the
