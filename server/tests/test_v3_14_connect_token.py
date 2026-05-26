@@ -66,7 +66,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    _reset_store_for_test()
+    await _reset_store_for_test()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(
@@ -76,7 +76,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
 
     app.dependency_overrides.clear()
     await engine.dispose()
-    _reset_store_for_test()
+    await _reset_store_for_test()
 
 
 async def _signup_and_enroll(
@@ -177,11 +177,11 @@ async def test_connect_token_is_single_use(client: AsyncClient) -> None:
     token_str = resp.json()["token"]
 
     # First redeem returns the binding.
-    first = redeem_connect_token(token_str)
+    first = await redeem_connect_token(token_str)
     assert first is not None
 
     # Second redeem returns None — token consumed.
-    second = redeem_connect_token(token_str)
+    second = await redeem_connect_token(token_str)
     assert second is None
 
 
@@ -202,7 +202,7 @@ async def test_connect_token_expires_after_ttl(client: AsyncClient) -> None:
     expires_at_s = body["expires_at_epoch_ms"] / 1000
     assert expires_at_s >= before + CONNECT_TOKEN_TTL_SECONDS - 1.0
     # Fresh token still redeems.
-    assert redeem_connect_token(body["token"]) is not None
+    assert await redeem_connect_token(body["token"]) is not None
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ async def test_redeem_unknown_token_returns_none(
 ) -> None:
     # Endpoint not strictly required for this test, but the
     # client fixture also resets the store between runs.
-    assert redeem_connect_token("not-a-real-token") is None
+    assert await redeem_connect_token("not-a-real-token") is None
 
 
 @pytest.mark.asyncio
@@ -227,6 +227,6 @@ async def test_connect_token_binds_to_device(client: AsyncClient) -> None:
         headers={"Authorization": f"Bearer {device_token}"},
     )
     body = resp.json()
-    binding = redeem_connect_token(body["token"])
+    binding = await redeem_connect_token(body["token"])
     assert binding is not None
     assert str(binding.device_id) == device_id

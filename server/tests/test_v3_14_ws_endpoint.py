@@ -65,13 +65,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    _reset_store_for_test()
+    asyncio.run(_reset_store_for_test())
 
     with TestClient(app) as tc:
         yield tc
 
     app.dependency_overrides.clear()
-    _reset_store_for_test()
+    asyncio.run(_reset_store_for_test())
 
 
 async def _setup_schema(engine) -> None:

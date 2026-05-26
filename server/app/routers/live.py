@@ -70,76 +70,36 @@ CLOSE_RATE_LIMIT_EXCEEDED = 4429
 CLOSE_BAD_AUTH = 4400
 
 
-# --- In-process connect-token store ---
+# --- Connect-token store ---
+# V3 #17 (docs/live-backplane.md): the dict-based store moved
+# behind app/live/token_store.py so the same route handler
+# transparently switches to a Redis SETEX/GETDEL backend when
+# LIVE_BACKPLANE=redis.
+
+from app.live.token_store import (
+    CONNECT_TOKEN_TTL_SECONDS,
+    ConnectToken,
+    get_token_store,
+)
 
 
-@dataclass(frozen=True)
-class ConnectToken:
-    user_id: uuid.UUID
-    device_id: uuid.UUID
-    expires_at_epoch_s: float
+async def mint_connect_token(
+    user_id: uuid.UUID, device_id: uuid.UUID
+) -> tuple[str, ConnectToken]:
+    """V3 #17 — async because the Redis backend is async."""
+    return await get_token_store().mint(user_id, device_id)
 
 
-# token-string → ConnectToken. Process-local; V3 #17 swaps for
-# Redis SETEX. tokens are 256-bit URL-safe random strings.
-_TOKEN_STORE: dict[str, ConnectToken] = {}
-
-CONNECT_TOKEN_TTL_SECONDS = 60.0
-
-
-def _purge_expired_locked(now_epoch_s: float) -> None:
-    """Remove tokens past their TTL. Called on every mint /
-    redeem so the in-process map doesn't grow without bound
-    under churn."""
-    stale = [
-        tok for tok, entry in _TOKEN_STORE.items()
-        if entry.expires_at_epoch_s <= now_epoch_s
-    ]
-    for tok in stale:
-        _TOKEN_STORE.pop(tok, None)
+async def redeem_connect_token(token: str) -> ConnectToken | None:
+    """V3 #17 — atomic single-use redeem. Returns the bound
+    identity or None if unknown/expired."""
+    return await get_token_store().redeem(token)
 
 
-def mint_connect_token(user_id: uuid.UUID, device_id: uuid.UUID) -> ConnectToken:
-    """Generate and store a fresh connect token. Returns the
-    [ConnectToken] dataclass; the caller serializes the
-    `.token` string (returned separately by the endpoint)."""
-    now = time.time()
-    _purge_expired_locked(now)
-    token_str = secrets.token_urlsafe(32)  # 256 bits
-    entry = ConnectToken(
-        user_id=user_id,
-        device_id=device_id,
-        expires_at_epoch_s=now + CONNECT_TOKEN_TTL_SECONDS,
-    )
-    _TOKEN_STORE[token_str] = entry
-    # We return both the token string and the entry by stashing
-    # the token string back in a wrapper for the response. See
-    # the endpoint below.
-    return entry
-
-
-def redeem_connect_token(token: str) -> ConnectToken | None:
-    """Look up + atomically consume a connect token. Returns
-    the bound (user_id, device_id) on success or None if the
-    token is unknown or expired.
-
-    Single-use: tokens are popped on redeem so a stolen token
-    can't replay the WS open. The WS handshake is the only
-    redeem path."""
-    now = time.time()
-    _purge_expired_locked(now)
-    entry = _TOKEN_STORE.pop(token, None)
-    if entry is None:
-        return None
-    if entry.expires_at_epoch_s <= now:
-        return None
-    return entry
-
-
-def _reset_store_for_test() -> None:
-    """pytest hook — drains the in-process token map between
+async def _reset_store_for_test() -> None:
+    """pytest hook — drains the configured store between
     tests so token leakage doesn't cross test boundaries."""
-    _TOKEN_STORE.clear()
+    await get_token_store().reset_for_test()
 
 
 # --- Endpoint ---
@@ -179,15 +139,13 @@ async def issue_connect_token(
             detail="device JWT required",
         )
 
-    now = time.time()
-    _purge_expired_locked(now)
-    token_str = secrets.token_urlsafe(32)
-    entry = ConnectToken(
+    # V3 #17 — token storage moved behind a backplane-
+    # selecting factory. Same call shape across in-process
+    # + Redis backends.
+    token_str, entry = await mint_connect_token(
         user_id=auth.user.id,
         device_id=auth.device.id,
-        expires_at_epoch_s=now + CONNECT_TOKEN_TTL_SECONDS,
     )
-    _TOKEN_STORE[token_str] = entry
 
     return ConnectTokenResponse(
         token=token_str,
@@ -423,7 +381,7 @@ async def plugin_socket(
     if bearer is None:
         await websocket.close(code=CLOSE_BAD_AUTH)
         return
-    binding = redeem_connect_token(bearer)
+    binding = await redeem_connect_token(bearer)
     if binding is None:
         await websocket.close(code=CLOSE_BAD_AUTH)
         return

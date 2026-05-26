@@ -10,5 +10,18 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  # V3 #17 live backplane (docs/live-backplane.md). Redis
+  # 7.x ships GETDEL (>=6.2) and the Streams primitives the
+  # ordered lane uses. Single instance for dev; production
+  # adds primary+replica failover.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+
 volumes:
   postgres-data:
+  redis-data:

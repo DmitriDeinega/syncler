@@ -21,6 +21,9 @@ dependencies = [
     "httpx==0.28.1",
     "pytest==8.3.5",
     "pytest-asyncio==0.26.0",
+    # V3 #17 live backplane (docs/live-backplane.md).
+    # redis-py 5.x ships async client + Streams (XADD/XREAD).
+    "redis==5.2.1",
 ]
 
 [project.optional-dependencies]
