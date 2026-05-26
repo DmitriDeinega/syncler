@@ -66,4 +66,14 @@ dependencies {
     // Pull the real implementation onto the test classpath so the unit tests
     // exercise the same JSON behavior the production runtime sees.
     testImplementation("org.json:json:20240303")
+
+    // V2 closeout triad 142 #4: Compose UI tests for the V2 #12
+    // layouts. androidTest scope — needs a connected device or
+    // emulator. V0.2 follow-up: Robolectric so they run in CI
+    // JVM tests without an emulator.
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
