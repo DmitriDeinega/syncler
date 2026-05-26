@@ -14,12 +14,12 @@ class PluginSignatureVerifier(
             val canonical = canonicalManifestForSigning(rawManifest)
             val signature = signatureHex.hexToBytes()
             if (!Signing.verify(expectedSenderPublicKey, canonical, signature)) {
-                auditLogger.denied(rawManifest.pluginIdForAudit(), "signature_invalid")
+                auditLogger.record(rawManifest.pluginIdForAudit(), "signature_invalid")
                 throw SecurityException("plugin signature is invalid")
             }
             canonical
         }.onFailure {
-            auditLogger.denied(rawManifest.pluginIdForAudit(), "signature_verification_failed", it.message)
+            auditLogger.record(rawManifest.pluginIdForAudit(), "signature_verification_failed", it.message)
         }
 
     fun canonicalManifestForSigning(rawManifest: Map<String, Any?>): ByteArray {

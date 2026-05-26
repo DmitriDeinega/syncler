@@ -36,7 +36,7 @@ class PluginHostActivity : Activity() {
 
     private fun sendStatus(what: Int) {
         runCatching { hostMessenger?.send(Message.obtain(null, what)) }
-            .onFailure { auditLogger.denied(null, "ipc_status_failed", it.message) }
+            .onFailure { auditLogger.record(null, "ipc_status_failed", it.message) }
     }
 
     companion object {

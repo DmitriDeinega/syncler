@@ -58,7 +58,7 @@ class PluginBridge(
                     is PluginBridgeException -> error.code
                     else -> "bridge_error"
                 }
-                auditLogger.denied(plugin.manifest.id, reason, method)
+                auditLogger.record(plugin.manifest.id, reason, method)
                 bridgeErrorJson(reason, error.message ?: reason)
             }
             delivery.deliver(callbackId, resultJson)
@@ -80,7 +80,7 @@ class PluginBridge(
         if (!requiresPhase12RuntimeGrant) {
             val capability = requiredCapability(method)
             if (capability != null && capability !in plugin.grantedCapabilities) {
-                auditLogger.denied(plugin.manifest.id, "capability_not_granted", capability)
+                auditLogger.record(plugin.manifest.id, "capability_not_granted", capability)
                 throw PluginBridgeException("capability_not_granted", "Capability not granted: $capability")
             }
         } else {
@@ -97,7 +97,7 @@ class PluginBridge(
                 else -> true
             }
             if (!anyMatch) {
-                auditLogger.denied(plugin.manifest.id, "capability_not_granted", method)
+                auditLogger.record(plugin.manifest.id, "capability_not_granted", method)
                 throw PluginBridgeException(
                     "capability_not_granted",
                     "Capability not declared in manifest",
@@ -120,7 +120,7 @@ class PluginBridge(
             "platform.fileBytes" -> readHandleBytes(argsJson)
             "platform.releaseHandle" -> releaseCapHandle(argsJson)
             else -> {
-                auditLogger.denied(plugin.manifest.id, "unknown_method", method)
+                auditLogger.record(plugin.manifest.id, "unknown_method", method)
                 throw PluginBridgeException("unknown_method", "Unknown bridge method: $method")
             }
         }

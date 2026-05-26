@@ -65,7 +65,7 @@ class MessageBridge(
             // platform.network.fetch is for.
             val endpoint = plugin.actionEndpoints[actionId]
             if (endpoint == null) {
-                auditLogger.denied(plugin.manifest.id, "unknown_action", actionId)
+                auditLogger.record(plugin.manifest.id, "unknown_action", actionId)
                 return@withContext JsonBridgeCodec.error("unknown_action")
             }
 
@@ -73,7 +73,7 @@ class MessageBridge(
             val schemeOk = endpoint.startsWith("https://") ||
                 (BuildConfig.DEBUG && endpoint.startsWith("http://"))
             if (!schemeOk) {
-                auditLogger.denied(plugin.manifest.id, "non_https_endpoint", endpoint)
+                auditLogger.record(plugin.manifest.id, "non_https_endpoint", endpoint)
                 return@withContext JsonBridgeCodec.error("non_https_endpoint")
             }
 
@@ -90,11 +90,11 @@ class MessageBridge(
             if (result.isFailure) {
                 val exc = result.exceptionOrNull()
                 Timber.tag(TAG).w(exc, "message.respond POST %s threw", endpoint)
-                auditLogger.denied(plugin.manifest.id, "respond_threw", exc?.message ?: "")
+                auditLogger.record(plugin.manifest.id, "respond_threw", exc?.message ?: "")
                 return@withContext JsonBridgeCodec.error("io_error")
             }
             val (status, body) = result.getOrNull()!!
-            auditLogger.denied(
+            auditLogger.record(
                 plugin.manifest.id,
                 if (status in 200..299) "respond_ok" else "respond_$status",
                 "action=$actionId endpoint=$endpoint",
@@ -108,7 +108,7 @@ class MessageBridge(
             val behavior = args["behavior"] as? String
                 ?: return@withContext JsonBridgeCodec.error("invalid_args")
             if (behavior != plugin.manifest.dismissBehavior) {
-                auditLogger.denied(plugin.manifest.id, "dismiss_behavior_override", behavior)
+                auditLogger.record(plugin.manifest.id, "dismiss_behavior_override", behavior)
             }
             "{}"
         }

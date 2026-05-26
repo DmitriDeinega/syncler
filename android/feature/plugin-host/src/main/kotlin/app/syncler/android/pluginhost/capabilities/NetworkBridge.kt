@@ -38,11 +38,11 @@ class NetworkBridge(
         // fail closed regardless of how `client` was built.
         val schemeOk = url.startsWith("https://") || (BuildConfig.DEBUG && url.startsWith("http://"))
         if (!schemeOk) {
-            auditLogger.denied(plugin.manifest.id, "cleartext_in_release", url)
+            auditLogger.record(plugin.manifest.id, "cleartext_in_release", url)
             throw PluginBridgeException("cleartext_in_release", "fetch URL must be HTTPS")
         }
         if (!EndpointMatcher.matches(url, plugin.manifest.declaredEndpoints)) {
-            auditLogger.denied(plugin.manifest.id, "endpoint_not_declared", url)
+            auditLogger.record(plugin.manifest.id, "endpoint_not_declared", url)
             throw PluginBridgeException("endpoint_not_declared", "Endpoint not declared: $url")
         }
 

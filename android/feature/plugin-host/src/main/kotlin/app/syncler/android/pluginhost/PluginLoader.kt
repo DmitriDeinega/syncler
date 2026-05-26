@@ -69,7 +69,7 @@ class PluginLoader(
                 val bundleBytes = fetchBytesNoCache(resolvedBundleUrl)
                 val actualHash = MessageDigest.getInstance("SHA-256").digest(bundleBytes).toHex()
                 if (!actualHash.equals(manifest.bundleHash, ignoreCase = true)) {
-                    auditLogger.denied(manifest.id, "bundle_hash_mismatch", actualHash)
+                    auditLogger.record(manifest.id, "bundle_hash_mismatch", actualHash)
                     throw SecurityException("plugin bundle hash mismatch")
                 }
 
@@ -78,7 +78,7 @@ class PluginLoader(
                 instanceFactory.create(manifest, grantedCapabilities, stored.absolutePath, bundleBytes, manifestJson)
                     .also(PluginRegistry::put)
             }.onFailure {
-                auditLogger.denied(null, "plugin_load_failed", it.message)
+                auditLogger.record(null, "plugin_load_failed", it.message)
             }
         }
 
@@ -378,10 +378,10 @@ class SandboxedPluginInstanceFactory(
     ) : SandboxBridgeDispatcher.LifecycleListener {
         override fun onPluginReady() = Unit
         override fun onWebViewError(code: String, message: String) {
-            auditLogger.denied(pluginId, "webview_error_$code", message)
+            auditLogger.record(pluginId, "webview_error_$code", message)
         }
         override fun onPluginCrashed(reason: String) {
-            auditLogger.denied(pluginId, "plugin_crashed", reason)
+            auditLogger.record(pluginId, "plugin_crashed", reason)
             wipeCapabilityHandles(sandboxToken)
             PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
         }
