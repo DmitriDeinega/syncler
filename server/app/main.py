@@ -14,6 +14,7 @@ from app.routers import (
     cards,
     devices,
     events,
+    live,
     messages,
     pairing,
     plugins,
@@ -54,6 +55,9 @@ app.include_router(state.router, prefix="/v1/state")
 app.include_router(plugins.router, prefix="/v1/plugins")
 app.include_router(events.router, prefix="/v1/events")
 app.include_router(cards.router, prefix="/v1/cards")
+# V3 #14 — two-way live channel between plugins and senders.
+# Spec: docs/live-channel.md.
+app.include_router(live.router, prefix="/v1/live")
 
 
 @app.exception_handler(RequestValidationError)
