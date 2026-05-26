@@ -1,5 +1,6 @@
 package app.syncler.core.storage
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -270,7 +271,9 @@ class StateMergerTest {
     }
 
     @Test
-    fun `V4 blob without muted senders parses as empty list and forward-migrates to V5`() {
+    fun `V4 blob without muted senders parses as empty list and forward-migrates`() {
+        // V4 #19 bumps SCHEMA_CURRENT to V6; forward-migrate
+        // path treats every old schema (V0..V5) the same way.
         val v4Json = """{
             "schema_version": 4,
             "installed_plugins": [],
@@ -283,9 +286,62 @@ class StateMergerTest {
             "paired_senders": []
         }""".trimIndent()
         val parsed = EncryptedUserState.fromJson(v4Json)
-        assertEquals(5, parsed.schemaVersion)
         assertEquals(EncryptedUserState.SCHEMA_CURRENT, parsed.schemaVersion)
         assertEquals(emptyList<String>(), parsed.mutedSenders)
+    }
+
+    @Test
+    fun `V4 #19 plugin prefs round trip with all new fields`() {
+        val original = PluginSettings(
+            grantedCapabilities = listOf("network"),
+            dismissBehaviorOverride = "dismiss_local_only",
+            modifiedAt = "2026-05-26T22:00:00Z",
+            labelOverride = "My Lottery",
+            notificationCadence = PluginSettings.NOTIFICATION_CADENCE_BATCHED_15M,
+            quietHours = QuietHours(
+                enabled = true,
+                startLocalHour = 22,
+                endLocalHour = 7,
+                timezone = "America/New_York",
+            ),
+            muted = true,
+        )
+        val parsed = PluginSettings.fromJson(original.toJson())
+        assertEquals(original, parsed.copy(unknownFields = emptyMap()))
+    }
+
+    @Test
+    fun `V4 #19 PluginSettings forward-compat preserves unknown fields`() {
+        // A future device wrote "ringtone_uri"; the current
+        // device must not drop it on writeback (codex 149 #10).
+        val futureJson = JSONObject().apply {
+            put("modified_at", "2026-05-26T22:00:00Z")
+            put("notification_cadence", "realtime")
+            put("ringtone_uri", "content://media/ring/42")
+        }
+        val parsed = PluginSettings.fromJson(futureJson)
+        assertEquals(
+            "content://media/ring/42",
+            parsed.unknownFields["ringtone_uri"],
+        )
+        val rewritten = parsed.toJson()
+        assertEquals(
+            "content://media/ring/42",
+            rewritten.optString("ringtone_uri"),
+        )
+    }
+
+    @Test
+    fun `V4 #19 PluginSettings unknown cadence falls back to realtime`() {
+        val o = JSONObject().apply {
+            put("modified_at", "2026-05-26T22:00:00Z")
+            put("notification_cadence", "every_3_minutes_made_up_by_v0_2")
+        }
+        val parsed = PluginSettings.fromJson(o)
+        assertEquals(
+            PluginSettings.NOTIFICATION_CADENCE_REALTIME,
+            parsed.notificationCadence,
+        )
     }
 
     @Test

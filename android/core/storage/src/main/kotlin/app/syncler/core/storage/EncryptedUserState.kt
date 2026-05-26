@@ -90,7 +90,13 @@ data class EncryptedUserState(
         const val SCHEMA_V4 = 4
         /** Phase 3c: adds `muted_senders` field. */
         const val SCHEMA_V5 = 5
-        const val SCHEMA_CURRENT = SCHEMA_V5
+        /** V4 #19: extends `PluginSettings` with per-plugin
+         *  notification prefs (label_override, notification_cadence,
+         *  quiet_hours, muted). Old blobs forward-migrate cleanly —
+         *  PluginSettings.fromJson treats every new field as
+         *  optional and defaults to no-op semantics. */
+        const val SCHEMA_V6 = 6
+        const val SCHEMA_CURRENT = SCHEMA_V6
 
         /** Pre-V1 blobs (no schema_version field) — migrated forward at parse. */
         const val SCHEMA_V0 = 0
@@ -104,7 +110,7 @@ data class EncryptedUserState(
             val schema = if (obj.has("schema_version")) obj.getInt("schema_version") else SCHEMA_V0
             return EncryptedUserState(
                 schemaVersion = when (schema) {
-                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4 -> SCHEMA_CURRENT  // forward-migrate
+                    SCHEMA_V0, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5 -> SCHEMA_CURRENT  // forward-migrate
                     else -> schema
                 },
                 installedPlugins = obj.optJSONArray("installed_plugins")
@@ -379,20 +385,121 @@ data class PluginSettings(
     val grantedCapabilities: List<String> = emptyList(),
     val dismissBehaviorOverride: String? = null,
     val modifiedAt: String,
+    /**
+     * V4 #19 — per-plugin user prefs (docs/plugin-prefs.md).
+     * Free-form, 64-char cap. Falls back to manifest `name`
+     * when null or empty. Trimmed on save.
+     */
+    val labelOverride: String? = null,
+    /**
+     * V4 #19 — one of NOTIFICATION_CADENCE_* constants.
+     * Unknown values fall back to `realtime` on read
+     * (forward-compat per codex 149 #10).
+     */
+    val notificationCadence: String = NOTIFICATION_CADENCE_REALTIME,
+    /** V4 #19 — null when quiet hours disabled. */
+    val quietHours: QuietHours? = null,
+    /**
+     * V4 #19 — per-plugin user mute. Independent of the
+     * per-sender mute (which lives in [mutedSenders]). Both
+     * must be false for a notification to fire.
+     */
+    val muted: Boolean = false,
+    /**
+     * V4 #19 — preserved unknown fields. The device that
+     * introduced them is authoritative; we echo them back
+     * on writeback (codex 149 #10 forward-compat).
+     */
+    val unknownFields: Map<String, Any> = emptyMap(),
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
+        // Preserve any unknown fields from a newer-version
+        // device verbatim — must happen BEFORE we write our
+        // known fields so a future writer that also
+        // introduced "granted_capabilities" doesn't get
+        // double-encoded (our known field wins on conflict).
+        for ((k, v) in unknownFields) {
+            put(k, v)
+        }
         put("granted_capabilities", JSONArray().apply { grantedCapabilities.forEach { put(it) } })
         put("dismiss_behavior_override", dismissBehaviorOverride ?: JSONObject.NULL)
         put("modified_at", modifiedAt)
+        if (labelOverride != null) put("label_override", labelOverride)
+        put("notification_cadence", notificationCadence)
+        if (quietHours != null) put("quiet_hours", quietHours.toJson())
+        put("muted", muted)
     }
 
     companion object {
+        const val NOTIFICATION_CADENCE_REALTIME = "realtime"
+        const val NOTIFICATION_CADENCE_BATCHED_15M = "batched_15m"
+        const val NOTIFICATION_CADENCE_BATCHED_1H = "batched_1h"
+        const val NOTIFICATION_CADENCE_DIGEST_DAILY = "digest_daily"
+        val KNOWN_NOTIFICATION_CADENCES = setOf(
+            NOTIFICATION_CADENCE_REALTIME,
+            NOTIFICATION_CADENCE_BATCHED_15M,
+            NOTIFICATION_CADENCE_BATCHED_1H,
+            NOTIFICATION_CADENCE_DIGEST_DAILY,
+        )
+
+        /** V4 #19 — caller-side cap on label_override length. */
+        const val LABEL_OVERRIDE_MAX_LEN = 64
+
+        private val KNOWN_KEYS = setOf(
+            "granted_capabilities",
+            "dismiss_behavior_override",
+            "modified_at",
+            "label_override",
+            "notification_cadence",
+            "quiet_hours",
+            "muted",
+        )
+
         fun fromJson(o: JSONObject) = PluginSettings(
             grantedCapabilities = o.optJSONArray("granted_capabilities")
                 ?.let { arr -> (0 until arr.length()).map { arr.getString(it) } }
                 .orEmpty(),
             dismissBehaviorOverride = o.optString("dismiss_behavior_override").takeIf { it.isNotEmpty() && it != "null" },
             modifiedAt = o.getString("modified_at"),
+            labelOverride = o.optString("label_override").takeIf { it.isNotEmpty() && it != "null" },
+            notificationCadence = run {
+                val raw = o.optString("notification_cadence", NOTIFICATION_CADENCE_REALTIME)
+                if (raw in KNOWN_NOTIFICATION_CADENCES) raw else NOTIFICATION_CADENCE_REALTIME
+            },
+            quietHours = o.optJSONObject("quiet_hours")?.let { QuietHours.fromJson(it) },
+            muted = o.optBoolean("muted", false),
+            unknownFields = o.keys().asSequence()
+                .filter { it !in KNOWN_KEYS }
+                .associateWith { o.get(it) },
+        )
+    }
+}
+
+/**
+ * V4 #19 — quiet-hours window. `start_local_hour > end_local_hour`
+ * means the window wraps midnight (e.g. 22 → 7 is 10pm to 7am).
+ * Timezone is an IANA tz string; defaults at save time to the
+ * device's current zone.
+ */
+data class QuietHours(
+    val enabled: Boolean,
+    val startLocalHour: Int,
+    val endLocalHour: Int,
+    val timezone: String,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("enabled", enabled)
+        put("start_local_hour", startLocalHour)
+        put("end_local_hour", endLocalHour)
+        put("timezone", timezone)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = QuietHours(
+            enabled = o.optBoolean("enabled", false),
+            startLocalHour = o.optInt("start_local_hour", 0).coerceIn(0, 23),
+            endLocalHour = o.optInt("end_local_hour", 0).coerceIn(0, 23),
+            timezone = o.optString("timezone").ifEmpty { "UTC" },
         )
     }
 }
