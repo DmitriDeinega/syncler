@@ -1,0 +1,140 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "a0da2276e9c27de26116d862a5de2c3b",
+    "entities": [
+      {
+        "tableName": "plugin_capability_grants",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`pluginRowId` TEXT NOT NULL, `capability` TEXT NOT NULL, `grantedAtMs` INTEGER NOT NULL, `lastInvokedAtMs` INTEGER, PRIMARY KEY(`pluginRowId`, `capability`))",
+        "fields": [
+          {
+            "fieldPath": "pluginRowId",
+            "columnName": "pluginRowId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capability",
+            "columnName": "capability",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grantedAtMs",
+            "columnName": "grantedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastInvokedAtMs",
+            "columnName": "lastInvokedAtMs",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "pluginRowId",
+            "capability"
+          ]
+        }
+      },
+      {
+        "tableName": "plugin_capability_audit",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `pluginRowId` TEXT NOT NULL, `capability` TEXT NOT NULL, `sandboxToken` INTEGER NOT NULL, `callId` TEXT NOT NULL, `atMs` INTEGER NOT NULL, `durationMs` INTEGER NOT NULL, `outcome` TEXT NOT NULL, `surface` TEXT NOT NULL, `sizeBytes` INTEGER, `itemCount` INTEGER, `precision` TEXT, `mimeClaimed` TEXT, `mimeDetected` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pluginRowId",
+            "columnName": "pluginRowId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capability",
+            "columnName": "capability",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sandboxToken",
+            "columnName": "sandboxToken",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "callId",
+            "columnName": "callId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "atMs",
+            "columnName": "atMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outcome",
+            "columnName": "outcome",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "surface",
+            "columnName": "surface",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "itemCount",
+            "columnName": "itemCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "precision",
+            "columnName": "precision",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mimeClaimed",
+            "columnName": "mimeClaimed",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mimeDetected",
+            "columnName": "mimeDetected",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'a0da2276e9c27de26116d862a5de2c3b')"
+    ]
+  }
+}
