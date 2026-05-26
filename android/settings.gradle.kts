@@ -34,6 +34,7 @@ include(
     ":feature:inbox",
     ":feature:pairing",
     ":feature:plugin-host",
+    ":feature:plugin-native-sandbox",
     ":feature:plugin-sandbox",
     ":feature:settings",
     ":plugin-sdk-runtime",

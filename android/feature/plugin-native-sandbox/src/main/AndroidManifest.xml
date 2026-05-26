@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+            Phase 11 native Kotlin plugin sandbox.
+
+            android:isolatedProcess="true" forces Android to spawn
+            this service under a synthesized isolated UID, with:
+              - no access to host /data/data/<pkg>/...
+              - no INTERNET permission
+              - no most-system-services
+              - the ONLY exit being the AIDL Binder back to host.
+
+            android:externalService="false" (default) — only same
+            app/UID can bind. Host code uses bindIsolatedService
+            with instanceName=sandboxToken.toString() so EACH
+            native plugin lives in its own isolated process; two
+            plugins NEVER share heap, ClassLoader, or coroutine
+            scope. This is the real security boundary per Phase
+            11a triad 135's GREEN. ClassLoader isolation alone is
+            NOT sufficient.
+
+            android:exported="false" so only same-UID code can
+            even attempt to bind.
+
+            See docs/plugin-host-native-kotlin.md "Process model".
+        -->
+        <service
+            android:name="app.syncler.feature.pluginnativesandbox.PluginNativeSandboxService"
+            android:isolatedProcess="true"
+            android:process=":nativePlugin"
+            android:exported="false" />
+    </application>
+
+</manifest>
