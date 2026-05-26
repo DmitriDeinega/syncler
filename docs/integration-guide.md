@@ -403,24 +403,23 @@ aad = assemble_live_card_aad(
     expires_at=expires_at,
 )
 
-# encrypt_payload is keyword-only, generates a fresh 12-byte nonce
-# internally, and returns (nonce, ciphertext_with_tag). Do NOT generate
-# your own nonce — using the returned one is mandatory because that's the
-# one bound to the ciphertext by AES-GCM.
-nonce, ciphertext = encrypt_payload(
-    pairing_key=client.pairing_key,
-    plaintext=plaintext,
-    aad=aad,
-)
-
+# V2 (current): client.upsert_card takes the plaintext payload + card_type
+# directly — the SDK handles per-device V2 envelope sealing (HPKE per
+# recipient device + AES-GCM payload, AAD bound to envelope_kind +
+# card_type + sequence_number per docs/crypto-spec.md §11). You don't
+# touch encrypt_payload / nonce yourself anymore.
 client.upsert_card(
     user_id=user_id,
     plugin_id=plugin_row_id,
     card_key="order-456",
-    encrypted_payload=ciphertext,
-    nonce=nonce,
+    card_type="standard_card",
+    payload={
+        "hostPreview": {"title": "Order #456", "summary": "Shipped"},
+        "order_id": "order-456",
+        "status": "shipped",
+    },
     sequence_number=2,
-    expires_at=expires_at,
+    expires_at=expires_at,  # datetime, server caps at now + 48h
 )
 ```
 
@@ -443,13 +442,14 @@ The successful response triggers a `card.upsert` SSE event to every active devic
 ```python
 client.delete_card(
     user_id=user_id,
+    plugin_id=plugin_row_id,
     card_key="order-456",
 )
 ```
 
-`user_id` is **required**. The canonical signed envelope binds `(sender_id, user_id, card_key)` — without `user_id` in the signature, an attacker (or a coincidence: two users with the same `card_key` under the same sender) could be deleted by mistake. The delete endpoint matches exactly that triple in the row lookup.
+`user_id` AND `plugin_id` are **required**. The canonical signed envelope binds `(sender_id, user_id, plugin_id, card_key)` — without `plugin_id` in the signature, a captured delete envelope from one of your plugins could be replayed against a different plugin row with the same `card_key`. The delete endpoint matches exactly that quadruple in the row lookup.
 
-**Phase 12 freshness + replay protection:** as of V1.5 the delete envelope also binds a `nonce` (12 random bytes) and `expires_at` (defaults to now + 24 h; server caps at 48 h). The SDK generates both automatically, so the canonical call above keeps working unchanged. Callers MAY pass `nonce=` and `expires_at=` to control the freshness window explicitly — useful when retrying after a 409 to confirm a previous delete already landed. Server-side enforcement: expired envelopes return 400; replayed nonces return 409. See `docs/crypto-spec.md §8.3` for the envelope shape.
+**Freshness + replay protection:** the delete envelope also binds a `nonce` (12 random bytes) and `expires_at` (defaults to now + 24 h; server caps at 48 h). The SDK generates both automatically, so the canonical call above keeps working unchanged. Callers MAY pass `nonce=` and `expires_at=` to control the freshness window explicitly — useful when retrying after a 409 to confirm a previous delete already landed. Server-side enforcement: expired envelopes return 400; replayed nonces return 409. See `docs/crypto-spec.md §11.6` for the V2 delete envelope shape.
 
 ### 5.5 Revoking a plugin version
 
