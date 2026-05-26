@@ -66,10 +66,43 @@ class PluginBridge(
     }
 
     private suspend fun dispatch(method: String, argsJson: String): String {
-        val capability = requiredCapability(method)
-        if (capability != null && capability !in plugin.grantedCapabilities) {
-            auditLogger.denied(plugin.manifest.id, "capability_not_granted", capability)
-            throw PluginBridgeException("capability_not_granted", "Capability not granted: $capability")
+        // Triad 139 codex #3 fix: skip the pre-dispatch gate for
+        // Phase 12 capabilities (camera/gallery/file/location).
+        // Those bridges do their own grant check + per-invocation
+        // prompt internally; gating on plugin.grantedCapabilities
+        // here would short-circuit the runtime grant flow.
+        // Network + storage + non-capability calls keep the
+        // legacy pre-dispatch gate.
+        val requiresPhase12RuntimeGrant = method.startsWith("platform.camera.") ||
+            method.startsWith("platform.gallery.") ||
+            method.startsWith("platform.file.") ||
+            method.startsWith("platform.location.")
+        if (!requiresPhase12RuntimeGrant) {
+            val capability = requiredCapability(method)
+            if (capability != null && capability !in plugin.grantedCapabilities) {
+                auditLogger.denied(plugin.manifest.id, "capability_not_granted", capability)
+                throw PluginBridgeException("capability_not_granted", "Capability not granted: $capability")
+            }
+        } else {
+            // Phase 12 capabilities: only check that the plugin
+            // declared SOME variant in the manifest set (the
+            // bridges do the fine-grained check internally).
+            val anyMatch = when {
+                method.startsWith("platform.location.") ->
+                    "location.coarse" in plugin.grantedCapabilities ||
+                        "location.fine" in plugin.grantedCapabilities
+                method.startsWith("platform.camera.") -> "camera" in plugin.grantedCapabilities
+                method.startsWith("platform.gallery.") -> "gallery" in plugin.grantedCapabilities
+                method.startsWith("platform.file.") -> "file" in plugin.grantedCapabilities
+                else -> true
+            }
+            if (!anyMatch) {
+                auditLogger.denied(plugin.manifest.id, "capability_not_granted", method)
+                throw PluginBridgeException(
+                    "capability_not_granted",
+                    "Capability not declared in manifest",
+                )
+            }
         }
 
         return when (method) {

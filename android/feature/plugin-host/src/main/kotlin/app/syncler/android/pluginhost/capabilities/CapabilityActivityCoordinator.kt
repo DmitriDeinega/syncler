@@ -18,6 +18,7 @@ import androidx.lifecycle.LifecycleOwner
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import timber.log.Timber
@@ -253,12 +254,15 @@ class CapabilityActivityCoordinator(
             cont.resume("no_foreground_activity")
             return@suspendCancellableCoroutine
         }
-        // Record pending.
+        // Record pending — store the CancellableContinuation
+        // directly so completeMatching can resume it without an
+        // unsafe cast. Triad 139 gemini #2 fix: previous version
+        // tried to cast cont to CompletableDeferred which would
+        // throw ClassCastException at runtime on every call.
         pending[callId] = PendingCall(
             callId = callId,
             kind = kind,
-            continuation = cont as CompletableDeferred<Any?>?
-                ?: error("expected CompletableDeferred"),
+            continuation = cont,
             launchedAtElapsedMs = SystemClock.elapsedRealtime(),
         )
         activeActivityResultCallId = callId

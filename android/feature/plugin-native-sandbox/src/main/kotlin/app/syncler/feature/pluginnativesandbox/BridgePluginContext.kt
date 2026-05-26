@@ -66,7 +66,7 @@ internal class BridgePluginContext(
     }
 
     override suspend fun networkFetch(request: NetworkRequest): Result<NetworkResponse> =
-        bridgeRoundTrip("platform.networkFetch", encodeNetworkRequest(request)) { json ->
+        bridgeRoundTrip("platform.network.fetch", encodeNetworkRequest(request)) { json ->
             decodeNetworkResponse(json)
         }
 
@@ -100,13 +100,13 @@ internal class BridgePluginContext(
 
     override suspend fun cameraCapture(options: CameraOptions): Result<CameraResult> =
         bridgeRoundTrip(
-            "platform.cameraCapture",
+            "platform.camera.capture",
             "{\"front\":${options.front}}",
         ) { json -> decodeCameraResult(json) }
 
     override suspend fun galleryPick(options: GalleryOptions): Result<GalleryResult> =
         bridgeRoundTrip(
-            "platform.galleryPick",
+            "platform.gallery.pick",
             "{\"maxItems\":${options.maxItems},\"mimeFilter\":${
                 options.mimeFilter?.let { escape(it) } ?: "null"
             }}",
@@ -114,19 +114,19 @@ internal class BridgePluginContext(
 
     override suspend fun filePick(options: FileOptions): Result<FileResult> =
         bridgeRoundTrip(
-            "platform.filePick",
+            "platform.file.pick",
             "{\"mimeFilter\":${options.mimeFilter?.let { escape(it) } ?: "null"}}",
         ) { json -> decodeFileResult(json) }
 
     override suspend fun locationCurrent(options: LocationOptions): Result<LocationResult> =
         bridgeRoundTrip(
-            "platform.locationCurrent",
+            "platform.location.current",
             "{\"fineAccuracy\":${options.fineAccuracy},\"timeoutMillis\":${options.timeoutMillis}}",
         ) { json -> decodeLocationResult(json) }
 
     override suspend fun messageRespond(actionId: String, payload: ByteArray): Result<Unit> =
         bridgeRoundTrip(
-            "platform.messageRespond",
+            "platform.message.respond",
             "{\"actionId\":${escape(actionId)},\"payload\":\"${base64(payload)}\"}",
         ) { Result.success(Unit) }
 
@@ -312,13 +312,20 @@ internal class BridgePluginContext(
         return Result.success(LocationResult(lat, lon, acc, precision))
     }
 
-    /** Phase 12 ABI 2 capability-handle decode. */
+    /**
+     * Phase 12 ABI 2 capability-handle decode. Triad 139 fix
+     * (both reviewers): use pickLong for size + expiresAtMs.
+     * 16 MB sizeBytes (1.6e7) fits in Int but real images
+     * easily run > 2 GB-byte-equivalent in some lossless
+     * formats; expiresAtMs (1.7e12) is far past Int.MAX_VALUE
+     * and silently fell to 0 before this fix.
+     */
     private fun decodeHandle(json: String): CapabilityHandle? {
         val handle = pickString(json, "handle") ?: return null
         val name = pickString(json, "name") ?: ""
         val mime = pickString(json, "mime") ?: "application/octet-stream"
-        val sizeBytes = (pickInt(json, "sizeBytes")?.toLong()) ?: 0L
-        val expiresAtMs = (pickInt(json, "expiresAtMs")?.toLong()) ?: 0L
+        val sizeBytes = pickLong(json, "sizeBytes") ?: 0L
+        val expiresAtMs = pickLong(json, "expiresAtMs") ?: 0L
         return CapabilityHandle(
             handle = handle,
             name = name,
@@ -382,6 +389,23 @@ internal class BridgePluginContext(
         while (end < json.length && (json[end].isDigit() || json[end] == '-')) end++
         if (end == from) return null
         return json.substring(from, end).toIntOrNull()
+    }
+
+    /**
+     * Triad 139 fix (both reviewers): wall-clock millisecond
+     * timestamps (~1.7e12) overflow Int.MAX_VALUE so pickInt
+     * returned null and expiresAtMs silently became 0. Long
+     * variant for the same parse logic.
+     */
+    private fun pickLong(json: String, key: String): Long? {
+        val k = "\"$key\":"
+        val start = json.indexOf(k)
+        if (start < 0) return null
+        val from = start + k.length
+        var end = from
+        while (end < json.length && (json[end].isDigit() || json[end] == '-')) end++
+        if (end == from) return null
+        return json.substring(from, end).toLongOrNull()
     }
 
     private fun pickDouble(json: String, key: String): Double? {

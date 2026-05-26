@@ -28,20 +28,24 @@ class CapabilityGrantStore(context: Context) {
 
     /**
      * Cache key = `pluginRowId|capability`. Value = `grantedAtMs`
-     * (or `null` if cached miss). Negative-caching keeps us from
-     * hitting Room for every denied invocation.
+     * or [CACHE_MISS_SENTINEL] for "we checked, no grant exists".
+     *
+     * Triad 139 codex #2 fix: ConcurrentHashMap can't store null
+     * values, so we use a sentinel for negative caching instead
+     * of letting `cache[key] = null` throw NPE at runtime.
      */
-    private val cache = ConcurrentHashMap<String, Long?>()
+    private val cache = ConcurrentHashMap<String, Long>()
     private val writeMutex = Mutex()
 
     suspend fun hasGrant(pluginRowId: String, capability: String): Boolean {
         val key = cacheKey(pluginRowId, capability)
         val cached = cache[key]
-        if (cached != null) return true
-        if (cache.containsKey(key)) return false
+        if (cached != null) {
+            return cached != CACHE_MISS_SENTINEL
+        }
         // Cache miss — consult DB and populate.
         val row = db.grants().get(pluginRowId, capability)
-        cache[key] = row?.grantedAtMs
+        cache[key] = row?.grantedAtMs ?: CACHE_MISS_SENTINEL
         return row != null
     }
 
@@ -70,7 +74,7 @@ class CapabilityGrantStore(context: Context) {
      */
     suspend fun revoke(pluginRowId: String, capability: String): Unit = writeMutex.withLock {
         db.grants().delete(pluginRowId, capability)
-        cache[cacheKey(pluginRowId, capability)] = null
+        cache[cacheKey(pluginRowId, capability)] = CACHE_MISS_SENTINEL
     }
 
     /**
@@ -83,7 +87,7 @@ class CapabilityGrantStore(context: Context) {
      */
     suspend fun reverifyGrant(pluginRowId: String, capability: String): Boolean {
         val row = db.grants().get(pluginRowId, capability)
-        cache[cacheKey(pluginRowId, capability)] = row?.grantedAtMs
+        cache[cacheKey(pluginRowId, capability)] = row?.grantedAtMs ?: CACHE_MISS_SENTINEL
         return row != null
     }
 
@@ -108,6 +112,16 @@ class CapabilityGrantStore(context: Context) {
 
     private fun cacheKey(pluginRowId: String, capability: String): String =
         "$pluginRowId|$capability"
+
+    companion object {
+        /**
+         * Sentinel for "we checked the DB, no grant exists" — kept
+         * in the value map because ConcurrentHashMap can't store
+         * null. Negative-MAX so it can never collide with a real
+         * grantedAtMs (which is a positive wall-clock time).
+         */
+        private const val CACHE_MISS_SENTINEL: Long = Long.MIN_VALUE
+    }
 
     /** Test helper — for tests that want to bypass the SecurePrefs path. */
     internal fun auditDaoForTest(): PluginCapabilityAuditDao = db.audit()

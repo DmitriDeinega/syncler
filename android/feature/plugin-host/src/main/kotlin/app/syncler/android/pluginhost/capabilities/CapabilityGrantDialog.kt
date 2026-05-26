@@ -10,6 +10,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Phase 12 (V2 #10) — in-app grant dialog for service-call
@@ -33,21 +35,27 @@ class CapabilityGrantPrompter {
     val pendingPrompt: StateFlow<PendingGrantPrompt?> = _pendingPrompt.asStateFlow()
 
     /**
+     * Mutex serializes concurrent requestGrant() callers. Triad
+     * 139 codex #3 fix: the previous version's check-then-set
+     * spin loop had a TOCTOU race where two waiters both
+     * observed null and overwrote the state flow.
+     */
+    private val promptMutex = Mutex()
+
+    /**
      * Suspend until the user accepts or rejects the prompt for
      * [pluginName] requesting [capability]. Returns `true` if
      * the user granted; `false` if denied or dismissed.
      *
-     * Only one prompt visible at a time — if a prompt is
-     * already pending, this one queues with a synchronization
-     * mutex. The spec calls out one concurrency rule for
-     * Activity-result calls but doesn't mention prompts, so we
-     * pick the safe serialization here.
+     * The Mutex serializes overlapping callers; while a prompt
+     * is up, subsequent requestGrant() invocations queue rather
+     * than racing the state flow.
      */
     suspend fun requestGrant(
         pluginRowId: String,
         pluginName: String,
         capability: String,
-    ): Boolean {
+    ): Boolean = promptMutex.withLock {
         val deferred = CompletableDeferred<Boolean>()
         val request = PendingGrantPrompt(
             pluginRowId = pluginRowId,
@@ -55,16 +63,17 @@ class CapabilityGrantPrompter {
             capability = capability,
             deferred = deferred,
         )
-        // Set the flow; bridge waits.
-        while (_pendingPrompt.value != null) {
-            // Cooperative wait: yield to another suspending point
-            // so the in-flight prompt can resolve. We don't queue
-            // formally here — the AndroidX prompts are rare enough
-            // that contention is unlikely in v0.1.
-            kotlinx.coroutines.delay(50)
-        }
         _pendingPrompt.value = request
-        return deferred.await()
+        try {
+            deferred.await()
+        } finally {
+            // Defensive: if the dialog never resolved (e.g.
+            // process death mid-prompt), clear the flow so
+            // subsequent prompts can take their turn.
+            if (_pendingPrompt.value === request) {
+                _pendingPrompt.value = null
+            }
+        }
     }
 
     /** Called from the dialog's Allow / Deny buttons. */

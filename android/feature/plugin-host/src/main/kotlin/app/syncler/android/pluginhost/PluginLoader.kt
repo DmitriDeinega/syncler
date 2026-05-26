@@ -26,6 +26,7 @@ import java.io.File
 import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
 import okhttp3.ConnectionSpec
@@ -46,6 +47,7 @@ class PluginLoader(
     private val instanceFactory: PluginInstanceFactory,
     private val auditLogger: AuditLogger = AuditLogger(),
 ) {
+
     suspend fun load(manifestUrl: String, expectedSenderPublicKey: ByteArray): Result<PluginInstance> =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -154,6 +156,11 @@ class PluginLoader(
                 app.syncler.android.pluginhost.capabilities.CapabilityActivityCoordinator(it).also { c -> c.attach() }
             }
             val capAuditDao = capGrantStore.auditDaoForTest()
+            // Phase 12: app-start handle wipe so any orphan
+            // staging files from a previous process death don't
+            // linger. Idempotent + cheap.
+            capHandleStore.wipeAll()
+
             return PluginLoader(
                 httpClient = buildPluginHttpClient(),
                 verifier = PluginSignatureVerifier(auditLogger),
@@ -375,10 +382,22 @@ class SandboxedPluginInstanceFactory(
         }
         override fun onPluginCrashed(reason: String) {
             auditLogger.denied(pluginId, "plugin_crashed", reason)
+            wipeCapabilityHandles(sandboxToken)
             PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
         }
         override fun onPluginUnloaded() {
+            // Triad 139 codex #6 fix: wipe the token's staging
+            // dir so handles from this plugin don't outlive the
+            // plugin process.
+            wipeCapabilityHandles(sandboxToken)
             PluginRegistry.handleSandboxTerminated(pluginId, sandboxToken)
+        }
+    }
+
+    private fun wipeCapabilityHandles(sandboxToken: Int) {
+        val store = capabilityHandleStore ?: return
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { store.wipeForToken(sandboxToken) }
         }
     }
 
