@@ -332,6 +332,38 @@ class StateMergerTest {
     }
 
     @Test
+    fun `V4 #19 cross-device merge picks later modifiedAt for prefs`() {
+        // Device A muted at T+0; device B set quiet hours at T+1.
+        // Merge: B wins, taking ITS full prefs row (later modifiedAt).
+        // codex 149 bigger picture — cross-device merge is the
+        // main regression risk for V4 #19.
+        val local = EncryptedUserState(
+            pluginSettings = mapOf(
+                "com.lottery" to PluginSettings(
+                    modifiedAt = "2026-05-26T10:00:00Z",
+                    muted = true,
+                ),
+            ),
+        )
+        val remote = EncryptedUserState(
+            pluginSettings = mapOf(
+                "com.lottery" to PluginSettings(
+                    modifiedAt = "2026-05-26T10:00:01Z",
+                    quietHours = QuietHours(true, 22, 7, "America/New_York"),
+                ),
+            ),
+        )
+        val merged = StateMerger.merge(local, remote)
+        val winning = merged.pluginSettings["com.lottery"]!!
+        // The later side (remote) wins entirely — the muted=true
+        // is intentionally lost (that's the "later write wins"
+        // contract). The user-visible behavior is that the most
+        // recently active device's settings are authoritative.
+        assertEquals(false, winning.muted)
+        assertEquals(22, winning.quietHours?.startLocalHour)
+    }
+
+    @Test
     fun `V4 #19 PluginSettings unknown cadence falls back to realtime`() {
         val o = JSONObject().apply {
             put("modified_at", "2026-05-26T22:00:00Z")
