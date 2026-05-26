@@ -80,6 +80,11 @@ def _publish_envelope(payload: PluginPublishRequest) -> bytes:
         envelope["entry_class"] = payload.entry_class
     if payload.native_sdk_abi is not None:
         envelope["native_sdk_abi"] = payload.native_sdk_abi
+    # V3 #14: live_inbound_url. Conditionally included so
+    # senders publishing without a live-channel webhook sign
+    # over the same byte-identical envelope they did pre-V3.
+    if payload.live_inbound_url is not None:
+        envelope["live_inbound_url"] = payload.live_inbound_url
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -141,6 +146,7 @@ async def publish(
             card_key_path=payload.card_key_path,
             entry_class=payload.entry_class,
             native_sdk_abi=payload.native_sdk_abi,
+            live_inbound_url=payload.live_inbound_url,
         )
     except InvalidVersionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -196,6 +202,7 @@ async def latest(
         card_key_path=plugin.card_key_path,
         entry_class=plugin.entry_class,
         native_sdk_abi=plugin.native_sdk_abi,
+        live_inbound_url=plugin.live_inbound_url,
     )
 
 
@@ -246,6 +253,7 @@ async def by_id(
         card_key_path=plugin.card_key_path,
         entry_class=plugin.entry_class,
         native_sdk_abi=plugin.native_sdk_abi,
+        live_inbound_url=plugin.live_inbound_url,
     )
 
 

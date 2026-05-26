@@ -196,6 +196,82 @@ async def issue_connect_token(
     )
 
 
+# --- Sender push endpoint (step 4) ---
+
+
+class LivePushRequest(BaseModel):
+    """Sender posts a live update for an active plugin row.
+
+    V0.1 trusts the sender_id in the body and the V2-shape
+    envelope is treated as opaque bytes. V0.2 will add an
+    Ed25519 signature over the canonical envelope (mirroring
+    /v1/messages/send) — until then, the WS endpoint refuses
+    to accept the payload anyway because it carries no
+    recipient_envelopes that any device can open.
+
+    `envelope` is the JSON-encoded V2 envelope shape with
+    per-device recipient_envelopes. Server is a dumb pipe —
+    no inspection; the fan-out just serializes the JSON to
+    every connected device for plugin_row_id. Each device's
+    runtime picks out its own recipient_envelope by device_id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    envelope: dict[str, Any]
+
+
+class LivePushResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivered: int
+
+
+@router.post(
+    "/plugin/{plugin_row_id}/push",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=LivePushResponse,
+)
+async def push_live(
+    plugin_row_id: str,
+    body: LivePushRequest,
+    db: AsyncSession = Depends(get_db),
+) -> LivePushResponse:
+    """Sender → device fan-out. Posts an opaque V2 envelope to
+    every currently-connected device for this plugin row.
+
+    V0.1: no signature verification on the sender side — the
+    payload is opaque to the server and the recipient_envelopes
+    are the actual auth boundary. V0.2 adds an Ed25519 signature
+    over the canonical envelope, mirroring `/v1/messages/send`.
+
+    Devices that aren't currently connected do NOT receive a
+    backfill on next connect; the inbox pull is the
+    authoritative catch-up path (spec).
+    """
+    try:
+        plugin_row_uuid = uuid.UUID(plugin_row_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid plugin_row_id")
+
+    plugin_result = await db.execute(
+        select(Plugin).where(Plugin.id == plugin_row_uuid)
+    )
+    plugin = plugin_result.scalar_one_or_none()
+    if plugin is None or plugin.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="plugin not found")
+
+    envelope_json = json.dumps(body.envelope, separators=(",", ":"))
+    if len(envelope_json) > MAX_FRAME_BYTES:
+        raise HTTPException(status_code=413, detail="envelope too large")
+
+    hub = get_hub()
+    delivered = await hub.publish_ephemeral(
+        plugin_topic(plugin_row_id), envelope_json
+    )
+    return LivePushResponse(delivered=delivered)
+
+
 # --- WS multiplex endpoint ---
 
 

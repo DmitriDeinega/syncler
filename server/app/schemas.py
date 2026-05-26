@@ -777,6 +777,13 @@ class PluginPublishRequest(BaseModel):
     # Both required iff renderer == "native_kotlin"; both forbidden
     # otherwise. Spec: docs/plugin-host-native-kotlin.md.
     entry_class: str | None = None
+    # V3 #14: sender-registered webhook URL for device-originated
+    # live channel frames. When the device sends a frame, the
+    # server forwards it here with an Ed25519 signature. Optional
+    # — plugins that only need server → device push omit this.
+    # HTTPS required in production; HTTP allowed only in
+    # development. Spec: docs/live-channel.md "Inbound webhook".
+    live_inbound_url: str | None = None
     native_sdk_abi: int | None = None
     sender_signature: str  # base64 Ed25519 over canonical publish body
 
@@ -941,6 +948,12 @@ class PluginLatestResponse(BaseModel):
     # template; both populated for native_kotlin.
     entry_class: str | None = None
     native_sdk_abi: int | None = None
+    # V3 #14: sender's live-channel inbound webhook URL.
+    # Surfaced to devices so plugins can know whether to expect
+    # device→sender frames to be acknowledged (this URL is
+    # set) or rejected (it's null and the sender chose
+    # one-way-push only). Spec: docs/live-channel.md.
+    live_inbound_url: str | None = None
 
 
 # M11.4: classified revocation reasons. Devices use this to decide UX:

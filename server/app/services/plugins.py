@@ -207,6 +207,7 @@ async def publish_plugin(
     card_key_path: str | None = None,
     entry_class: str | None = None,
     native_sdk_abi: int | None = None,
+    live_inbound_url: str | None = None,
 ) -> Plugin:
     new_key = _parse_version(version)
 
@@ -290,6 +291,7 @@ async def publish_plugin(
         card_key_path=card_key_path,
         entry_class=entry_class,
         native_sdk_abi=native_sdk_abi,
+        live_inbound_url=live_inbound_url,
         capabilities=capabilities,
         endpoints=endpoints,
     )

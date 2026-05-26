@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     firebase_service_account_path: str | None = None
     environment: Literal["development", "production"] = "development"
 
+    # V3 #14 step 5: Ed25519 32-byte seed used by the live
+    # webhook forwarder to sign requests forwarded to sender
+    # webhooks. Senders verify against the corresponding public
+    # key advertised at a well-known endpoint (V0.2 admin
+    # surface). V0.1 dev posture: empty seed = no signing key
+    # available, webhook forwarding falls back to "delivery
+    # disabled" until the env var is set.
+    server_signing_seed_b64: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

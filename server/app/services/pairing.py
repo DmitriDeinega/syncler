@@ -205,6 +205,21 @@ async def revoke_pairing(
         pairing.revoked_at = datetime.now(UTC)
         await db.commit()
         await db.refresh(pairing)
+        # V3 #14 step 7: pairing revoke fires a control event
+        # so any open live-channel WS sockets for this user
+        # close immediately. We don't know which device opened
+        # the socket so we broadcast user-wide (device_id null)
+        # — the WS handler closes any socket whose
+        # binding.user_id matches.
+        try:
+            from app.live.hub import get_hub, pairing_revocation_topic
+            import json as _json
+            await get_hub().publish_control(
+                pairing_revocation_topic(),
+                _json.dumps({"user_id": str(user.id), "device_id": None}),
+            )
+        except Exception:
+            pass
     return pairing
 
 

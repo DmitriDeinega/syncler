@@ -185,6 +185,10 @@ class Plugin(Base):
     # otherwise. Spec: docs/plugin-host-native-kotlin.md.
     entry_class: Mapped[str | None] = mapped_column(Text)
     native_sdk_abi: Mapped[int | None] = mapped_column(Integer)
+    # V3 #14: sender-registered webhook URL for device-originated
+    # live channel frames. NULL when the plugin uses one-way push
+    # only (sender → device). Spec: docs/live-channel.md.
+    live_inbound_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

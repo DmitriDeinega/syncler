@@ -160,6 +160,27 @@ async def revoke_device(db: AsyncSession, *, user_id: UUID, device_id: UUID) -> 
     await _bump_device_directory_version(db, user_id=user_id)
     await db.commit()
 
+    # V3 #14 step 7: publish a revocation event on the control
+    # bus so any open WS sockets bound to this (user, device)
+    # close immediately (codex 141 #7). The hub broadcasts to
+    # every WS worker subscribed to the topic; sockets where
+    # the event matches the binding close with 4401.
+    try:
+        from app.live.hub import get_hub, pairing_revocation_topic
+        import json as _json
+        await get_hub().publish_control(
+            pairing_revocation_topic(),
+            _json.dumps({
+                "user_id": str(user_id),
+                "device_id": str(device_id),
+            }),
+        )
+    except Exception:
+        # Fail-open: revocation succeeded; the broadcast is
+        # best-effort. WS sockets will eventually hit the
+        # heartbeat re-check (V0.2) or 60s pong deadline.
+        pass
+
 
 async def list_devices(db: AsyncSession, *, user_id: UUID) -> list[Device]:
     result = await db.execute(select(Device).where(Device.user_id == user_id).order_by(Device.created_at.asc()))
