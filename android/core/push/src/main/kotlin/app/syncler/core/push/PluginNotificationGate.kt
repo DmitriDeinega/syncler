@@ -38,7 +38,6 @@ import javax.inject.Singleton
 @Singleton
 class PluginNotificationGate @Inject constructor(
     private val userState: UserStateMutator,
-    private val clockProvider: () -> ZonedDateTime = { ZonedDateTime.now() },
 ) {
 
     enum class Decision {
@@ -56,7 +55,7 @@ class PluginNotificationGate @Inject constructor(
      */
     fun shouldPost(pluginIdentifier: String): Decision {
         val prefs: PluginSettings? = userState.state.value.pluginSettings[pluginIdentifier]
-        return decide(prefs, clockProvider())
+        return decide(prefs, ZonedDateTime.now())
     }
 
     companion object {
