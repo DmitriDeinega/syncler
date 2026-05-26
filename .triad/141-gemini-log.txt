@@ -1,0 +1,32 @@
+Warning: True color (24-bit) support not detected. Using a terminal with true color enabled will result in a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+Review of **Consultation 141 — V3 design**.
+
+Overall, the design is a logical evolution of V2. The "dumb pipe" server model preserves E2EE integrity.
+
+### Verdicts on Concerns
+
+1.  **Subprotocol vs Query-param: OK.** Subprotocol is the industry standard for securing WS handshakes. Native clients and modern browsers handle this cleanly. Ensure load balancers (e.g., Nginx/Envoy) are configured to pass the header.
+2.  **Multiplexing: OK.** Absolute requirement for mobile. Opening 10 sockets for 10 channels would be a battery and connection-limit disaster.
+3.  **Sender Webhook: DESIGN.** Inbound (Plugin → Sender) needs server-to-sender authentication. The server must sign these requests (e.g., using a system-wide "Syncler-Server" key) so the sender can verify the message originated from a trusted hub and not a random bot.
+4.  **Encryption Metadata: OK.** As long as `plugin_row_id` is an opaque UUID, the leak is minimal. If it's a serial integer, it's a metadata leak (enumeration risk). Use UUIDs.
+5.  **Throughput Cap: OK.** 16 KB/s is plenty for chat and cursors.
+6.  **Heartbeat Interval: NIT.** Suggest 20s/60s. Some mobile carrier NAT gateways and aggressive load balancers kill "idle" TCP streams at exactly 60s.
+7.  **Auth + Pairing Timing: DESIGN.** Relying on heartbeat is too slow for revocation. Suggest: when a pairing is deleted via the API, the server should publish an `auth.invalidate` message to the internal bus/Redis. The WS worker listening to that `plugin_row_id` should catch it and kill the socket immediately.
+8.  **Native SDK ABI Bump: OK.** Since we are in v0.1 and have no legacy native plugins in the wild, clean breaks are preferred over "feature-flagged" mess.
+9.  **#16 Templating Patch: DESIGN.** This is the riskiest item. A `card.patch` must still be a V2-style E2EE envelope. If the sender sends a plaintext "value", the server sees the data, breaking the privacy contract. The patch should be an encrypted payload that only the device can decrypt and apply to its local template state. **Needs its own design triad.**
+10. **#17 Redis Ordering: FIX.** Do not use Redis Pub/Sub if you care about ordering or reliability. Use **Redis Streams (XADD)**. This allows the host to request a "read from last seen ID" if the socket blips, providing a small buffer of persistence that Pub/Sub lacks.
+
+### Hook Points & Strategy
+
+*   **Hook Points:** The hooks for #15 and #17 are sufficient. They are implementation details hidden behind the `_BroadcastHub` interface and SDK ergonomics.
+*   **Triad Sequencing:**
+    *   **Proceed with #14 triad** (this one) to finalize the WS wire protocol.
+    *   **Schedule a dedicated triad for #16 (Field-level patches)** before implementation. The E2EE envelope structure for partial updates is non-trivial and impacts how the host-side renderer functions.
+    *   **Combine #15 and #17** into the implementation phase of #14.
+
+### Missing Considerations
+
+*   **Binary vs Text:** The design mentions "frames" and "String" in SDKs. Confirm if we support binary (Protobuf/CBOR) for things like live cursors to save on E2EE overhead (base64 bloat). V0.1 can stay String/JSON for simplicity, but the ABI should allow for binary frames.
+*   **Socket Exhaustion:** Define a limit for total concurrent WS connections per worker (FastAPI) to prevent OOM/FD exhaustion.
+*   **Client Backoff:** The SDK must implement jittered exponential backoff to avoid a "thundering herd" when the server restarts.
