@@ -122,17 +122,20 @@ export interface PlatformBridge {
 }
 
 declare global {
+  // The dispatcher's exact hook set lives in `bridge.ts` as
+  // `DispatchHook`. Re-declaring it here would require sync; we use
+  // a structural type (any string) here and rely on bridge.ts to
+  // narrow on dispatch. Keeps platform.ts independent of every new
+  // hook addition (V4 #21 adds getNotification; without this loose
+  // type each addition would mean a parallel edit here).
   var platform: PlatformBridge | undefined;
   var __syncler_internal_dispatch:
-    | ((
-        hook: 'onMessage' | 'onAction' | 'onDismiss',
-        args: unknown[]
-      ) => Promise<unknown>)
+    | ((hook: string, args: unknown[]) => Promise<unknown>)
     | undefined;
   interface Window {
     platform?: PlatformBridge;
     __syncler_internal_dispatch?: (
-      hook: 'onMessage' | 'onAction' | 'onDismiss',
+      hook: string,
       args: unknown[]
     ) => Promise<unknown>;
   }

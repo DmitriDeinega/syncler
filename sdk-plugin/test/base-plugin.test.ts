@@ -22,11 +22,15 @@ class OverridesPlugin extends BasePlugin {
     return `<div>${data.text}</div>`;
   }
 
-  async onMessage(payload: { text: string }) {
-    return { title: 'Title', body: payload.text };
+  async getNotification(event: import('../src/base-plugin').NotificationEvent) {
+    if (event.kind === 'message') {
+      const payload = event.payload as { text: string };
+      return { title: 'Title', body: payload.text };
+    }
+    return undefined;
   }
 
-  async onAction(actionName: string, payload: { id: string }): Promise<void> {
+  async onUserAction(actionName: string, payload: { id: string }): Promise<void> {
     await Promise.resolve(`${actionName}:${payload.id}`);
   }
 
@@ -45,11 +49,11 @@ class ThrowingPlugin extends BasePlugin {
     return '<div>throwing</div>';
   }
 
-  async onMessage(): Promise<void> {
+  async getNotification(): Promise<void> {
     throw new Error('boom');
   }
 
-  async onAction(): Promise<void> {
+  async onUserAction(): Promise<void> {
     throw new Error('action boom');
   }
 
@@ -65,8 +69,14 @@ describe('BasePlugin', () => {
 
   it('default hooks return undefined', async () => {
     const plugin = new DefaultsPlugin();
-    await expect(plugin.onMessage({})).resolves.toBeUndefined();
-    await expect(plugin.onAction('open', {})).resolves.toBeUndefined();
+    await expect(
+      plugin.getNotification({
+        kind: 'message',
+        cardType: 'event',
+        payload: {},
+      })
+    ).resolves.toBeUndefined();
+    await expect(plugin.onUserAction('open', {})).resolves.toBeUndefined();
     await expect(plugin.onDismiss('device')).resolves.toBeUndefined();
     // Triad 158 — default live hooks are also no-ops so a plugin
     // that doesn't use the live channel doesn't need to override.
@@ -77,11 +87,17 @@ describe('BasePlugin', () => {
 
   it('subclass overrides are called', async () => {
     const plugin = new OverridesPlugin();
-    await expect(plugin.onMessage({ text: 'hello' })).resolves.toEqual({
+    await expect(
+      plugin.getNotification({
+        kind: 'message',
+        cardType: 'event',
+        payload: { text: 'hello' },
+      })
+    ).resolves.toEqual({
       title: 'Title',
       body: 'hello',
     });
-    await expect(plugin.onAction('open', { id: '1' })).resolves.toBeUndefined();
+    await expect(plugin.onUserAction('open', { id: '1' })).resolves.toBeUndefined();
     await expect(plugin.onDismiss('device-1')).resolves.toEqual({
       behavior: DismissBehavior.DISMISS_LOCAL_ONLY,
       payload: { deviceId: 'device-1' },
@@ -92,10 +108,12 @@ describe('BasePlugin', () => {
     registerPlugin(new OverridesPlugin());
 
     await expect(
-      dispatchPluginHook('onMessage', [{ text: 'hello' }])
+      dispatchPluginHook('getNotification', [
+        { kind: 'message', cardType: 'event', payload: { text: 'hello' } },
+      ])
     ).resolves.toEqual({ title: 'Title', body: 'hello' });
     await expect(
-      dispatchPluginHook('onAction', ['open', { id: '1' }])
+      dispatchPluginHook('onUserAction', ['open', { id: '1' }])
     ).resolves.toBeUndefined();
     await expect(
       dispatchPluginHook('onDismiss', ['device-1'])
@@ -108,8 +126,12 @@ describe('BasePlugin', () => {
   it('dispatcher propagates hook errors as rejected promises', async () => {
     registerPlugin(new ThrowingPlugin());
 
-    await expect(dispatchPluginHook('onMessage', [{}])).rejects.toThrow('boom');
-    await expect(dispatchPluginHook('onAction', ['open', {}])).rejects.toThrow(
+    await expect(
+      dispatchPluginHook('getNotification', [
+        { kind: 'message', cardType: 'event', payload: {} },
+      ])
+    ).rejects.toThrow('boom');
+    await expect(dispatchPluginHook('onUserAction', ['open', {}])).rejects.toThrow(
       'action boom'
     );
     await expect(dispatchPluginHook('onDismiss', ['device-1'])).rejects.toThrow(

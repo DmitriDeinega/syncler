@@ -19,6 +19,7 @@ export {
   BasePlugin,
   type DismissAction,
   type NotificationDescriptor,
+  type NotificationEvent,
 } from './base-plugin';
 export {
   clearRegisteredPlugin,

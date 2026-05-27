@@ -13,8 +13,8 @@ import { assertPluginManifest, setRegisteredManifest } from './manifest';
  * because the bridge here had no case for them.
  */
 export type DispatchHook =
-  | 'onMessage'
-  | 'onAction'
+  | 'getNotification'
+  | 'onUserAction'
   | 'onDismiss'
   | 'render'
   | 'onLiveMessage'
@@ -70,10 +70,15 @@ export async function dispatchPluginHook(
   }
 
   switch (hook) {
-    case 'onMessage':
-      return await registeredPlugin.onMessage(args[0]);
-    case 'onAction':
-      return await registeredPlugin.onAction(
+    case 'getNotification':
+      // V4 #21 — single notification entry point. args[0] is the
+      // NotificationEvent (already a JS object on the JS side; the
+      // host serialized it as JSON and re-parsed via JSON.parse
+      // before the dispatch call). Plugin returns
+      // NotificationDescriptor | void.
+      return await registeredPlugin.getNotification(args[0] as never);
+    case 'onUserAction':
+      return await registeredPlugin.onUserAction(
         asString(args[0], 'actionName'),
         args[1]
       );
@@ -119,8 +124,12 @@ export async function dispatchPluginHook(
  * Installs `__syncler_internal_dispatch` on `window`/`globalThis` for the native host.
  */
 export function installBridgeDispatcher(): void {
-  const dispatch = (hook: DispatchHook, args: unknown[]): Promise<unknown> =>
-    dispatchPluginHook(hook, args);
+  // The exported dispatcher accepts any string at the wire level —
+  // host-side TypeScript / Kotlin doesn't know which hooks exist on
+  // the loaded plugin. `dispatchPluginHook` is the narrowing
+  // boundary: unknown hooks throw via `assertNever` in the switch.
+  const dispatch = (hook: string, args: unknown[]): Promise<unknown> =>
+    dispatchPluginHook(hook as DispatchHook, args);
   globalThis.__syncler_internal_dispatch = dispatch;
   if (globalThis.window) {
     globalThis.window.__syncler_internal_dispatch = dispatch;

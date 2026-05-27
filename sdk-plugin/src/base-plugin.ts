@@ -2,7 +2,10 @@ import { DismissBehavior } from './enums';
 import type { PluginManifest } from './manifest';
 
 /**
- * Notification returned by `onMessage` for display by the host.
+ * Descriptor returned by [BasePlugin.getNotification] to drive an
+ * Android notification. Returning `void` (or undefined) from
+ * [BasePlugin.getNotification] suppresses the notification — the
+ * plugin can decide which inbound events deserve user attention.
  */
 export interface NotificationDescriptor {
   /** Notification title. */
@@ -14,6 +17,46 @@ export interface NotificationDescriptor {
   /** Optional host grouping key. */
   groupId?: string;
 }
+
+/**
+ * Event passed to [BasePlugin.getNotification]. Discriminated by
+ * [kind]:
+ *
+ * - `message`: a fresh event-type message arrived. No prior payload.
+ * - `card_arrived`: this device observed the first upsert for
+ *   `cardKey`. `previousPayload` is always `null` by construction.
+ * - `card_updated`: an upsert OR a merged card.patch produced a
+ *   newer canonical payload for `cardKey`. `previousPayload` is the
+ *   last payload THIS device observed (or `null` if the device
+ *   missed prior versions). `updateSource` tells the plugin whether
+ *   the change came from a full upsert or a field-level patch — most
+ *   plugins won't care; included so notification logic that does
+ *   care (e.g. "only notify on full state replacement") has it.
+ *
+ * V4 #21 / triad 169 — designed clean-slate; previous
+ * `BasePlugin.onMessage` is subsumed by the `message` kind.
+ */
+export type NotificationEvent =
+  | {
+      kind: 'message';
+      cardType: 'event';
+      payload: unknown;
+    }
+  | {
+      kind: 'card_arrived';
+      cardType: 'live';
+      cardKey: string;
+      payload: unknown;
+      previousPayload: null;
+    }
+  | {
+      kind: 'card_updated';
+      cardType: 'live';
+      cardKey: string;
+      payload: unknown;
+      previousPayload: unknown | null;
+      updateSource: 'upsert' | 'patch';
+    };
 
 /**
  * Dismiss action returned by a custom dismiss callback.
@@ -38,18 +81,47 @@ export abstract class BasePlugin {
   abstract render(data: unknown): string | Promise<string>;
 
   /**
-   * Handles an inbound decrypted message. Defaults to no notification.
+   * V4 #21 — single notification entry point. Fires for every
+   * inbound event the platform thinks MIGHT warrant a user-visible
+   * notification (event-message arrival, live-card arrival, live-
+   * card update). Return a [NotificationDescriptor] to post a
+   * notification, return `void`/undefined to suppress.
+   *
+   * The plugin owns the "is this notification-worthy?" decision —
+   * the platform stays content-blind. Examples:
+   *
+   * - High-frequency live card (per-second tick): return `void` for
+   *   most updates; return a descriptor only on a meaningful
+   *   state transition by comparing `payload` vs `previousPayload`.
+   * - Event message: usually return a descriptor — these are
+   *   delivered explicitly by the sender.
+   * - First-arrival: most plugins return a descriptor; some prefer
+   *   to keep the surface silent until a state change happens.
+   *
+   * Server-side wake-up policy is declared in the plugin manifest's
+   * `notifications` block: `messageReceived` and `cardArrived`
+   * default to `true`; `cardUpdated` defaults to `false` so
+   * high-frequency cards don't drain battery on every patch.
+   * Plugins that want update notifications must opt in.
+   *
+   * Triad 169 spec.
    */
-  async onMessage(
-    _decryptedPayload: unknown
+  async getNotification(
+    _event: NotificationEvent
   ): Promise<NotificationDescriptor | void> {
     return undefined;
   }
 
   /**
-   * Handles a user action emitted by the rendered card. Defaults to no-op.
+   * Handles a user-initiated action emitted by the rendered card
+   * (e.g. a button tap that the plugin's HTML wired up via
+   * `data-action`). Defaults to no-op.
+   *
+   * V4 #21 rename: was `onAction` pre-V4-#21. The new name
+   * disambiguates from server-pushed events handled by
+   * [getNotification].
    */
-  async onAction(_actionName: string, _payload: unknown): Promise<void> {
+  async onUserAction(_actionName: string, _payload: unknown): Promise<void> {
     return undefined;
   }
 
