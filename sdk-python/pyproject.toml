@@ -1,15 +1,33 @@
 [project]
 name = "syncler"
-version = "0.1.0"
-description = "Syncler sender SDK (Python)"
+version = "0.3.1"
+description = "Syncler sender SDK (Python) — send end-to-end encrypted plugin messages from your backend into the Syncler platform. Closed beta; API surface unstable."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "cryptography==45.0.3",
-    "pyhpke>=0.6,<1",
-    "requests==2.32.3",
-    "qrcode[pil]==8.0",
+license = { text = "Apache-2.0" }
+authors = [{ name = "Syncler" }]
+keywords = ["syncler", "e2ee", "plugin", "messaging", "sdk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications",
+    "Topic :: Security :: Cryptography",
 ]
+dependencies = [
+    "cryptography>=45.0.0,<46",
+    "pyhpke>=0.6,<1",
+    "requests>=2.32,<3",
+    "qrcode[pil]>=8.0,<9",
+]
+
+[project.urls]
+Homepage = "https://github.com/DmitriDeinega/syncler"
+Issues = "https://github.com/DmitriDeinega/syncler/issues"
 
 [project.optional-dependencies]
 dev = [

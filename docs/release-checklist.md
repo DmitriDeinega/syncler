@@ -124,6 +124,59 @@ you're about to cut. Bump them in the same commit, not after.
 If the SDK is `0.x.y`, increment the patch for every bug-fix
 drop (V3 #16 → 0.3.1 → 0.3.2 etc).
 
+## 7a. Publishing SDKs to public registries
+
+Public PyPI + npm is the chosen distribution channel (triad
+162 decision). The SDK is closed-beta, 0.x, with the API-
+unstable disclaimer in both READMEs. Server/app/broker code
+stays private in the GitHub repo; only the SDK source ships.
+
+**sdk-python → PyPI:**
+
+```sh
+cd sdk-python
+rm -rf dist build *.egg-info
+python -m build                          # builds wheel + sdist
+python -m twine check dist/*             # MUST report PASSED on both
+python -m twine upload dist/*            # asks for PyPI token
+```
+
+Use a PyPI API token (https://pypi.org/manage/account/token/),
+scoped to the `syncler` project. Store it in `~/.pypirc`:
+
+```ini
+[pypi]
+username = __token__
+password = pypi-AgEIc...your-token
+```
+
+After upload, verify `pip install syncler==<version>` in a
+throwaway venv on a different machine.
+
+**sdk-plugin → npm:**
+
+```sh
+cd sdk-plugin
+rm -rf dist
+npm install
+npm run build
+npm test
+npm pack --dry-run | tail -20            # eyeball file list
+npm login                                # one-time per machine
+npm publish --access public
+```
+
+The `prepublishOnly` script in `package.json` re-runs build +
+test before publish, so a broken tree can't ship.
+
+After upload, verify `npm install @syncler/plugin-sdk@<version>`
+in a throwaway directory.
+
+> **Reminder:** PyPI + npm let you yank a version but not
+> delete one. Double-check the version number and the
+> contents (steps 1-6 above) BEFORE running the upload
+> command.
+
 ## 8. After the partner has the artifact
 
 Tell them, in the handoff message:

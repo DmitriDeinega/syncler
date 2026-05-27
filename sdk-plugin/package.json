@@ -1,6 +1,8 @@
 {
   "name": "@syncler/plugin-sdk",
-  "version": "0.1.0",
+  "version": "0.3.1",
+  "description": "TypeScript SDK for Syncler WebView plugins. Closed beta; API surface unstable.",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,13 +12,37 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "syncler",
+    "e2ee",
+    "plugin",
+    "sdk",
+    "webview"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DmitriDeinega/syncler.git",
+    "directory": "sdk-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/DmitriDeinega/syncler/issues"
+  },
+  "homepage": "https://github.com/DmitriDeinega/syncler#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc && esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=dist/index.js",
     "build:example": "esbuild examples/minimal/src/plugin.ts --bundle --format=iife --global-name=SynclerPluginExports --platform=browser --alias:@syncler/plugin-sdk=./src/index.ts --outfile=examples/minimal/dist/plugin.bundle.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
-    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\""
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+    "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

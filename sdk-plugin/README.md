@@ -2,10 +2,24 @@
 
 TypeScript SDK for Syncler WebView plugins. Native bridge implementation is provided by the host application.
 
+> **Closed beta.** API surface is unstable and may change without
+> notice between `0.x` releases. Plugins built against this SDK
+> are signed and published to a Syncler server you must have access
+> to — `npm install @syncler/plugin-sdk` works, but it's only
+> useful in combination with a provisioned Syncler sender + server
+> base URL.
+
 ## Install
 
 ```sh
+npm install @syncler/plugin-sdk
+```
+
+## Build the SDK locally (only needed if developing the SDK itself)
+
+```sh
 npm install
+npm run build
 ```
 
 ## Build

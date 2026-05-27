@@ -2,10 +2,17 @@
 
 Send messages from your backend into the Syncler platform.
 
+> **Closed beta.** API surface is unstable and may change without
+> notice between `0.x` releases. The server it talks to is a private
+> deployment — `pip install syncler` works, but you also need a
+> Syncler base URL provisioned for your sender. Contact the Syncler
+> team if you don't have one.
+
 ## Install
 
 ```sh
-pip install syncler
+pip install syncler            # default — covers V1 manual pairing + V2 sends
+pip install 'syncler[broker]'  # adds the FastAPI broker app for V1.5 automated pairing
 ```
 
 ## Quickstart
