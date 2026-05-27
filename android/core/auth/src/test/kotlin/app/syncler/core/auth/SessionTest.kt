@@ -49,7 +49,9 @@ class SessionTest {
 
         // Simulate a fresh login.
         Session(tokenStore, masterKeyStore).authenticate("jwt", masterKey)
-        assertArrayEquals(masterKey, masterKeyStore.read())
+        val persisted = masterKeyStore.read()!!
+        assertArrayEquals(masterKey, persisted.masterKey)
+        assertEquals(1, persisted.keyGeneration)
         assertEquals("jwt", tokenStore.token)
 
         // New Session instance (simulates process restart). Should
@@ -59,6 +61,50 @@ class SessionTest {
             assertEquals(true, awaitItem())
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    /**
+     * Triad 167 codex must-fix: cold start MUST restore the
+     * persisted keyGeneration, not hardcode 1. Without this, a
+     * rotation persisted in a previous process is silently undone
+     * on next cold start.
+     */
+    @Test
+    fun coldStartRestoresPersistedKeyGeneration() = runTest {
+        val masterKey = ByteArray(KEY_SIZE_BYTES) { 0x11.toByte() }
+        val masterKeyStore = InMemoryMasterKeyStore()
+        val tokenStore = newTokenStore()
+        // Simulate a session that was authenticated under gen 5 and
+        // then process died.
+        Session(tokenStore, masterKeyStore).authenticate(
+            token = "jwt", masterKey = masterKey, keyGeneration = 5,
+        )
+
+        val coldStart = Session(tokenStore, masterKeyStore)
+        assertEquals(5, coldStart.currentKeyGeneration())
+    }
+
+    /**
+     * Triad 167 codex must-fix: updateAfterRotation MUST persist
+     * the new (key, generation) atomically so a process death right
+     * after rotation cannot resurrect the stale key on cold start.
+     */
+    @Test
+    fun updateAfterRotationPersistsNewKeyAndGeneration() = runTest {
+        val initialKey = ByteArray(KEY_SIZE_BYTES) { 0x22.toByte() }
+        val rotatedKey = ByteArray(KEY_SIZE_BYTES) { 0x33.toByte() }
+        val masterKeyStore = InMemoryMasterKeyStore()
+        val tokenStore = newTokenStore()
+        val session = Session(tokenStore, masterKeyStore)
+        session.authenticate("jwt", initialKey, keyGeneration = 1)
+
+        session.updateAfterRotation(newMasterKey = rotatedKey, newKeyGeneration = 2)
+
+        val persisted = masterKeyStore.read()!!
+        assertArrayEquals(rotatedKey, persisted.masterKey)
+        assertEquals(2, persisted.keyGeneration)
+        // Cold start sees the rotated state, not the original.
+        assertEquals(2, Session(tokenStore, masterKeyStore).currentKeyGeneration())
     }
 
     /**
@@ -75,7 +121,7 @@ class SessionTest {
         val session = Session(tokenStore, masterKeyStore)
 
         session.authenticate("jwt", masterKey)
-        assertArrayEquals(masterKey, masterKeyStore.read())
+        assertArrayEquals(masterKey, masterKeyStore.read()!!.masterKey)
 
         session.logout()
         assertNull(masterKeyStore.read())

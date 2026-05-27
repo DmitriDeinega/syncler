@@ -56,6 +56,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.fragment.app.FragmentActivity
 
 @HiltViewModel
 class PairingViewModel @Inject constructor(
@@ -63,6 +65,15 @@ class PairingViewModel @Inject constructor(
     private val session: Session,
     pairedSenderStore: PairedSenderStore,
     private val muteStore: app.syncler.core.storage.MuteStore,
+    /**
+     * V4 #20 triad 167 must-fix: the post-pairing "success card"
+     * exposed user_id + pairing_key_hex in plaintext as soon as the
+     * pairing completed. Codex called this out as a sensitive
+     * platform reveal we agreed to gate in 166 but missed in 167.
+     * The screen now hides both values behind a biometric prompt.
+     */
+    val sensitiveActionGate: app.syncler.core.auth.SensitiveActionGate,
+    val biometricUnlocker: app.syncler.core.auth.BiometricUnlocker,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<PairingState>(PairingState.Idle)
@@ -297,6 +308,7 @@ fun PairingScreen(
                     userId = viewModel.currentUserId(),
                     onCopy = { label, value -> copyToClipboard(context, label, value) },
                     onDone = { viewModel.reset(); onDone() },
+                    viewModel = viewModel,
                 )
                 is PairingState.BootstrapPosting -> Text("Notifying ${s.sender.senderName}…")
                 is PairingState.BootstrapSucceeded -> BootstrapSuccessCard(
@@ -313,6 +325,7 @@ fun PairingScreen(
                         userId = viewModel.currentUserId(),
                         onCopy = { label, value -> copyToClipboard(context, label, value) },
                         onDone = { viewModel.reset(); onDone() },
+                        viewModel = viewModel,
                     )
                 }
                 is PairingState.BootstrapHardError -> Text(
@@ -387,8 +400,17 @@ private fun PairingSuccessCard(
     userId: String?,
     onCopy: (label: String, value: String) -> Unit,
     onDone: () -> Unit,
+    viewModel: PairingViewModel,
 ) {
     val pairingKeyHex = remember(sender) { sender.pairingKey.toHex() }
+    // V4 #20 triad 167 must-fix: gate the user_id + pairing_key_hex
+    // reveals behind a biometric prompt. Previously these rendered
+    // as plaintext as soon as pairing completed — that's a
+    // sensitive surface that should consult SensitiveActionGate.
+    val activity = LocalContext.current as? FragmentActivity
+    val scope = rememberCoroutineScope()
+    val gateState by viewModel.sensitiveActionGate.isUnlockedFlow.collectAsState()
+    val unlocked = gateState != null && viewModel.sensitiveActionGate.isUnlocked()
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -400,8 +422,32 @@ private fun PairingSuccessCard(
                     "In V1.5 the bootstrap exchange wires this automatically — this screen goes away.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            CopyableField(label = "user_id", value = userId ?: "(no session)", onCopy = onCopy)
-            CopyableField(label = "pairing_key_hex", value = pairingKeyHex, onCopy = onCopy)
+            if (unlocked) {
+                CopyableField(label = "user_id", value = userId ?: "(no session)", onCopy = onCopy)
+                CopyableField(label = "pairing_key_hex", value = pairingKeyHex, onCopy = onCopy)
+            } else {
+                Text(
+                    text = "user_id and pairing_key_hex are sensitive. Confirm it's you to reveal them.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = {
+                        val act = activity ?: return@OutlinedButton
+                        scope.launch {
+                            viewModel.biometricUnlocker.promptForUnlock(
+                                activity = act,
+                                title = "Reveal pairing secrets",
+                                subtitle = "Confirm it's you to view user_id and pairing key",
+                            )
+                            // Successful unlock flips the gate; the
+                            // Composable re-collects gateState and
+                            // shows the CopyableFields.
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Reveal pairing secrets") }
+            }
             Button(onClick = onDone) { Text("Done") }
         }
     }

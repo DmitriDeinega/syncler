@@ -55,15 +55,21 @@ class Session @Inject constructor(
      * an unlocked session WITHOUT prompting for a password. Either
      * side missing → locked → AuthScreen on launch (matches pre-V4
      * #20 behaviour for clean installs).
+     *
+     * Triad 167 codex must-fix: restore the persisted
+     * `keyGeneration` alongside the master key. Without this, a
+     * rotation done in an earlier process would be silently undone
+     * on cold start, leaving the app operating against a stale
+     * server-side generation.
      */
     private val state = MutableStateFlow(
         run {
             val token = tokenStore.readToken()
-            val persistedMasterKey = if (token != null) masterKeyStore.read() else null
+            val persisted = if (token != null) masterKeyStore.read() else null
             SessionState(
                 token = token,
-                masterKey = persistedMasterKey,
-                keyGeneration = 1,
+                masterKey = persisted?.masterKey,
+                keyGeneration = persisted?.keyGeneration ?: 1,
             )
         }
     )
@@ -120,10 +126,14 @@ class Session @Inject constructor(
         encryptedMasterKey: ByteArray? = null,
     ) {
         tokenStore.writeToken(token)
-        // V4 #20 — persist the unwrapped master key under the Keystore-
-        // protected SecurePrefs so the next cold start does not need a
-        // password prompt. Wiped by [logout] / Sign out.
-        masterKeyStore.write(masterKey)
+        // V4 #20 — persist the unwrapped master key + its generation
+        // under the Keystore-protected SecurePrefs so the next cold
+        // start does not need a password prompt. Wiped by [logout] /
+        // Sign out.
+        // Triad 167 codex must-fix: pass `keyGeneration` so a
+        // post-rotation login persists the new generation, not the
+        // stale default.
+        masterKeyStore.write(masterKey, keyGeneration)
         state.value = SessionState(
             token = token,
             masterKey = masterKey.copyOf(),
@@ -165,6 +175,14 @@ class Session @Inject constructor(
         previous.authSalt?.fill(0)
         // encryptedMasterKey is rest-encrypted so it's safe to drop
         // without zeroing — the wrap key is what protects it.
+        // Triad 167 codex must-fix: persist the rotated master key
+        // + generation BEFORE emitting the new state. Without this,
+        // a process death after rotation but before next login would
+        // restore the OLD persisted key/gen on cold start, silently
+        // undoing the rotation. Persisting first means any crash
+        // between here and the state emit still leaves the user with
+        // the correct on-disk material at next cold start.
+        masterKeyStore.write(nextMasterKey, newKeyGeneration)
         state.value = previous.copy(
             masterKey = nextMasterKey,
             keyGeneration = newKeyGeneration,

@@ -44,11 +44,22 @@ import javax.inject.Singleton
  *   Android trust model applies; not in scope for v0.x.
  */
 interface MasterKeyStore {
-    /** Returns the persisted master key bytes, or null if none. */
-    fun read(): ByteArray?
+    /**
+     * Returns the persisted (master-key, key-generation) pair, or null
+     * if nothing is stored. Key generation is part of the stored
+     * record because it MUST match the in-memory key it was unwrapped
+     * with — restoring a key under the wrong generation would let
+     * post-rotation cold starts silently operate against a stale
+     * server-side state. Triad 167 codex must-fix.
+     */
+    fun read(): Stored?
 
-    /** Persist the master key. Overwrites any prior value. */
-    fun write(masterKey: ByteArray)
+    /**
+     * Persist (master key, key generation). Overwrites any prior
+     * value. Triad 167 codex must-fix: rotation must persist both
+     * the new key AND its generation atomically.
+     */
+    fun write(masterKey: ByteArray, keyGeneration: Int)
 
     /**
      * Wipe the persisted master key. Idempotent; safe to call when
@@ -56,6 +67,17 @@ interface MasterKeyStore {
      * flow so the persisted key never outlives the in-memory session.
      */
     fun clear()
+
+    data class Stored(val masterKey: ByteArray, val keyGeneration: Int) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is Stored) return false
+            return masterKey.contentEquals(other.masterKey) &&
+                keyGeneration == other.keyGeneration
+        }
+        override fun hashCode(): Int =
+            31 * masterKey.contentHashCode() + keyGeneration
+    }
 }
 
 /**
@@ -68,8 +90,8 @@ interface MasterKeyStore {
  * [InMemoryMasterKeyStore] directly.
  */
 object NoOpMasterKeyStore : MasterKeyStore {
-    override fun read(): ByteArray? = null
-    override fun write(masterKey: ByteArray) = Unit
+    override fun read(): MasterKeyStore.Stored? = null
+    override fun write(masterKey: ByteArray, keyGeneration: Int) = Unit
     override fun clear() = Unit
 }
 
@@ -79,9 +101,13 @@ object NoOpMasterKeyStore : MasterKeyStore {
  * Not used in production code.
  */
 class InMemoryMasterKeyStore : MasterKeyStore {
-    @Volatile private var stored: ByteArray? = null
-    override fun read(): ByteArray? = stored?.copyOf()
-    override fun write(masterKey: ByteArray) { stored = masterKey.copyOf() }
+    @Volatile private var stored: MasterKeyStore.Stored? = null
+    override fun read(): MasterKeyStore.Stored? = stored?.let {
+        MasterKeyStore.Stored(it.masterKey.copyOf(), it.keyGeneration)
+    }
+    override fun write(masterKey: ByteArray, keyGeneration: Int) {
+        stored = MasterKeyStore.Stored(masterKey.copyOf(), keyGeneration)
+    }
     override fun clear() { stored = null }
 }
 
@@ -90,27 +116,47 @@ class SecurePrefsMasterKeyStore @Inject constructor(
     private val securePrefs: SecurePrefs,
 ) : MasterKeyStore {
 
-    override fun read(): ByteArray? {
+    override fun read(): MasterKeyStore.Stored? {
         val encoded = securePrefs.getString(KEY) ?: return null
-        return runCatching { Base64.decode(encoded, Base64.NO_WRAP) }
+        val decoded = runCatching { Base64.decode(encoded, Base64.NO_WRAP) }
             .getOrNull()
             ?.takeIf { it.size == MASTER_KEY_BYTES }
+            ?: return null
+        // Triad 167 codex must-fix: persist + restore key_generation
+        // alongside the master key. Reading just the key was the bug
+        // — after a rotation we'd cold-start under generation 1
+        // while the server expected the rotated value, silently
+        // operating on a stale snapshot.
+        val storedGen = securePrefs.getInt(KEY_GEN, FALLBACK_KEY_GENERATION)
+        return MasterKeyStore.Stored(decoded, storedGen)
     }
 
-    override fun write(masterKey: ByteArray) {
+    override fun write(masterKey: ByteArray, keyGeneration: Int) {
         require(masterKey.size == MASTER_KEY_BYTES) {
             "master key must be exactly $MASTER_KEY_BYTES bytes (got ${masterKey.size})"
         }
+        require(keyGeneration >= 1) {
+            "key_generation must be >= 1 (got $keyGeneration)"
+        }
         securePrefs.putString(KEY, Base64.encodeToString(masterKey, Base64.NO_WRAP))
+        securePrefs.putInt(KEY_GEN, keyGeneration)
     }
 
     override fun clear() {
         securePrefs.remove(KEY)
+        securePrefs.remove(KEY_GEN)
     }
 
     private companion object {
         const val KEY = "syncler.v4.master_key_persisted"
+        const val KEY_GEN = "syncler.v4.master_key_generation"
         const val MASTER_KEY_BYTES = 32
+        // Fallback for installs that wrote a master key under the
+        // pre-fix schema (which only stored the key, not the
+        // generation). Reading these as gen=1 matches the
+        // pre-rotation default and is safe for any user who has
+        // never rotated.
+        const val FALLBACK_KEY_GENERATION = 1
     }
 }
 

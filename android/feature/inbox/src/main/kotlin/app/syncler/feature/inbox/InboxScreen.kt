@@ -515,25 +515,34 @@ fun InboxScreen(
                         viewModel.toggleSelect(id)
                     } else {
                         val item = filtered.firstOrNull { it.id == id }
-                        val isSensitive = item?.sensitivity == "sensitive"
                         when {
-                            !isSensitive -> viewModel.open(id)
+                            // Triad 167 gemini MUST-FIX: a refresh that
+                            // dropped the row between layout and tap can
+                            // leave `item` null. Default to no-op (fail
+                            // closed) rather than open-as-public. The
+                            // user can retry the tap once the list
+                            // settles; the previous default would have
+                            // opened a sensitive card without the gate
+                            // when timed exactly right.
+                            item == null -> Unit
+                            item.sensitivity != "sensitive" -> viewModel.open(id)
                             gate.isUnlocked() -> {
                                 gate.touchFromForegroundSensitiveView()
                                 viewModel.open(id)
                             }
                             activity == null -> {
-                                // No FragmentActivity host — should not
-                                // happen in production (MainActivity is
-                                // a FragmentActivity); skip silently
-                                // rather than crash.
-                                viewModel.open(id)
+                                // No FragmentActivity host. MainActivity
+                                // IS a FragmentActivity in production,
+                                // so this branch should never fire —
+                                // but fail closed (no-op) rather than
+                                // opening without the gate.
+                                Unit
                             }
                             else -> sensitiveCoroutineScope.launch {
                                 val result = unlocker.promptForUnlock(
                                     activity = activity,
                                     title = "Open sensitive card",
-                                    subtitle = "Confirm it's you to view ${item?.senderName ?: "this content"}",
+                                    subtitle = "Confirm it's you to view ${item.senderName ?: "this content"}",
                                 )
                                 if (result is app.syncler.core.auth.BiometricUnlocker.Result.Success) {
                                     viewModel.open(id)
