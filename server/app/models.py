@@ -189,6 +189,13 @@ class Plugin(Base):
     # live channel frames. NULL when the plugin uses one-way push
     # only (sender → device). Spec: docs/live-channel.md.
     live_inbound_url: Mapped[str | None] = mapped_column(Text)
+    # V4 #20: plugin-author-declared sensitivity. "public" (default)
+    # or "sensitive". Sensitive plugins gate card opens behind a
+    # biometric/device-credential/password prompt on Android, and
+    # render a "🔒 Locked" placeholder in the inbox until the user
+    # unlocks. Server stores opaquely; enforcement is client-side
+    # because the server is content-blind.
+    sensitivity: Mapped[str] = mapped_column(Text, nullable=False, server_default="public")
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

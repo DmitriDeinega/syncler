@@ -784,6 +784,18 @@ class PluginPublishRequest(BaseModel):
     # HTTPS required in production; HTTP allowed only in
     # development. Spec: docs/live-channel.md "Inbound webhook".
     live_inbound_url: str | None = None
+    # V4 #20: plugin author declares whether THIS plugin's content
+    # is sensitive. "sensitive" → the Android app gates card opens
+    # behind a biometric/device-credential/password prompt and
+    # shows a "🔒 Locked" placeholder in the inbox until unlocked.
+    # Defaults to "public" so legacy plugins (published before this
+    # field existed) sign over byte-identical envelopes — the
+    # conditional serialization in `_publish_envelope` omits the
+    # field when the value is the default.
+    # Plugins can declare extra sensitivity; they CANNOT loosen
+    # the user/app-policy timeout (codex 166 + gemini 166: plugins
+    # may not weaken security posture).
+    sensitivity: Literal["public", "sensitive"] = "public"
 
     @field_validator("live_inbound_url")
     @classmethod
@@ -971,6 +983,8 @@ class PluginLatestResponse(BaseModel):
     # set) or rejected (it's null and the sender chose
     # one-way-push only). Spec: docs/live-channel.md.
     live_inbound_url: str | None = None
+    # V4 #20: per-plugin sensitivity declaration.
+    sensitivity: Literal["public", "sensitive"] = "public"
 
 
 # M11.4: classified revocation reasons. Devices use this to decide UX:

@@ -494,6 +494,7 @@ class Client:
         card_type: str = "event",
         card_key_path: str | None = None,
         live_inbound_url: str | None = None,
+        sensitivity: str = "public",
     ) -> dict[str, Any]:
         """Publish a new plugin version. Returns the server response (with
         ``plugin_row_id`` which the sender then uses in messages).
@@ -534,6 +535,12 @@ class Client:
             body["card_key_path"] = card_key_path
         if live_inbound_url is not None:
             body["live_inbound_url"] = live_inbound_url
+        # V4 #20: only include `sensitivity` in the canonical body when it
+        # diverges from the default. Mirrors the server's conditional
+        # inclusion so legacy senders + new senders that default to
+        # public sign over byte-identical envelopes.
+        if sensitivity != "public":
+            body["sensitivity"] = sensitivity
 
         body["sender_signature"] = b64(self.private_key.sign(canonical_json(body)))
         resp = self.session.post(f"{self.base_url}/v1/plugins/publish", json=body, timeout=10)

@@ -208,6 +208,7 @@ async def publish_plugin(
     entry_class: str | None = None,
     native_sdk_abi: int | None = None,
     live_inbound_url: str | None = None,
+    sensitivity: str = "public",
 ) -> Plugin:
     new_key = _parse_version(version)
 
@@ -294,6 +295,7 @@ async def publish_plugin(
         live_inbound_url=live_inbound_url,
         capabilities=capabilities,
         endpoints=endpoints,
+        sensitivity=sensitivity,
     )
     db.add(plugin)
     try:

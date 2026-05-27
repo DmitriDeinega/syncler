@@ -85,6 +85,12 @@ def _publish_envelope(payload: PluginPublishRequest) -> bytes:
     # over the same byte-identical envelope they did pre-V3.
     if payload.live_inbound_url is not None:
         envelope["live_inbound_url"] = payload.live_inbound_url
+    # V4 #20: sensitivity. Conditionally included so legacy
+    # senders that don't know about this field sign over
+    # byte-identical envelopes; only published when the
+    # author explicitly opts in to "sensitive".
+    if payload.sensitivity != "public":
+        envelope["sensitivity"] = payload.sensitivity
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -147,6 +153,7 @@ async def publish(
             entry_class=payload.entry_class,
             native_sdk_abi=payload.native_sdk_abi,
             live_inbound_url=payload.live_inbound_url,
+            sensitivity=payload.sensitivity,
         )
     except InvalidVersionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -203,6 +210,7 @@ async def latest(
         entry_class=plugin.entry_class,
         native_sdk_abi=plugin.native_sdk_abi,
         live_inbound_url=plugin.live_inbound_url,
+        sensitivity=plugin.sensitivity,
     )
 
 
@@ -254,6 +262,7 @@ async def by_id(
         entry_class=plugin.entry_class,
         native_sdk_abi=plugin.native_sdk_abi,
         live_inbound_url=plugin.live_inbound_url,
+        sensitivity=plugin.sensitivity,
     )
 
 
