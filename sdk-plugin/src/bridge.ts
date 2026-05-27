@@ -19,7 +19,8 @@ export type DispatchHook =
   | 'render'
   | 'onLiveMessage'
   | 'onLiveError'
-  | 'onLiveClosed';
+  | 'onLiveClosed'
+  | 'onPayloadUpdate';
 
 let registeredPlugin: BasePlugin | undefined;
 
@@ -104,8 +105,13 @@ export async function dispatchPluginHook(
         asString(payload.channel, 'channel')
       );
     }
-    default:
-      return assertNever(hook);
+    case 'onPayloadUpdate':
+      // V3 #16 follow-up / triad 168 — fires when the host
+      // observes a newer effective payload for the same live card
+      // (upsert OR merged patch). The host always delivers the
+      // full payload; plugins that don't override the default get
+      // a destructive re-render via BasePlugin.onPayloadUpdate.
+      return await registeredPlugin.onPayloadUpdate(args[0]);
   }
 }
 

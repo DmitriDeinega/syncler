@@ -94,4 +94,64 @@ export abstract class BasePlugin {
   async onLiveClosed(_channel: string): Promise<void> {
     return undefined;
   }
+
+  /**
+   * Triad 168 / V3 #16 follow-up — fires when the host observes
+   * a newer effective payload for THIS card (live-card upsert or
+   * a merged card.patch). The host always delivers the latest
+   * full payload, so plugins don't need to know whether the
+   * change came from an upsert or a patch.
+   *
+   * Default behavior: nuke `document.body` and re-render via
+   * `render(payload)`. That preserves the "fresh mount" contract
+   * for plugins that haven't opted in to incremental updates,
+   * BUT it destroys in-flight typing, scroll position, focus
+   * state, and any non-bridged event listeners. A one-time
+   * console.warn nudges plugin authors toward overriding this
+   * with a partial-DOM-update implementation.
+   *
+   * If you override this, you OWN the UX trade-off: you can
+   * patch text nodes, swap data attributes, animate, etc.
+   * without losing user state. Return as soon as the DOM
+   * reflects the new payload — the host doesn't await result
+   * for cosmetic reasons but does observe the return value to
+   * decide whether the dispatch succeeded.
+   *
+   * Spec: triad 168 agreement.
+   */
+  async onPayloadUpdate(payload: unknown): Promise<void> {
+    if (typeof document === 'undefined') return;
+    const warnState = (
+      globalThis as { __syncler_onPayloadUpdate_warned__?: boolean }
+    );
+    if (!warnState.__syncler_onPayloadUpdate_warned__) {
+      warnState.__syncler_onPayloadUpdate_warned__ = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[Syncler] onPayloadUpdate fell back to a destructive ' +
+          'render() + innerHTML replace. In-flight typing, scroll ' +
+          'position, focus, and non-bridged event listeners will ' +
+          'be lost on each payload update. Override ' +
+          'onPayloadUpdate(payload) on your plugin to perform a ' +
+          'partial DOM update instead.'
+      );
+    }
+    const html = await this.render(payload);
+    if (typeof html !== 'string') {
+      throw new Error('plugin render() did not return a string');
+    }
+    document.body.innerHTML = html;
+    // Mirror the initial-render bootstrap: inline <script> tags
+    // injected via innerHTML don't execute by default. Re-create
+    // them so the plugin's wire-up code (click handlers etc.) runs.
+    // Mirrors RenderShell.kt's script-rewriting pass.
+    document.body.querySelectorAll('script').forEach((oldScript) => {
+      const newScript = document.createElement('script');
+      for (const attr of Array.from(oldScript.attributes)) {
+        newScript.setAttribute(attr.name, attr.value);
+      }
+      newScript.textContent = oldScript.textContent;
+      oldScript.parentNode?.replaceChild(newScript, oldScript);
+    });
+  }
 }

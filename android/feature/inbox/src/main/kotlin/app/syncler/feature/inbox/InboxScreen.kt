@@ -1110,6 +1110,17 @@ private fun PluginRenderView(
     payloadJson: String,
     declaredEndpoints: List<String>,
 ) {
+    // Triad 168 — auto-deliver new payloads to the WebView without
+    // a full remount. AndroidView.factory previously ran once and
+    // captured payloadJson; live-card upserts updated the inbox
+    // StateFlow but the WebView kept showing v1 until a manual
+    // refresh remounted it. Now we dispatch
+    // __syncler_internal_dispatch('onPayloadUpdate', [payload])
+    // on every change after the first composition, and the SDK's
+    // default onPayloadUpdate re-renders via render(). Plugins that
+    // override onPayloadUpdate get partial-DOM-update UX
+    // (no in-flight typing lost).
+    val lastDeliveredPayload = remember { mutableStateOf<String?>(null) }
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
@@ -1130,7 +1141,46 @@ private fun PluginRenderView(
                 tag = bridge
                 val html = RenderShell.build(bundleJs, payloadJson)
                 loadDataWithBaseURL("https://syncler-plugin-host/inbox", html, "text/html", "utf-8", null)
+                // Seed lastDelivered so the first AndroidView.update
+                // pass (which fires immediately after factory) doesn't
+                // dispatch an onPayloadUpdate for the same payload the
+                // shell just rendered.
+                lastDeliveredPayload.value = payloadJson
             }
+        },
+        update = { webView ->
+            // Skip when the payload hasn't changed since the last
+            // dispatch (or the initial render). Compose's
+            // AndroidView.update runs after EVERY recomposition that
+            // doesn't replace the underlying view; the guard keeps
+            // unchanged recompositions from spamming the JS bridge.
+            if (lastDeliveredPayload.value == payloadJson) return@AndroidView
+            lastDeliveredPayload.value = payloadJson
+            // Safe JS encoding per codex 168: quote the JSON string
+            // first, then JSON.parse it on the JS side. Avoids
+            // interpolation footguns (closing </script>, embedded
+            // quotes, etc.). JSONObject.quote produces a JS-string-
+            // literal-safe value with surrounding quotes.
+            val quotedPayload = JSONObject.quote(payloadJson)
+            val js =
+                "(async () => {\n" +
+                "  try {\n" +
+                "    const payload = JSON.parse($quotedPayload);\n" +
+                "    if (typeof window.__syncler_internal_dispatch !== 'function') {\n" +
+                "      return;\n" +
+                "    }\n" +
+                "    await window.__syncler_internal_dispatch('onPayloadUpdate', [payload]);\n" +
+                "  } catch (e) {\n" +
+                "    // Old plugin bundles without onPayloadUpdate land\n" +
+                "    // here. The user still sees stale content until\n" +
+                "    // they refresh, but that matches pre-fix behavior\n" +
+                "    // and is not a regression. Once the bundle is\n" +
+                "    // rebuilt against the new SDK the catch path stops\n" +
+                "    // firing.\n" +
+                "    console.warn('[Syncler] onPayloadUpdate dispatch failed:', e);\n" +
+                "  }\n" +
+                "})();"
+            webView.evaluateJavascript(js, null)
         },
         onRelease = { webView ->
             (webView.tag as? CardBridge)?.destroy()
