@@ -186,6 +186,34 @@ data class PluginLatestDto(
      * arrive with the default and continue to behave as public.
      */
     val sensitivity: String = "public",
+    /**
+     * V4 #21: notification policy. Server uses these to decide
+     * whether to fan out FCM at all; the plugin's
+     * `getNotification(event)` hook still owns the on-device
+     * decision. Defaults match triad 169 agreement: message +
+     * arrived = true; updated = false (high-frequency cards opt
+     * in only).
+     */
+    @Json(name = "notif_message") val notifMessage: Boolean = true,
+    @Json(name = "notif_card_arrived") val notifCardArrived: Boolean = true,
+    @Json(name = "notif_card_updated") val notifCardUpdated: Boolean = false,
+    /**
+     * V4 #21: icon metadata. The bytes live on the server at
+     * `GET /v1/plugins/{pluginRowId}/assets/{contentHash}` —
+     * Android constructs the URL from these fields. NULL when the
+     * plugin author hasn't published an icon. `iconFormat` is
+     * always "image/png" in V1.
+     */
+    @Json(name = "icon_content_hash") val iconContentHash: String? = null,  // base64 SHA-256
+    @Json(name = "icon_format") val iconFormat: String? = null,
+    @Json(name = "icon_background_color") val iconBackgroundColor: String? = null,
+    /**
+     * V4 #21: "always" | "on_unlock" | "never". Server applies
+     * defaults based on sensitivity if the publisher leaves
+     * this null. Android consults this when deciding whether to
+     * show the icon on locked-screen notifications.
+     */
+    @Json(name = "icon_visibility") val iconVisibility: String? = null,
 )
 
 /** Phase 3a: native-renderer manifest. Mirrors `TemplateObject` in `server/app/schemas.py`. */

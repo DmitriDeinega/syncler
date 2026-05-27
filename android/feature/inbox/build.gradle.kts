@@ -54,6 +54,8 @@ dependencies {
     implementation(libs.moshi.kotlin)
     implementation(libs.okhttp)
     implementation(libs.timber)
+    // V4 #21 — plugin icon rendering in inbox rows.
+    implementation(libs.coil.compose)
 
     ksp(libs.hilt.compiler)
     testImplementation(libs.junit)

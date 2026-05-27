@@ -162,6 +162,8 @@ class InboxRepository @Inject constructor(
                     bundleHash = plugin?.bundleHashHex,
                     revocationReason = plugin?.revocationReason,
                     sensitivity = plugin?.sensitivity ?: "public",
+                    iconUrl = plugin?.iconUrl,
+                    iconVisibility = plugin?.iconVisibility ?: "always",
                 )
             }
 
@@ -257,6 +259,8 @@ class InboxRepository @Inject constructor(
             bundleHash = plugin?.bundleHashHex,
             revocationReason = plugin?.revocationReason,
             sensitivity = plugin?.sensitivity ?: "public",
+            iconUrl = plugin?.iconUrl,
+            iconVisibility = plugin?.iconVisibility ?: "always",
         )
 
         _items.value = pollMutex.withLock {
@@ -655,9 +659,30 @@ class InboxRepository @Inject constructor(
      * is ``compromised``, refuse to load the bundle ג€” the render path
      * shows the security warning instead.
      */
+    /**
+     * V4 #21: builds the GET URL for a plugin's icon, or null when
+     * the plugin didn't publish one. Server hosts the bytes at
+     * `/v1/plugins/{plugin_row_id}/assets/{content_hash_b64url}`;
+     * content-hash is base64-standard on the wire, this helper
+     * converts to URL-safe base64 to match the server's url-decode
+     * path. Padding is stripped because the server's
+     * `urlsafe_b64decode(content_hash_b64url + "==")` re-adds it.
+     */
+    private fun buildIconUrlOrNull(pluginRowId: String, iconContentHashB64: String?): String? {
+        if (iconContentHashB64.isNullOrBlank()) return null
+        val base = app.syncler.core.network.BuildConfig.SERVER_BASE_URL.trimEnd('/')
+        val urlsafe = iconContentHashB64
+            .replace('+', '-')
+            .replace('/', '_')
+            .trimEnd('=')
+        return "$base/v1/plugins/$pluginRowId/assets/$urlsafe"
+    }
+
     private suspend fun fetchPluginByRowOrNull(pluginRowId: String): CachedBundle? {
         return runCatching {
             val manifest = api.getPluginById(pluginRowId = pluginRowId)
+            val iconUrl = buildIconUrlOrNull(pluginRowId, manifest.iconContentHash)
+            val iconVisibility = manifest.iconVisibility ?: "always"
 
             // Hard refusal: compromised plugins MUST NOT execute regardless
             // of cache state. Surface the reason on the InboxItem; the UI
@@ -671,6 +696,8 @@ class InboxRepository @Inject constructor(
                     renderer = manifest.renderer,
                     template = manifest.template,
                     sensitivity = manifest.sensitivity,
+                    iconUrl = iconUrl,
+                    iconVisibility = iconVisibility,
                 )
             }
 
@@ -689,6 +716,8 @@ class InboxRepository @Inject constructor(
                     renderer = manifest.renderer,
                     template = manifest.template,
                     sensitivity = manifest.sensitivity,
+                    iconUrl = iconUrl,
+                    iconVisibility = iconVisibility,
                 )
             }
 
@@ -705,6 +734,8 @@ class InboxRepository @Inject constructor(
                     renderer = manifest.renderer,
                     template = manifest.template,
                     sensitivity = manifest.sensitivity,
+                    iconUrl = iconUrl,
+                    iconVisibility = iconVisibility,
                 )
             }
 
@@ -733,6 +764,8 @@ class InboxRepository @Inject constructor(
                 renderer = manifest.renderer,
                 template = manifest.template,
                 sensitivity = manifest.sensitivity,
+                iconUrl = iconUrl,
+                iconVisibility = iconVisibility,
             )
             pluginMutex.withLock { bundleByHash[expectedHashHex] = cached }
             cached
@@ -773,6 +806,18 @@ class InboxRepository @Inject constructor(
          * non-sensitive.
          */
         val sensitivity: String = "public",
+        /**
+         * V4 #21. Server-hosted icon URL the inbox row + notification
+         * large icon load from. Null when the plugin author didn't
+         * publish an icon. Coil cache-keyed by content hash so updates
+         * propagate when the publisher re-publishes with a new icon.
+         */
+        val iconUrl: String? = null,
+        /**
+         * V4 #21. "always" | "on_unlock" | "never". Defaults to
+         * "always" for non-sensitive plugins (server-side default).
+         */
+        val iconVisibility: String = "always",
     )
 
     /**
@@ -1171,6 +1216,18 @@ data class InboxItem(
      * normally.
      */
     val sensitivity: String = "public",
+    /**
+     * V4 #21. Server-hosted plugin icon URL — null when the plugin
+     * hasn't published one. The inbox row + notification large icon
+     * load from this URL via Coil; the content-hash in the URL makes
+     * the cache key naturally version-aware.
+     */
+    val iconUrl: String? = null,
+    /**
+     * V4 #21. "always" | "on_unlock" | "never". Defaults to "always"
+     * (matches the public-plugin default the server applies).
+     */
+    val iconVisibility: String = "always",
 )
 
 /**

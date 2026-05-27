@@ -55,6 +55,26 @@ class SynclerFcmService : FirebaseMessagingService() {
                     minPluginVersion = minVersion,
                 )
             }
+            // V4 #21 — live-card lifecycle FCM. Two events, same
+            // handler path: wake up the foreground service which
+            // refreshes the inbox + posts a default notification
+            // (with the plugin's icon when present). Plugin-side
+            // getNotification() dispatch from the FCM pipeline is
+            // deferred to V4 #22 once headless-WebView-in-service
+            // is built; today's notification body is platform-
+            // default ("New card from {senderName}").
+            "card_arrived", "card_updated" -> {
+                val pluginId = data["plugin_id"] ?: return logMissing("plugin_id")
+                val cardKey = data["card_key"] ?: return logMissing("card_key")
+                val minVersion = data["min_plugin_version"].orEmpty()
+                PluginNotificationService.startForCardEvent(
+                    context = applicationContext,
+                    eventType = type,
+                    pluginId = pluginId,
+                    cardKey = cardKey,
+                    minPluginVersion = minVersion,
+                )
+            }
             "dismiss" -> {
                 val messageId = data["message_id"] ?: return logMissing("message_id")
                 val pluginId = data["plugin_id"] ?: return logMissing("plugin_id")

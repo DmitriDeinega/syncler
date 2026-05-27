@@ -82,6 +82,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -850,6 +851,28 @@ private fun InboxRow(
                     )
                 }
             }
+            // V4 #21 — plugin icon. Loaded via Coil; content-hash in
+            // the URL makes the cache key naturally version-aware.
+            // Sensitive plugins with iconVisibility="never" render
+            // no icon at all; "on_unlock" shows on inbox (the inbox
+            // screen itself is gated by the app's main login), but
+            // the notification large icon path will respect locked-
+            // screen visibility separately.
+            val showIcon = item.iconUrl != null && item.iconVisibility != "never"
+            if (showIcon) {
+                coil.compose.AsyncImage(
+                    model = item.iconUrl,
+                    contentDescription = "${item.senderName} icon",
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .size(ROW_ICON_SIZE)
+                        .clip(CircleShape)
+                        .background(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = CircleShape,
+                        ),
+                )
+            }
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -1221,3 +1244,4 @@ private fun formatValue(value: Any?): String = when (value) {
 
 private val UNREAD_DOT_SIZE = 8.dp
 private val LEADING_AFFORDANCE_SIZE = 24.dp
+private val ROW_ICON_SIZE = 36.dp

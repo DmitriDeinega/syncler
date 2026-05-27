@@ -68,6 +68,55 @@ class HostPluginMessagePipeline @Inject constructor(
         )
     }
 
+    /**
+     * V4 #21 — live-card lifecycle FCM. Looks up the plugin row
+     * (so we have the sender's display name + plugin identifier
+     * for the notification) and posts a default notification.
+     *
+     * Today's body is platform-default ("New card from {senderName}"
+     * for arrived, "Card updated: {senderName}" for updated). The
+     * plugin's `getNotification(event)` hook is NOT dispatched
+     * from this background path because the plugin's runtime lives
+     * in a WebView and we don't yet spin one up in the foreground
+     * service. That dispatch is V4 #22. Today the FCM still
+     * triggers the inbox refresh (server-side SSE event drives
+     * that on devices with the app foregrounded; cold devices get
+     * the notification + refresh on next open).
+     */
+    override suspend fun processCardEvent(
+        eventType: String,
+        pluginRowId: String,
+        cardKey: String,
+        minPluginVersion: String,
+    ): PluginMessageOutcome {
+        val manifest = runCatching { api.getPluginById(pluginRowId = pluginRowId) }
+            .onFailure { Timber.tag(TAG).w(it, "card-event fetch plugin %s failed", pluginRowId) }
+            .getOrNull() ?: return PluginMessageOutcome()
+
+        val paired = pairedSenderStore.bySenderId(manifest.senderId)
+        val senderName = paired?.senderName ?: manifest.pluginIdentifier
+        val title = when (eventType) {
+            "card_arrived" -> senderName
+            "card_updated" -> senderName
+            else -> senderName
+        }
+        val body = when (eventType) {
+            "card_arrived" -> "New card"
+            "card_updated" -> "Card updated"
+            else -> "Card event"
+        }
+        return PluginMessageOutcome(
+            notification = PluginNotificationRequest(
+                title = title,
+                body = body,
+                // Group all events from the same (sender, plugin)
+                // so multiple updates collapse into a single
+                // notification bundle.
+                groupId = "${manifest.senderId}::${manifest.pluginIdentifier}",
+            ),
+        )
+    }
+
     private companion object {
         const val TAG = "PluginPipeline"
     }

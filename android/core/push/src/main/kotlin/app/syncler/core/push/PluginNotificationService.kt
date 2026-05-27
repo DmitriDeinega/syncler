@@ -59,6 +59,47 @@ class PluginNotificationService : Service() {
         val messageId = intent?.getStringExtra(EXTRA_MESSAGE_ID)
         val pluginId = intent?.getStringExtra(EXTRA_PLUGIN_ID)
         val minVersion = intent?.getStringExtra(EXTRA_MIN_PLUGIN_VERSION).orEmpty()
+        // V4 #21 — branch on whether this is a card-event start or a
+        // legacy message-event start. Card events have no messageId.
+        val cardEventType = intent?.getStringExtra(EXTRA_CARD_EVENT_TYPE)
+        val cardKey = intent?.getStringExtra(EXTRA_CARD_KEY)
+        if (cardEventType != null && cardKey != null && pluginId != null) {
+            val cardJob = scope.launch {
+                try {
+                    val outcome = withTimeoutOrNull(MAX_WORK_MS) {
+                        pipeline.processCardEvent(
+                            eventType = cardEventType,
+                            pluginRowId = pluginId,
+                            cardKey = cardKey,
+                            minPluginVersion = minVersion,
+                        )
+                    }
+                    outcome?.notification?.let { notification ->
+                        val decision = gate.shouldPost(pluginId)
+                        if (decision == PluginNotificationGate.Decision.ALLOW) {
+                            notifications.post(this@PluginNotificationService, notification)
+                        } else {
+                            Timber.tag(TAG).i(
+                                "card-event notification suppressed for plugin=%s reason=%s",
+                                pluginId, decision,
+                            )
+                        }
+                    }
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (t: Throwable) {
+                    Timber.tag(TAG).e(t, "card-event pipeline failed for plugin=%s", pluginId)
+                } finally {
+                    if (activeJobs.size <= 1) {
+                        stopSelf(startId)
+                    }
+                }
+            }
+            activeJobs.add(cardJob)
+            cardJob.invokeOnCompletion { activeJobs.remove(cardJob) }
+            return START_NOT_STICKY
+        }
+
         if (messageId == null || pluginId == null) {
             Timber.tag(TAG).w("missing message_id or plugin_id; stopping")
             stopSelf(startId)
@@ -148,6 +189,10 @@ class PluginNotificationService : Service() {
         private const val EXTRA_MESSAGE_ID = "syncler.message_id"
         private const val EXTRA_PLUGIN_ID = "syncler.plugin_id"
         private const val EXTRA_MIN_PLUGIN_VERSION = "syncler.min_plugin_version"
+        // V4 #21 — card-event extras (no message_id; cards are
+        // looked up by card_key + plugin row).
+        const val EXTRA_CARD_EVENT_TYPE = "syncler.card_event_type"
+        const val EXTRA_CARD_KEY = "syncler.card_key"
 
         private const val FOREGROUND_ID = 11_001
         const val FOREGROUND_CHANNEL_ID = "syncler.foreground.delivery"
@@ -167,6 +212,34 @@ class PluginNotificationService : Service() {
                 context.startService(intent)
             }
         }
+
+        /**
+         * V4 #21 — start the service for a live-card lifecycle event.
+         * Routes to a parallel `processCardEvent` path on the pipeline
+         * which posts a default notification (with the plugin icon
+         * when available). Plugin-side getNotification() dispatch
+         * from the FCM background pipeline is deferred to V4 #22
+         * when headless-WebView-in-service infrastructure lands.
+         */
+        fun startForCardEvent(
+            context: Context,
+            eventType: String,  // "card_arrived" or "card_updated"
+            pluginId: String,
+            cardKey: String,
+            minPluginVersion: String,
+        ) {
+            val intent = Intent(context, PluginNotificationService::class.java).apply {
+                putExtra(EXTRA_CARD_EVENT_TYPE, eventType)
+                putExtra(EXTRA_PLUGIN_ID, pluginId)
+                putExtra(EXTRA_CARD_KEY, cardKey)
+                putExtra(EXTRA_MIN_PLUGIN_VERSION, minPluginVersion)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
     }
 }
 
@@ -178,6 +251,21 @@ interface PluginMessagePipeline {
     suspend fun process(
         messageId: String,
         pluginId: String,
+        minPluginVersion: String,
+    ): PluginMessageOutcome
+
+    /**
+     * V4 #21 — live-card lifecycle FCM handler. Triggered when the
+     * server pushes `type: "card_arrived"` or `type: "card_updated"`.
+     * Default implementation in the host posts a generic
+     * notification with the plugin's icon (when published); the
+     * plugin's `getNotification(event)` hook is NOT yet dispatched
+     * from this background path (V4 #22).
+     */
+    suspend fun processCardEvent(
+        eventType: String,  // "card_arrived" or "card_updated"
+        pluginRowId: String,
+        cardKey: String,
         minPluginVersion: String,
     ): PluginMessageOutcome
 }
