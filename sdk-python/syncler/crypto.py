@@ -229,9 +229,21 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-from cryptography.hazmat.primitives.hpke import AEAD, KDF, KEM, Suite
+# HPKE (RFC 9180) via pyhpke. PyCA's `cryptography` library does NOT
+# ship HPKE in any released version (the `hazmat.primitives.hpke`
+# namespace is a draft that was never published). pyhpke is the
+# canonical pure-Python RFC 9180 implementation and is wire-
+# compatible with the Android host (BouncyCastle HPKE) and any
+# RFC 9180-conformant implementation. Suite IDs match exactly:
+# DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM
+# = (0x0020, 0x0001, 0x0002).
+from pyhpke import AEADId, CipherSuite, KDFId, KEMId, KEMKey
 
-V2_HPKE_SUITE = Suite(KEM.X25519, KDF.HKDF_SHA256, AEAD.AES_256_GCM)
+V2_HPKE_SUITE = CipherSuite.new(
+    KEMId.DHKEM_X25519_HKDF_SHA256,
+    KDFId.HKDF_SHA256,
+    AEADId.AES256_GCM,
+)
 V2_HPKE_KEM_OUTPUT_BYTES = 32
 V2_CEK_BYTES = 32
 V2_HPKE_WRAP_BYTES = V2_CEK_BYTES + 16  # AES-256-GCM tag
@@ -436,19 +448,34 @@ def seal_v2_envelopes(
             base_seq=base_seq,
             patch_seq=patch_seq,
         )
+        # pyhpke wants a KEMKey; build one from the device's raw
+        # 32-byte X25519 pubkey via PyCA. The context-based API
+        # produces (enc, sender) where enc is the 32-byte KEM
+        # output; sender.seal(aad, pt) then returns the AEAD-
+        # encrypted CEK + tag (32 + 16 = 48 bytes).
+        # AAD is intentionally empty — all per-recipient binding
+        # rides in HPKE `info` to match the Android receiver
+        # (`core/crypto/Hpke.kt`) which also passes aad=empty.
+        # (pyhpke's single-shot `CipherSuite.seal()` is currently
+        # unimplemented — NotImplementedError — so we go via the
+        # explicit context.)
         pk = X25519PublicKey.from_public_bytes(device.encryption_public_key)
-        enc_concat_ct = V2_HPKE_SUITE.encrypt(
-            plaintext=cek, public_key=pk, info=info
-        )
-        if len(enc_concat_ct) != V2_HPKE_KEM_OUTPUT_BYTES + V2_HPKE_WRAP_BYTES:
+        pkR = KEMKey.from_pyca_cryptography_key(pk)
+        enc, sender_ctx = V2_HPKE_SUITE.create_sender_context(pkR, info=info)
+        ct = sender_ctx.seal(cek, aad=b"")
+        if len(enc) != V2_HPKE_KEM_OUTPUT_BYTES:
             raise RuntimeError(
-                f"HPKE output unexpected size: {len(enc_concat_ct)}"
+                f"HPKE enc unexpected size: {len(enc)}"
+            )
+        if len(ct) != V2_HPKE_WRAP_BYTES:
+            raise RuntimeError(
+                f"HPKE ct unexpected size: {len(ct)}"
             )
         envelopes.append(
             V2RecipientEnvelope(
                 device_id=_canonical_uuid(device.device_id),
-                hpke_kem_output=enc_concat_ct[:V2_HPKE_KEM_OUTPUT_BYTES],
-                hpke_ciphertext=enc_concat_ct[V2_HPKE_KEM_OUTPUT_BYTES:],
+                hpke_kem_output=enc,
+                hpke_ciphertext=ct,
             )
         )
 
