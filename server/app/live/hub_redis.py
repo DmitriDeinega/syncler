@@ -250,6 +250,14 @@ class RedisBroadcastHub:
                     )
                 except (TimeoutError, asyncio.TimeoutError):
                     continue
+                except Exception as _redis_exc:
+                    # redis-py wraps the socket-timeout into its own
+                    # `redis.exceptions.TimeoutError` (NOT a subclass
+                    # of Python's TimeoutError). Catch by class name
+                    # to avoid importing redis-py types here.
+                    if type(_redis_exc).__name__ == "TimeoutError":
+                        continue
+                    raise
                 if msg is None or msg.get("type") != "message":
                     continue
                 raw = msg.get("data")
