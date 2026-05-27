@@ -46,9 +46,26 @@ data class SessionState(
 @Singleton
 class Session @Inject constructor(
     private val tokenStore: TokenStore,
+    private val masterKeyStore: app.syncler.core.storage.MasterKeyStore =
+        app.syncler.core.storage.NoOpMasterKeyStore,
 ) : AuthTokenProvider {
+    /**
+     * V4 #20 — cold-start restore. If both the JWT and the persisted
+     * master key survived the last process death, the app boots into
+     * an unlocked session WITHOUT prompting for a password. Either
+     * side missing → locked → AuthScreen on launch (matches pre-V4
+     * #20 behaviour for clean installs).
+     */
     private val state = MutableStateFlow(
-        SessionState(token = tokenStore.readToken(), masterKey = null, keyGeneration = 1),
+        run {
+            val token = tokenStore.readToken()
+            val persistedMasterKey = if (token != null) masterKeyStore.read() else null
+            SessionState(
+                token = token,
+                masterKey = persistedMasterKey,
+                keyGeneration = 1,
+            )
+        }
     )
 
     val sessionState: StateFlow<SessionState> = state.asStateFlow()
@@ -103,6 +120,10 @@ class Session @Inject constructor(
         encryptedMasterKey: ByteArray? = null,
     ) {
         tokenStore.writeToken(token)
+        // V4 #20 — persist the unwrapped master key under the Keystore-
+        // protected SecurePrefs so the next cold start does not need a
+        // password prompt. Wiped by [logout] / Sign out.
+        masterKeyStore.write(masterKey)
         state.value = SessionState(
             token = token,
             masterKey = masterKey.copyOf(),
@@ -174,6 +195,11 @@ class Session @Inject constructor(
      */
     fun clearPersistedTokenForCompromise() {
         tokenStore.clearToken()
+        // V4 #20 — root_compromise_rotation invalidates the session
+        // on the server; wipe both the persisted JWT AND the persisted
+        // master key so the next cold start cannot resurrect an
+        // already-revoked session.
+        masterKeyStore.clear()
     }
 
     suspend fun logout() {
@@ -181,6 +207,12 @@ class Session @Inject constructor(
         previous.masterKey?.fill(0)
         previous.authSalt?.fill(0)
         tokenStore.clearToken()
+        // V4 #20 — full logout wipes the persisted master key too.
+        // Codex 166 + gemini 166 BOTH flagged "MasterKeyStore lands
+        // before sign-out wipe semantics" as the riskiest partial
+        // state; this MUST stay paired with the persistence call in
+        // [authenticate] in the same change set.
+        masterKeyStore.clear()
         state.value = SessionState(
             token = null,
             masterKey = null,

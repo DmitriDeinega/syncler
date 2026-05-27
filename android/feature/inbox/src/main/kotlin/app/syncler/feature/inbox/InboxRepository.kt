@@ -161,6 +161,7 @@ class InboxRepository @Inject constructor(
                     template = plugin?.template,
                     bundleHash = plugin?.bundleHashHex,
                     revocationReason = plugin?.revocationReason,
+                    sensitivity = plugin?.sensitivity ?: "public",
                 )
             }
 
@@ -255,6 +256,7 @@ class InboxRepository @Inject constructor(
             template = plugin?.template,
             bundleHash = plugin?.bundleHashHex,
             revocationReason = plugin?.revocationReason,
+            sensitivity = plugin?.sensitivity ?: "public",
         )
 
         _items.value = pollMutex.withLock {
@@ -668,6 +670,7 @@ class InboxRepository @Inject constructor(
                     revocationReason = manifest.revocationReason,
                     renderer = manifest.renderer,
                     template = manifest.template,
+                    sensitivity = manifest.sensitivity,
                 )
             }
 
@@ -685,6 +688,7 @@ class InboxRepository @Inject constructor(
                     revocationReason = manifest.revocationReason,
                     renderer = manifest.renderer,
                     template = manifest.template,
+                    sensitivity = manifest.sensitivity,
                 )
             }
 
@@ -700,6 +704,7 @@ class InboxRepository @Inject constructor(
                     revocationReason = manifest.revocationReason,
                     renderer = manifest.renderer,
                     template = manifest.template,
+                    sensitivity = manifest.sensitivity,
                 )
             }
 
@@ -727,6 +732,7 @@ class InboxRepository @Inject constructor(
                 revocationReason = manifest.revocationReason,
                 renderer = manifest.renderer,
                 template = manifest.template,
+                sensitivity = manifest.sensitivity,
             )
             pluginMutex.withLock { bundleByHash[expectedHashHex] = cached }
             cached
@@ -757,6 +763,16 @@ class InboxRepository @Inject constructor(
          * at publish time.
          */
         val template: TemplateBlockDto? = null,
+        /**
+         * V4 #20. Plugin-author-declared sensitivity. "public" (default) or
+         * "sensitive". The inbox UI consults this to decide whether to show
+         * a "🔒 Locked" placeholder; the card-open path consults
+         * [SensitiveActionGate] when this is "sensitive". Defaults to
+         * "public" so plugins published before this field existed
+         * (or any other null/missing-field path) continue to behave as
+         * non-sensitive.
+         */
+        val sensitivity: String = "public",
     )
 
     /**
@@ -1146,6 +1162,15 @@ data class InboxItem(
      * "New message from {senderName}" rendering).
      */
     val hostPreview: HostPreview?,
+    /**
+     * V4 #20. "public" (default) or "sensitive". Sensitive cards render a
+     * "🔒 Locked" placeholder in the inbox list (no preview content) and
+     * require [SensitiveActionGate] unlock before the detail screen opens.
+     * Defaults to "public" so any row whose plugin manifest fetch hasn't
+     * completed yet, or whose plugin row predates this field, renders
+     * normally.
+     */
+    val sensitivity: String = "public",
 )
 
 /**

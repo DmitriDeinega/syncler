@@ -176,6 +176,16 @@ data class PluginLatestDto(
      */
     @Json(name = "card_type") val cardType: String = "event",
     @Json(name = "card_key_path") val cardKeyPath: String? = null,
+    /**
+     * V4 #20: plugin-author-declared sensitivity. "public" (default) or
+     * "sensitive". When "sensitive", the inbox renders a "🔒 Locked"
+     * placeholder for the plugin's cards and `SensitiveActionGate` is
+     * consulted before opening any card detail screen. The server's
+     * publish envelope conditionally includes this field only when
+     * != "public", so legacy plugins that never declared sensitivity
+     * arrive with the default and continue to behave as public.
+     */
+    val sensitivity: String = "public",
 )
 
 /** Phase 3a: native-renderer manifest. Mirrors `TemplateObject` in `server/app/schemas.py`. */
