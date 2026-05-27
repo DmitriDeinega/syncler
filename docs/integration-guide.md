@@ -1,6 +1,6 @@
 # Syncler integration guide
 
-You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes end-to-end-encrypted blobs to a user's phone, and your plugin renders them. **Read this end-to-end before writing code; it's ~9 pages.**
+You are integrating your app with the Syncler platform. Syncler is a content-blind transport + plugin host: your backend pushes end-to-end-encrypted blobs to a user's phone, and your plugin renders them. **Read this end-to-end before writing code; it's 16 sections (~1160 lines).** The first 11 cover the basic integration; the last 5 are V3/V4 features that you'll only need once you have a working baseline.
 
 Syncler does not know what your data looks like, what your UI says, or what your buttons do. Your payload, your plugin code (or template manifest), your callback endpoint — Syncler just routes bytes.
 

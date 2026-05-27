@@ -15,6 +15,17 @@ parallelism = 1
 hash_len = 64 bytes
 ```
 
+These are OWASP's mobile-floor recommendation (19 MiB / t=2 /
+p=1) chosen so weak Android devices can still sign in within a
+reasonable wall-clock budget. They are a deliberate minimum, NOT
+a comfortable margin. Since the Argon2id output is the root
+secret for all E2EE on the account (split into the auth-key + the
+master-key-wrap-key), any future hardware-floor bump in OWASP's
+guidance should drive a `params_version` increment + a rotation
+on existing accounts. Implementations MUST persist the
+`argon2_params_version` alongside `auth_salt` so a v2 client can
+unwrap a v1 user's wrapped state.
+
 The 64-byte Argon2id output is split without further transformation:
 
 ```text
@@ -30,7 +41,33 @@ At signup, the client generates a 32-byte master key with a CSPRNG.
 
 The client encrypts the master key with `master_key_wrap_key` using AES-256-GCM. The encrypted master key is stored on the server as an opaque blob. The server does not decrypt it and does not have `master_key_wrap_key`.
 
-## 3. Pairing Key Derivation
+> ## ⚠ V1 historical contract (§§3–8)
+>
+> Sections 3 through 8 describe the **V1 wire** — the pre-Phase-9
+> envelope shape with a single per-pairing AES-GCM key. The active
+> wire is **V2**, specified in §11 ("Per-Device Envelope
+> Encryption"), which switches to per-device HPKE envelopes and
+> changes the canonical AAD shape, the live-card envelope schema
+> (now plugin-scoped), and the delete-envelope field set.
+>
+> An integrator MUST implement §11. Sections 3–8 are kept for
+> historical context and for understanding the migration in
+> §11.14. Anything below this point that conflicts with §11 is
+> superseded by §11.
+>
+> Concrete drift points to watch for if you copy from §§3–8:
+>
+> - **Live-card `card_type`** in §8.1 says `"live"`; the V2
+>   contract in §11.5 expects the manifest-declared card type
+>   (e.g. `"standard_card"`).
+> - **Live-card delete envelope** in §8.3 binds
+>   `(sender_id, user_id, card_key)`; the V2 envelope in §11.6
+>   adds `plugin_id`.
+> - **Message AAD** in §4 / §6 is the per-pairing 5-field
+>   AAD; the V2 payload AAD in §11.7 is a different shape and
+>   the message body is HPKE-sealed per device.
+
+## 3. Pairing Key Derivation (V1, historical)
 
 Pairing keys are derived client-side with HKDF-SHA256:
 
@@ -43,7 +80,7 @@ length = 32
 
 `sender_id` is the exact byte string used by the protocol identity layer. Implementations must not normalize or reinterpret it before HKDF.
 
-## 4. Message Encryption
+## 4. Message Encryption (V1, historical)
 
 Messages use AES-256-GCM with a 12-byte random nonce per message.
 
@@ -87,7 +124,7 @@ The sender ALSO signs an envelope with Ed25519. The envelope is AAD plus the cip
 
 > **V1 contract change (M5.1):** previous draft of this spec required `message_id`, `created_at`, and `schema_version` in AAD — those fields are server-generated and unknowable to the sender at signing time, so they have been removed from both AAD and the envelope. They remain server metadata stored next to the message but are not signed by the sender. AAD and the envelope are intentionally distinct: AAD authenticates context to AES-GCM (no ciphertext); the envelope is what Ed25519 signs (AAD + ciphertext + nonce). Replay protection is enforced at the server via the per-sender nonce registry (see §7).
 
-## 5. Plugin Bundle Signing
+## 5. Plugin Bundle Signing (unchanged in V2)
 
 Plugin bundles use Ed25519 signatures.
 
@@ -110,7 +147,14 @@ Append bundleHash decoded from hex to raw bytes.
 
 The `bundleHash` field remains present in the canonical JSON, then its raw bytes are appended.
 
-## 6. Test Vectors
+## 6. Test Vectors (V1 + bundle signing)
+
+> The Argon2id / HKDF / bundle-signature / Ed25519 vectors below
+> are still load-bearing for V2 (Argon2id is the master-key KDF
+> regardless of envelope version; bundle signing is unchanged).
+> The "Message AEAD (V1.1 — 5-field AAD)" vector exercises the V1
+> per-pairing AES path that V2 supersedes — kept as a regression
+> against canonicalization drift, NOT as the active wire.
 
 These vectors are asserted by `server/tests/test_crypto.py`.
 
@@ -169,15 +213,24 @@ ed25519_signature = 3d3a4963d6390f4392b36dac13938cadf015da019c6d0b2004e701656f54
 
 ### Python Vector Script
 
-The vectors above were generated with this Python shape:
+The vectors above were generated with this Python shape. **The
+AAD is the V1.1 five-field shape**
+(`expires_at, min_plugin_version, plugin_id, sender_id, user_id`)
+with `min_plugin_version` as the version STRING (`"1.0.0"`), NOT
+the integer `1` an older draft used. The pre-V1.1 8-field AAD
+(with `created_at`, `message_id`, `schema_version`) is obsolete —
+don't reimplement against it.
 
 ```python
+import json
+
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+# Argon2id KDF (uses OWASP mobile-floor params; see §1).
 argon2_hash = hash_secret_raw(
     secret=b"syncler-test-password",
     salt=bytes.fromhex("00112233445566778899aabbccddeeff"),
@@ -188,6 +241,7 @@ argon2_hash = hash_secret_raw(
     type=Type.ID,
 )
 
+# Master key + per-sender HKDF pairing key.
 master_key = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 sender_id = b"sender-alpha"
 pairing_key = HKDF(
@@ -197,11 +251,25 @@ pairing_key = HKDF(
     info=b"syncler-v1-pairing-key:" + sender_id,
 ).derive(master_key)
 
+# Message AEAD — V1.1 five-field canonical AAD. Sort keys
+# alphabetically and use compact JSON separators so the bytes
+# match across Python / Kotlin / TypeScript implementations
+# byte-for-byte. The aad bytes here are exactly what the doc's
+# "Message AEAD (V1.1 — 5-field AAD)" vector shows above.
+aad_fields = {
+    "expires_at": "2026-05-20T00:00:00Z",
+    "min_plugin_version": "1.0.0",
+    "plugin_id": "plugin.weather",
+    "sender_id": "sender-alpha",
+    "user_id": "user-123",
+}
+aad = json.dumps(aad_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
 nonce = bytes.fromhex("101112131415161718191a1b")
-aad = b'{"created_at":"2026-05-20T00:00:00Z","message_id":"msg-001","min_plugin_version":1,"plugin_id":"plugin.weather","schema_version":1,"sender_id":"sender-alpha","user_id":"user-123"}'
 plaintext = b'{"temperature_c":21}'
 ciphertext_with_tag = AESGCM(pairing_key).encrypt(nonce, plaintext, aad)
 
+# Ed25519 sender signing key (used in the Plugin Bundle
+# Signature vector above and in the message envelope signature).
 private_key = Ed25519PrivateKey.from_private_bytes(
     bytes.fromhex("1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100")
 )
@@ -211,6 +279,10 @@ public_key = private_key.public_key().public_bytes(
 )
 ```
 
+This script is exercised by `server/tests/test_crypto.py::test_doc_vector_script_round_trips`
+to keep the doc + canonical bytes from drifting again. If you
+edit this script, run that test.
+
 ## 7. Nonce Reuse Policy
 
 Never reuse an AES-GCM nonce with the same key. Clients must generate 12-byte nonces with a CSPRNG.
@@ -219,7 +291,14 @@ The V1.5 server enforces replay protection via a durable per-sender registry bac
 
 The same registry is shared by `POST /v1/messages/send`, `POST /v1/cards/upsert`, and `POST /v1/cards/delete`. Cards-upsert was scoped in even though sequence-number CAS already mitigates most replay scenarios — defense-in-depth against resurrecting deleted cards with an old sequence. **Phase 12 added freshness + replay protection to `POST /v1/cards/delete`** (closing Codex consultation 95): the delete envelope now binds `nonce` (12 random bytes) and `expires_at` (≤ 48 h in the future, same cap as upsert). The server checks the envelope is unexpired, then records the nonce in the shared registry (409 on replay). The route explicitly commits even when the underlying card was already gone — without that commit the nonce row would roll back on session-close and a replay could land against a future card with the same `(sender_id, user_id, card_key)`.
 
-## 8. Live Cards (Phase 3b)
+## 8. Live Cards (Phase 3b, V1 historical)
+
+> The live-card envelope below predates V2 device-scoping.
+> Implement §11.5 / §11.6 instead — V2 adds `plugin_id` to the
+> delete envelope (closing the cross-plugin replay gap codex
+> consultation 125 flagged) and uses the manifest-declared
+> `card_type` instead of the literal `"live"` string in this
+> section.
 
 Live cards are persistent, upsertable units identified by `(sender_id, user_id, card_key)`. The encrypted payload uses the same AES-256-GCM primitive as messages, but with a richer AAD that binds the card-specific metadata. Upsert and delete each have their own Ed25519 envelope distinct from the message envelope.
 
@@ -794,6 +873,21 @@ if response.key_generation < highest_key_generation_seen:
 
 This includes the wrap-MK fetch (the `/login` and `/account` endpoints MUST return `key_generation` alongside the wrapped master-key blob; client checks BEFORE attempting to unwrap and use the MK). Without this check, a server could silently serve a stale wrapped MK + stale state, and the client's AEAD decrypts would all succeed (everything matches under the old generation) but the client would be operating on a frozen snapshot.
 
+**Caveat — local-attacker can roll the high-water mark back.**
+`highest_key_generation_seen` is in plain app prefs (Android
+`SecurePrefs` provides at-rest encryption, but a local attacker
+with the OS-level user the app runs as can edit the value). An
+attacker who can write to the device's app data can lower the
+counter and then collude with a malicious server to silently
+re-enable the frozen-snapshot attack this section is designed to
+prevent. Mitigations require hardware attestation of the counter
+(Android Keystore-backed monotonic counter, or remote attestation
+of the per-device key generation), neither of which is in scope
+for V0.x. The threat model accepts that an attacker with full
+device control already breaks the platform; this caveat is
+explicit so reviewers don't misread the MUST above as
+unconditional.
+
 ### 10.11 Mixed-client behavior
 
 The server detects client capability via the `X-Syncler-Client-Min-Phase` header, set to the integer `8` by all Phase-8-aware apps.
@@ -941,16 +1035,36 @@ KDF id  = 0x0001
 AEAD id = 0x0002
 ```
 
-**Library targets:**
+The authoritative contract is RFC 9180 with the suite identifiers
+above. Any HPKE library that conforms to RFC 9180 with this suite
+will interoperate.
 
-- **Server + SDK Python:** `cryptography>=47.0.0` — `from cryptography.hazmat.primitives.hpke import Suite, KEM, KDF, AEAD`.
+**Library targets in the reference implementations:**
+
+- **Server + SDK Python:** [`pyhpke`](https://pypi.org/project/pyhpke/) ≥ 0.6 (`pip install pyhpke`).
+  PyCA `cryptography` has historically had an open request for an
+  HPKE module but has not shipped one as of writing; an earlier
+  draft of this spec referenced a `cryptography.hazmat.primitives.hpke`
+  import that does not exist. The actual SDK code in
+  `sdk-python/syncler/crypto.py` uses `pyhpke.CipherSuite` —
+  match that.
 - **Android (Kotlin):** Google Tink — `com.google.crypto.tink:tink-android`.
 
-PyCA `Suite.encrypt(plaintext, public_key, info=...)` returns the concatenation `enc || ciphertext`. For X25519 the KEM output `enc` is 32 bytes; the ciphertext is `len(plaintext) + 16` (AEAD tag). For a 32-byte CEK that is 48 bytes ciphertext, 80 bytes total.
+The wire format splits the KEM output and the AEAD ciphertext into
+separate base64 fields (`hpke_kem_output` + `hpke_ciphertext`) for
+schema-level validation cleanliness. For X25519 the KEM output is
+32 bytes; the AEAD ciphertext is `len(plaintext) + 16` (tag). For
+a 32-byte CEK that is 48 bytes ciphertext, 80 bytes total.
+Implementations re-concatenate the two before calling the seal /
+open primitives where required. The 32/48/80 split is derived from
+the suite constants; implementations MUST NOT hardcode the numbers
+outside KEM-specific tests — a future suite swap fails closed.
 
-The wire format splits `enc` and `ciphertext` into separate base64 fields (`hpke_kem_output` + `hpke_ciphertext`) for schema-level validation cleanliness. Implementations re-concatenate them before calling `Suite.decrypt`. The 32/48/80 byte split is derived from the suite constants; implementations MUST NOT hardcode the numbers outside KEM-specific tests — a future suite swap fails closed.
-
-PyCA's single-shot HPKE only accepts `info`; it does not expose RFC 9180's separate `aad`. To match across platforms, Phase 9 uses `aad = empty` and folds ALL per-recipient authenticated context into `info`. Tink callers pass `aad = byte[0]` and the same canonical `info` bytes.
+Phase 9 uses `aad = empty` at the HPKE layer and folds ALL
+per-recipient authenticated context into `info`. This matches what
+single-shot HPKE wrappers historically exposed and keeps the
+Python / Kotlin reference implementations symmetric. Tink callers
+pass `aad = byte[0]` and the same canonical `info` bytes.
 
 ### 11.3 Per-Recipient HPKE Info (canonical JSON)
 

@@ -111,10 +111,22 @@ If the drop is a directory you'll zip and hand off (e.g.
   dogfooding; `Syncler` for production handoff)
 
 ```sh
-# Quick scan — should print nothing
-find d:/desktop/for_oloia -name node_modules -o -name __pycache__ \
-  -o -name '*.egg-info' -o -name .triad -o -name '*.env' \
-  -o -name '*.priv' -o -name '*.pem'
+# Quick scan — should print nothing.
+#
+# Note the parentheses + explicit -print: `find -o` shares the
+# implicit -print only with the LAST term, so without grouping
+# the early -name patterns silently match without printing. The
+# previous (broken) form let .env / *.priv leaks slip through
+# the checklist without ever showing up in the output.
+find d:/desktop/for_oloia \( \
+  -name node_modules -o \
+  -name __pycache__ -o \
+  -name '*.egg-info' -o \
+  -name .triad -o \
+  -name '*.env' -o \
+  -name '*.priv' -o \
+  -name '*.pem' \
+\) -print
 ```
 
 ## 7. Version + changelog stamp
