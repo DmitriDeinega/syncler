@@ -31,6 +31,10 @@ dependencies {
     implementation(libs.hilt.android)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.timber)
+    // V4 #20 — BiometricPrompt host for SensitiveActionGate.
+    // androidx.biometric transitively pulls androidx.fragment so the
+    // prompt can be shown over a FragmentActivity-based host.
+    implementation(libs.androidx.biometric)
 
     ksp(libs.hilt.compiler)
 

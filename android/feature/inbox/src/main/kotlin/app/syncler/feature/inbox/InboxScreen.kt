@@ -80,6 +80,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -92,6 +94,16 @@ class InboxViewModel @Inject constructor(
     private val templateActionRunner: TemplateActionRunner,
     val muteStore: app.syncler.core.storage.MuteStore,
     private val pairedSenderStore: app.syncler.core.storage.PairedSenderStore,
+    /**
+     * V4 #20 — exposed to the InboxScreen Composable so the row-tap
+     * handler can consult the gate before opening a sensitive card
+     * AND so the biometric prompt can run as part of that flow.
+     * UI code reads these fields directly; the ViewModel does not
+     * provide a wrapper, because the prompt requires a
+     * FragmentActivity that only the Composable has.
+     */
+    val sensitiveActionGate: app.syncler.core.auth.SensitiveActionGate,
+    val biometricUnlocker: app.syncler.core.auth.BiometricUnlocker,
 ) : ViewModel() {
 
     val items: StateFlow<List<InboxItem>> = repository.items
@@ -487,8 +499,48 @@ fun InboxScreen(
                 val filtered = remember(baseItems, searchQuery) {
                     if (searchQuery.isBlank()) baseItems else baseItems.filter { matchesQuery(it, searchQuery) }
                 }
+                // V4 #20 — gate sensitive-plugin card opens behind a
+                // biometric/device-credential prompt. Lookup of the
+                // item's sensitivity uses the `filtered` list snapshot
+                // so we never block on a stale id. Public cards open
+                // immediately; sensitive cards check the gate, prompt
+                // when locked, and `touch()` the sliding window when
+                // already unlocked.
+                val sensitiveCoroutineScope = rememberCoroutineScope()
+                val activity = LocalContext.current as? androidx.fragment.app.FragmentActivity
+                val gate = viewModel.sensitiveActionGate
+                val unlocker = viewModel.biometricUnlocker
                 val onRowClick: (String) -> Unit = { id ->
-                    if (selectionMode) viewModel.toggleSelect(id) else viewModel.open(id)
+                    if (selectionMode) {
+                        viewModel.toggleSelect(id)
+                    } else {
+                        val item = filtered.firstOrNull { it.id == id }
+                        val isSensitive = item?.sensitivity == "sensitive"
+                        when {
+                            !isSensitive -> viewModel.open(id)
+                            gate.isUnlocked() -> {
+                                gate.touchFromForegroundSensitiveView()
+                                viewModel.open(id)
+                            }
+                            activity == null -> {
+                                // No FragmentActivity host — should not
+                                // happen in production (MainActivity is
+                                // a FragmentActivity); skip silently
+                                // rather than crash.
+                                viewModel.open(id)
+                            }
+                            else -> sensitiveCoroutineScope.launch {
+                                val result = unlocker.promptForUnlock(
+                                    activity = activity,
+                                    title = "Open sensitive card",
+                                    subtitle = "Confirm it's you to view ${item?.senderName ?: "this content"}",
+                                )
+                                if (result is app.syncler.core.auth.BiometricUnlocker.Result.Success) {
+                                    viewModel.open(id)
+                                }
+                            }
+                        }
+                    }
                 }
                 val onRowLongClick: (String) -> Unit = { id -> viewModel.toggleSelect(id) }
                 when {

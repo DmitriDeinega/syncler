@@ -1,9 +1,9 @@
 package app.syncler.android
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
@@ -30,8 +30,12 @@ import app.syncler.feature.inbox.InboxScreen
 import app.syncler.feature.pairing.PairingScreen
 import dagger.hilt.android.AndroidEntryPoint
 
+// V4 #20 — FragmentActivity instead of ComponentActivity so the
+// BiometricPrompt host has a FragmentManager available. FragmentActivity
+// extends ComponentActivity, so existing viewModels(), setContent(),
+// activity-result APIs etc. all continue to work unchanged.
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val mainViewModel by viewModels<MainViewModel>()
     private val authViewModel by viewModels<AuthViewModel>()
     private val devicesViewModel by viewModels<DevicesViewModel>()

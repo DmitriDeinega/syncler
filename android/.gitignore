@@ -1,5 +1,6 @@
 .gradle/
 .gradle-user-home/
+.kotlin/
 build/
 local.properties
 captures/

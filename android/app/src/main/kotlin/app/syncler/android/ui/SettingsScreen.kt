@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.syncler.feature.settings.ChangePasswordCard
 import app.syncler.feature.settings.PluginPermissionsCard
 import app.syncler.feature.settings.RotateMasterKeyCard
+import app.syncler.feature.settings.SecurityCard
 
 /**
  * The Settings tab: device management + account actions (logout). Replaces
@@ -112,6 +113,12 @@ fun SettingsScreen(
             Spacer(Modifier.height(16.dp))
             Text("Account", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(8.dp))
+            // V4 #20 — SensitiveActionGate surface. "Show my user ID"
+            // demonstrates the biometric prompt; "Lock sensitive
+            // actions" clears the in-memory unlock without wiping the
+            // persisted master key (that's the Sign out button below).
+            SecurityCard(modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
             // Phase 8c — `password_rewrap` rotation. Lives in
             // feature/settings so the Hilt ViewModel + RotationRepository
             // dependency edge stays out of :app.
