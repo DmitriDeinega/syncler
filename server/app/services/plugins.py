@@ -209,6 +209,13 @@ async def publish_plugin(
     native_sdk_abi: int | None = None,
     live_inbound_url: str | None = None,
     sensitivity: str = "public",
+    notif_message: bool = True,
+    notif_card_arrived: bool = True,
+    notif_card_updated: bool = False,
+    icon_content_hash: bytes | None = None,
+    icon_format: str | None = None,
+    icon_background_color: str | None = None,
+    icon_visibility: str | None = None,
 ) -> Plugin:
     new_key = _parse_version(version)
 
@@ -296,6 +303,19 @@ async def publish_plugin(
         capabilities=capabilities,
         endpoints=endpoints,
         sensitivity=sensitivity,
+        notif_message=notif_message,
+        notif_card_arrived=notif_card_arrived,
+        notif_card_updated=notif_card_updated,
+        icon_content_hash=icon_content_hash,
+        icon_format=icon_format,
+        icon_background_color=icon_background_color,
+        # V4 #21 — visibility defaults based on sensitivity if the
+        # publisher didn't declare one explicitly.
+        icon_visibility=(
+            icon_visibility
+            if icon_visibility is not None
+            else ("on_unlock" if sensitivity == "sensitive" else "always")
+        ),
     )
     db.add(plugin)
     try:

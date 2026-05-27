@@ -19,6 +19,7 @@ from app.routers import (
     live,
     messages,
     pairing,
+    plugin_assets,
     plugins,
     rotation,
     senders,
@@ -78,6 +79,10 @@ app.include_router(pairing.router, prefix="/v1/pairing")
 app.include_router(messages.router, prefix="/v1/messages")
 app.include_router(state.router, prefix="/v1/state")
 app.include_router(plugins.router, prefix="/v1/plugins")
+# V4 #21 — plugin icon asset upload + serve. Path nested under
+# /v1/plugins so the public GET URL is
+# /v1/plugins/{plugin_row_id}/assets/{content_hash}.
+app.include_router(plugin_assets.router, prefix="/v1/plugins")
 app.include_router(events.router, prefix="/v1/events")
 app.include_router(cards.router, prefix="/v1/cards")
 # V3 #14 — two-way live channel between plugins and senders.

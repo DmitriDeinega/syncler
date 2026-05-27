@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer
 from sqlalchemy import JSON, LargeBinary, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -196,7 +196,74 @@ class Plugin(Base):
     # unlocks. Server stores opaquely; enforcement is client-side
     # because the server is content-blind.
     sensitivity: Mapped[str] = mapped_column(Text, nullable=False, server_default="public")
+    # V4 #21: notification policy. Coarse-grained FCM wake-up policy
+    # the plugin author declares at publish time. Server checks the
+    # flags before fanning out FCM pushes to paired devices. The
+    # plugin still owns the "is this notification-worthy?" decision
+    # via getNotification() — these flags only decide whether the
+    # SERVER bothers to wake the device at all.
+    #   - notif_message: fire FCM on POST /v1/messages/send
+    #   - notif_card_arrived: fire FCM on first cards/upsert per card_key
+    #   - notif_card_updated: fire FCM on subsequent cards/upsert + card.patch
+    # Defaults match triad 169 agreement: message + arrived = true
+    # (most plugins want notifications on these), updated = false
+    # (high-frequency cards would drain battery; opt-in only).
+    notif_message: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"),
+    )
+    notif_card_arrived: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"),
+    )
+    notif_card_updated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"),
+    )
+    # V4 #21: icon metadata. Bytes live in plugin_assets keyed by
+    # content_hash; this row references them. NULL when the plugin
+    # author hasn't supplied an icon. Codex 169 picked first-party
+    # asset hosting over partner CDNs so notification icons load
+    # reliably from a server we control.
+    icon_content_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    icon_format: Mapped[str | None] = mapped_column(Text)
+    icon_background_color: Mapped[str | None] = mapped_column(Text)
+    # "always" | "on_unlock" | "never". Default depends on sensitivity:
+    # "always" for public plugins, "on_unlock" for sensitive ones.
+    # The publish-side validator applies the default if the plugin
+    # doesn't declare one explicitly.
+    icon_visibility: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PluginAsset(Base):
+    """V4 #21 plugin icon storage.
+
+    Content-addressed icon bytes, keyed by SHA-256 of the bytes.
+    Multiple plugin versions can reference the same row (same icon
+    used across publishes), and dedup happens automatically because
+    the primary key IS the hash.
+
+    Triad 169 codex picked first-party hosting over partner CDNs so
+    notification large-icons load reliably without relying on the
+    partner's CDN being up. Bytes are opaque PNG (V1 — codex 169
+    deferred SVG / adaptive icons to a later round).
+
+    Size cap enforced at upload: see routers/plugin_assets.py.
+    """
+
+    __tablename__ = "plugin_assets"
+
+    content_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    bytes_: Mapped[bytes] = mapped_column("bytes", LargeBinary, nullable=False)
+    format: Mapped[str] = mapped_column(Text, nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sender_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("senders.id"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+    )
 
 
 class Message(Base):

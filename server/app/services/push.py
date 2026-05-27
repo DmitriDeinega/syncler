@@ -115,6 +115,54 @@ async def push_message_to_user_devices(
     return outcomes
 
 
+async def push_card_event_to_user_devices(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    plugin_row_id: uuid.UUID,
+    card_key: str,
+    event_type: str,  # "card_arrived" or "card_updated"
+    min_plugin_version: str | None = None,
+    settings: Settings | None = None,
+) -> list[FcmResult]:
+    """V4 #21 — fan out a live-card lifecycle event to the user's devices.
+
+    Server still stays content-blind. The FCM payload carries
+    metadata only (plugin row id, card_key, event type); the device
+    looks up the actual card via the inbox refresh that the FCM
+    triggers, decrypts locally, and asks the plugin's
+    `getNotification(event)` hook whether to actually post a
+    notification.
+
+    Triad 169 wake-up policy lives on the Plugin row; CALLERS of
+    this helper are responsible for checking
+    `plugin.notif_card_arrived` / `plugin.notif_card_updated`
+    before invoking. This keeps the helper a pure delivery
+    primitive.
+    """
+    settings = settings or get_settings()
+    app = _ensure_firebase(settings)
+
+    result = await db.execute(
+        select(Device).where(
+            Device.user_id == user_id,
+            Device.revoked_at.is_(None),
+            Device.fcm_token.is_not(None),
+        ),
+    )
+    devices = list(result.scalars().all())
+    if not devices:
+        return []
+
+    payload = {
+        "type": event_type,
+        "plugin_id": str(plugin_row_id),
+        "card_key": card_key,
+        "min_plugin_version": min_plugin_version or "",
+    }
+    return [_deliver(app, device, payload) for device in devices]
+
+
 async def push_dismiss_to_other_devices(
     db: AsyncSession,
     *,

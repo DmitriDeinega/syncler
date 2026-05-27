@@ -44,7 +44,7 @@ async def upsert_live_card_v2(
     db: AsyncSession,
     *,
     payload: object,  # LiveCardUpsertRequestV2 — avoid circular import
-) -> LiveCard:
+) -> tuple[LiveCard, bool]:
     """Phase 9b V2 live-card upsert (spec §11.5).
 
     Caller (POST /v1/cards/upsert) has already:
@@ -120,6 +120,7 @@ async def upsert_live_card_v2(
         )
     )
     existing = existing_result.scalar_one_or_none()
+    was_arrived = existing is None  # V4 #21 — caller routes FCM by this
 
     if existing:
         if sequence_number <= existing.sequence_number:
@@ -166,7 +167,7 @@ async def upsert_live_card_v2(
 
     await db.commit()
     await db.refresh(card)
-    return card
+    return card, was_arrived
 
 
 async def delete_live_card_v2(

@@ -155,7 +155,17 @@ async def send_message(
     except NonceReplayError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="nonce already used") from exc
 
-    await push_message_to_user_devices(db, message=message)
+    # V4 #21 — fire FCM only if the plugin opted in via
+    # ``notif_message``. The default is True so existing plugins keep
+    # firing notifications; a plugin can publish with notif_message
+    # = false to silence the FCM wake-up entirely.
+    from app.models import Plugin
+    from sqlalchemy import select as sql_select
+    plugin_row = (await db.execute(
+        sql_select(Plugin).where(Plugin.id == message.plugin_id)
+    )).scalar_one_or_none()
+    if plugin_row is None or plugin_row.notif_message:
+        await push_message_to_user_devices(db, message=message)
     # SSE hint: nudge any device the recipient has in foreground to pull
     # /v1/messages/inbox now. Devices in background rely on the FCM
     # wakeup already triggered by push_message_to_user_devices.

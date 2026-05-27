@@ -114,7 +114,7 @@ async def upsert(
         )
 
     try:
-        card = await upsert_live_card_v2(db, payload=payload)
+        card, was_arrived = await upsert_live_card_v2(db, payload=payload)
     except PluginInactiveError as exc:
         raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except PairingMissingError as exc:
@@ -126,10 +126,33 @@ async def upsert(
 
     from app.models import Plugin
     from sqlalchemy import select as sql_select
-    plugin_row = await db.execute(
-        sql_select(Plugin.plugin_identifier).where(Plugin.id == card.plugin_id)
+    plugin_row_result = await db.execute(
+        sql_select(Plugin).where(Plugin.id == card.plugin_id)
     )
-    identifier = plugin_row.scalar_one_or_none() or ""
+    plugin_row = plugin_row_result.scalar_one_or_none()
+    identifier = plugin_row.plugin_identifier if plugin_row else ""
+
+    # V4 #21 — fire FCM if the plugin opted in to notifications for
+    # this lifecycle event. The plugin's getNotification(event) hook
+    # decides on-device whether to actually post a user-visible
+    # notification; this push just wakes the device so the hook can
+    # be dispatched. Server stays content-blind: the payload only
+    # carries (type, plugin_id, card_key, min_plugin_version).
+    if plugin_row is not None:
+        from app.services.push import push_card_event_to_user_devices
+        should_push = (
+            (was_arrived and plugin_row.notif_card_arrived)
+            or (not was_arrived and plugin_row.notif_card_updated)
+        )
+        if should_push:
+            await push_card_event_to_user_devices(
+                db,
+                user_id=card.user_id,
+                plugin_row_id=card.plugin_id,
+                card_key=card.card_key,
+                event_type="card_arrived" if was_arrived else "card_updated",
+                min_plugin_version=card.min_plugin_version,
+            )
 
     fields = parse_v2_pointer(card.encrypted_body_pointer)
     item = LiveCardInboxItemV2(
@@ -423,5 +446,34 @@ async def patch(
         plugin_topic(str(payload.user_id), str(payload.plugin_id)),
         envelope_json,
     )
+
+    # V4 #21 — patches are "card_updated" semantically. Codex 169
+    # explicitly called out that the notification layer shouldn't
+    # care whether the change arrived via full upsert or a
+    # field-level patch — both look like "card updated" to the
+    # user, both should run through getNotification() and the
+    # device-side previousPayload diff. We gate on the same
+    # `notif_card_updated` flag the upsert path uses; plugins that
+    # opt out of update notifications opt out for patches too.
+    plugin_row_for_patch = (await db.execute(
+        select(Plugin).where(Plugin.id == payload.plugin_id)
+    )).scalar_one_or_none()
+    if plugin_row_for_patch is not None and plugin_row_for_patch.notif_card_updated:
+        # Need the card row to extract card_key (the patch envelope
+        # only carries card_id). Fetch it.
+        from app.models import LiveCard as _LiveCard
+        card_row = (await db.execute(
+            select(_LiveCard).where(_LiveCard.id == payload.card_id)
+        )).scalar_one_or_none()
+        if card_row is not None:
+            from app.services.push import push_card_event_to_user_devices
+            await push_card_event_to_user_devices(
+                db,
+                user_id=payload.user_id,
+                plugin_row_id=payload.plugin_id,
+                card_key=card_row.card_key,
+                event_type="card_updated",
+                min_plugin_version=card_row.min_plugin_version,
+            )
 
     return Response(status_code=status.HTTP_202_ACCEPTED)

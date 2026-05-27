@@ -476,6 +476,46 @@ class Client:
             return detail.get("error") == "stale_recipient_set"
         return False
 
+    # ---------------------------- Plugin assets (V4 #21) ------------------
+
+    def upload_plugin_asset(
+        self,
+        *,
+        png_bytes: bytes,
+    ) -> bytes:
+        """V4 #21 — upload a plugin icon (PNG bytes) to the server.
+
+        Returns the 32-byte SHA-256 content hash of the uploaded
+        bytes. Pass this to `publish_plugin(icon_content_hash=...)`.
+
+        The server stores icon bytes in its own ``plugin_assets``
+        table (codex 169 first-party hosting decision), so
+        notification rendering doesn't depend on the partner's CDN
+        being reachable. The same hash uploaded twice is a no-op
+        (content-addressed dedup).
+
+        Constraints (enforced server-side, see
+        ``server/app/routers/plugin_assets.py``):
+        - PNG only (V1 — SVG / adaptive deferred per triad 169)
+        - ≤100 KB
+        - Square, ≥96×96
+        """
+        self._require_sender_id()
+        body: dict[str, Any] = {
+            "sender_id": self._canonical_sender_id(),
+            "content_base64": b64(png_bytes),
+            "format": "image/png",
+        }
+        body["sender_signature"] = b64(self.private_key.sign(canonical_json(body)))
+        resp = self.session.post(
+            f"{self.base_url}/v1/plugins/me/assets",
+            json=body,
+            timeout=30,  # icon bytes can be ~100 KB → bump above the default
+        )
+        resp.raise_for_status()
+        from base64 import b64decode as _b64decode
+        return _b64decode(resp.json()["content_hash"])
+
     # ---------------------------- Plugin publishing ------------------------
 
     def publish_plugin(
@@ -495,6 +535,13 @@ class Client:
         card_key_path: str | None = None,
         live_inbound_url: str | None = None,
         sensitivity: str = "public",
+        notif_message: bool = True,
+        notif_card_arrived: bool = True,
+        notif_card_updated: bool = False,
+        icon_content_hash: bytes | None = None,
+        icon_format: str | None = None,
+        icon_background_color: str | None = None,
+        icon_visibility: str | None = None,
     ) -> dict[str, Any]:
         """Publish a new plugin version. Returns the server response (with
         ``plugin_row_id`` which the sender then uses in messages).
@@ -541,6 +588,23 @@ class Client:
         # public sign over byte-identical envelopes.
         if sensitivity != "public":
             body["sensitivity"] = sensitivity
+        # V4 #21 — notification policy + icon. Conditionally
+        # included so pre-V4-#21 publishers sign byte-identical
+        # envelopes. Mirrors server's _publish_envelope logic.
+        if notif_message is not True:
+            body["notif_message"] = notif_message
+        if notif_card_arrived is not True:
+            body["notif_card_arrived"] = notif_card_arrived
+        if notif_card_updated is not False:
+            body["notif_card_updated"] = notif_card_updated
+        if icon_content_hash is not None:
+            body["icon_content_hash"] = b64(icon_content_hash)
+        if icon_format is not None:
+            body["icon_format"] = icon_format
+        if icon_background_color is not None:
+            body["icon_background_color"] = icon_background_color
+        if icon_visibility is not None:
+            body["icon_visibility"] = icon_visibility
 
         body["sender_signature"] = b64(self.private_key.sign(canonical_json(body)))
         resp = self.session.post(f"{self.base_url}/v1/plugins/publish", json=body, timeout=10)

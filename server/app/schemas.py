@@ -796,6 +796,57 @@ class PluginPublishRequest(BaseModel):
     # the user/app-policy timeout (codex 166 + gemini 166: plugins
     # may not weaken security posture).
     sensitivity: Literal["public", "sensitive"] = "public"
+    # V4 #21 — notification policy. Server uses these to decide
+    # whether to fan out FCM at all; the plugin's
+    # `getNotification(event)` hook still owns the on-device
+    # decision via NotificationDescriptor return value.
+    notif_message: bool = True
+    notif_card_arrived: bool = True
+    notif_card_updated: bool = False
+    # V4 #21 — icon metadata. Bytes are uploaded separately to
+    # POST /v1/plugins/me/assets and referenced here by SHA-256
+    # content hash. NULL when the plugin has no icon. All four
+    # icon fields are accepted together: a publish with
+    # icon_content_hash MUST also pass icon_format, and SHOULD
+    # pass icon_visibility (the publish validator defaults
+    # visibility based on `sensitivity` when omitted).
+    icon_content_hash: str | None = None  # base64 SHA-256
+    icon_format: str | None = None  # "image/png" only in V1
+    icon_background_color: str | None = None  # optional "#RRGGBB"
+    icon_visibility: Literal["always", "on_unlock", "never"] | None = None
+
+    @field_validator("icon_content_hash")
+    @classmethod
+    def validate_icon_content_hash(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        decode_base64(value, field_name="icon_content_hash", exact=32)
+        return value
+
+    @field_validator("icon_format")
+    @classmethod
+    def validate_icon_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value != "image/png":
+            raise ValueError(
+                "icon_format must be 'image/png' (V1 — SVG / adaptive "
+                "icons deferred per triad 169)"
+            )
+        return value
+
+    @field_validator("icon_background_color")
+    @classmethod
+    def validate_icon_background_color(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        # Match #RRGGBB or #AARRGGBB (case-insensitive hex).
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", value):
+            raise ValueError(
+                "icon_background_color must be a CSS hex color "
+                "(#RRGGBB or #AARRGGBB)"
+            )
+        return value
 
     @field_validator("live_inbound_url")
     @classmethod
@@ -985,6 +1036,14 @@ class PluginLatestResponse(BaseModel):
     live_inbound_url: str | None = None
     # V4 #20: per-plugin sensitivity declaration.
     sensitivity: Literal["public", "sensitive"] = "public"
+    # V4 #21: notification policy + icon metadata.
+    notif_message: bool = True
+    notif_card_arrived: bool = True
+    notif_card_updated: bool = False
+    icon_content_hash: str | None = None
+    icon_format: str | None = None
+    icon_background_color: str | None = None
+    icon_visibility: Literal["always", "on_unlock", "never"] | None = None
 
 
 # M11.4: classified revocation reasons. Devices use this to decide UX:

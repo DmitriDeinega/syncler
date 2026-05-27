@@ -91,6 +91,24 @@ def _publish_envelope(payload: PluginPublishRequest) -> bytes:
     # author explicitly opts in to "sensitive".
     if payload.sensitivity != "public":
         envelope["sensitivity"] = payload.sensitivity
+    # V4 #21: notification policy + icon metadata.
+    # Conditionally included so pre-V4-#21 publishers sign
+    # byte-identical envelopes. Each defaults documented at
+    # the schema level; only divergence from default is signed.
+    if payload.notif_message is not True:
+        envelope["notif_message"] = payload.notif_message
+    if payload.notif_card_arrived is not True:
+        envelope["notif_card_arrived"] = payload.notif_card_arrived
+    if payload.notif_card_updated is not False:
+        envelope["notif_card_updated"] = payload.notif_card_updated
+    if payload.icon_content_hash is not None:
+        envelope["icon_content_hash"] = payload.icon_content_hash
+    if payload.icon_format is not None:
+        envelope["icon_format"] = payload.icon_format
+    if payload.icon_background_color is not None:
+        envelope["icon_background_color"] = payload.icon_background_color
+    if payload.icon_visibility is not None:
+        envelope["icon_visibility"] = payload.icon_visibility
     return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -154,6 +172,16 @@ async def publish(
             native_sdk_abi=payload.native_sdk_abi,
             live_inbound_url=payload.live_inbound_url,
             sensitivity=payload.sensitivity,
+            notif_message=payload.notif_message,
+            notif_card_arrived=payload.notif_card_arrived,
+            notif_card_updated=payload.notif_card_updated,
+            icon_content_hash=(
+                base64.b64decode(payload.icon_content_hash, validate=True)
+                if payload.icon_content_hash else None
+            ),
+            icon_format=payload.icon_format,
+            icon_background_color=payload.icon_background_color,
+            icon_visibility=payload.icon_visibility,
         )
     except InvalidVersionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -211,6 +239,16 @@ async def latest(
         native_sdk_abi=plugin.native_sdk_abi,
         live_inbound_url=plugin.live_inbound_url,
         sensitivity=plugin.sensitivity,
+        notif_message=plugin.notif_message,
+        notif_card_arrived=plugin.notif_card_arrived,
+        notif_card_updated=plugin.notif_card_updated,
+        icon_content_hash=(
+            base64.b64encode(plugin.icon_content_hash).decode("ascii")
+            if plugin.icon_content_hash else None
+        ),
+        icon_format=plugin.icon_format,
+        icon_background_color=plugin.icon_background_color,
+        icon_visibility=plugin.icon_visibility,
     )
 
 
@@ -263,6 +301,16 @@ async def by_id(
         native_sdk_abi=plugin.native_sdk_abi,
         live_inbound_url=plugin.live_inbound_url,
         sensitivity=plugin.sensitivity,
+        notif_message=plugin.notif_message,
+        notif_card_arrived=plugin.notif_card_arrived,
+        notif_card_updated=plugin.notif_card_updated,
+        icon_content_hash=(
+            base64.b64encode(plugin.icon_content_hash).decode("ascii")
+            if plugin.icon_content_hash else None
+        ),
+        icon_format=plugin.icon_format,
+        icon_background_color=plugin.icon_background_color,
+        icon_visibility=plugin.icon_visibility,
     )
 
 
