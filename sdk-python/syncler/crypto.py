@@ -260,12 +260,14 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-# HPKE (RFC 9180) via pyhpke. PyCA's `cryptography` library does NOT
-# ship HPKE in any released version (the `hazmat.primitives.hpke`
-# namespace is a draft that was never published). pyhpke is the
-# canonical pure-Python RFC 9180 implementation and is wire-
-# compatible with the Android host (BouncyCastle HPKE) and any
-# RFC 9180-conformant implementation. Suite IDs match exactly:
+# HPKE (RFC 9180) via pyhpke for the SDK. The server uses PyCA
+# `cryptography`'s `hazmat.primitives.hpke` directly (shipped in
+# cryptography 47.x), but the SDK supports a wider cryptography
+# range — partners on cryptography <47 still need HPKE — so we
+# depend on pyhpke. pyhpke is a pure-Python RFC 9180 reference
+# implementation, wire-compatible with PyCA HPKE, BouncyCastle
+# HPKE (Android), Tink, and any other RFC 9180-conformant
+# implementation. Suite IDs match exactly:
 # DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM
 # = (0x0020, 0x0001, 0x0002).
 from pyhpke import AEADId, CipherSuite, KDFId, KEMId, KEMKey

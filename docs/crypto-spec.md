@@ -1035,19 +1035,29 @@ KDF id  = 0x0001
 AEAD id = 0x0002
 ```
 
-The authoritative contract is RFC 9180 with the suite identifiers
-above. Any HPKE library that conforms to RFC 9180 with this suite
-will interoperate.
+The authoritative contract is **RFC 9180** with the suite
+identifiers above. Any HPKE library that conforms to RFC 9180
+with this suite will interoperate. RFC 9180's Appendix A test
+vectors are the language-neutral validation material for any new
+implementation: <https://www.ietf.org/rfc/rfc9180.html>.
 
 **Library targets in the reference implementations:**
 
-- **Server + SDK Python:** [`pyhpke`](https://pypi.org/project/pyhpke/) ≥ 0.6 (`pip install pyhpke`).
-  PyCA `cryptography` has historically had an open request for an
-  HPKE module but has not shipped one as of writing; an earlier
-  draft of this spec referenced a `cryptography.hazmat.primitives.hpke`
-  import that does not exist. The actual SDK code in
-  `sdk-python/syncler/crypto.py` uses `pyhpke.CipherSuite` —
-  match that.
+- **Server:** PyCA [`cryptography`](https://cryptography.io) ≥ 47
+  ships HPKE as `cryptography.hazmat.primitives.hpke` — current
+  server pins `cryptography>=48.0.0,<49` and imports
+  `Suite, KEM, KDF, AEAD` directly. PyCA's `Suite.encrypt(...)`
+  returns the concatenation `enc || ciphertext` (and
+  `Suite.decrypt(...)` splits it).
+- **SDK Python:** [`pyhpke`](https://pypi.org/project/pyhpke/) ≥ 0.6
+  (`pip install pyhpke`). The SDK depends on a wider
+  `cryptography` range than the server (partners on
+  `cryptography<47` still need HPKE), so we use pyhpke for
+  cross-version compatibility. pyhpke is a pure-Python RFC 9180
+  reference implementation; it interoperates with PyCA HPKE
+  byte-for-byte on the same suite. (An earlier draft of this
+  spec wrongly claimed PyCA had never shipped HPKE; the API
+  landed in `cryptography` 47.)
 - **Android (Kotlin):** Google Tink — `com.google.crypto.tink:tink-android`.
 
 The wire format splits the KEM output and the AEAD ciphertext into
