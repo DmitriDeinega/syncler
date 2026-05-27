@@ -45,7 +45,14 @@ class MainActivity : FragmentActivity() {
         setContent {
             MaterialTheme {
                 Surface {
-                    val isUnlocked by mainViewModel.isUnlocked.collectAsStateWithLifecycle(initialValue = false)
+                    // No initialValue — mainViewModel.isUnlocked is
+                    // a StateFlow seeded from the session's current
+                    // value at construction, so the first composition
+                    // gets the correct answer synchronously. (Pre-V4
+                    // #20-fix this passed initialValue=false and
+                    // flashed AuthScreen for one frame on every cold
+                    // start.)
+                    val isUnlocked by mainViewModel.isUnlocked.collectAsStateWithLifecycle()
                     if (!isUnlocked) {
                         AuthScreen(viewModel = authViewModel)
                     } else {
