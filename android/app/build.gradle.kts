@@ -13,8 +13,8 @@ android {
     defaultConfig {
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.3.0"
+        versionCode = 2
+        versionName = "0.3.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val baseUrl = (project.findProperty("syncler.server.base.url") as? String)
             ?: "http://10.0.2.2:8000/"
