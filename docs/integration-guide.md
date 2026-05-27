@@ -1069,7 +1069,59 @@ Cross-device sync follows the existing user-state lockstep contract — last-wri
 
 Spec: `docs/plugin-prefs.md`. The plugin SDK has NO API to read or write prefs — they're user policy, not plugin policy.
 
-## 15. Surfaces not covered in this guide
+## 15. Observability + delivery confirmation boundary
+
+A common question from new partners: *"Did my last 10 cards land?"* The honest answer has two parts — what Syncler **can** tell you, and what it **cannot** because of the end-to-end encryption contract.
+
+### What "sent" means
+
+When `client.send_to(...)` returns `200 OK`, the following has happened:
+
+- The server accepted your signed envelope (Ed25519 signature verified against your registered sender key)
+- The recipient-set classifier validated the per-device HPKE envelopes
+- The encrypted message row is persisted in Postgres
+- An SSE/FCM hint has been fanned out to the user's connected devices
+
+It does NOT mean:
+
+- The user's phone has decrypted the message (server can't see plaintext)
+- The user has seen the notification (server can't see device-side UI state)
+- The user has opened your plugin (handled entirely on-device)
+
+The server is content-blind by construction. There is no path to a "delivery receipt" or "read receipt" without breaking the E2EE model.
+
+### What you can observe (partner-facing)
+
+Today, via `GET /v1/senders/me/*` endpoints (Ed25519-signed like every other admin call):
+
+- `/v1/senders/me/messages?limit=N` — last N messages your sender produced: row id, encrypted-body size, `created_at`, `expires_at`. No payload visibility.
+- `/v1/senders/me/cards?limit=N` — last N live cards: `card_key`, `sequence_number`, `updated_at`, `expires_at`.
+- `/v1/senders/me/stats` — totals: messages in window, paired users, live cards in flight.
+
+These tell you "did my send reach the server", "how many users have paired", "what's my recent throughput". Use them as the first stop when a partner integration appears unhealthy.
+
+### What you can observe (operator-facing, not partner-visible)
+
+If you operate the Syncler server, additional signals are available from the server logs + metrics:
+
+- Caddy access logs (JSON, at `/var/log/caddy/syncler-access.log`) — request rates, latencies, status codes per endpoint
+- uvicorn / FastAPI request logs — application-level routing + validation errors
+- Postgres query logs (off by default)
+- Redis broker pub/sub metrics (V3 backplane)
+
+These are not exposed to partners; they're the operator's tool for diagnosing systemic issues.
+
+### Troubleshooting flow when a partner says "my card didn't land"
+
+1. **`/v1/senders/me/stats`** first — did the message-count tick up after their `send_to`?
+2. **`/v1/senders/me/messages?limit=10`** — is their recent message ID present? `expires_at` reasonable?
+3. **Pairing check** — is the user paired (`/v1/senders/me/stats` reports `paired_users`)? If they re-paired, their `user_id` may have changed.
+4. **Device-side** — is the user's Syncler app foregrounded (SSE active) or backgrounded (FCM dependent)? Network connectivity on the device?
+5. **Operator escalation** — if 1-4 look fine, the operator can grep the Caddy + uvicorn logs for the message ID's timestamp window.
+
+The intentional gap: you **cannot** answer "did the user see my notification" from the server. That's a deliberate consequence of the E2EE design, not a missing feature.
+
+## 16. Surfaces not covered in this guide
 
 The platform ships a few execution surfaces beyond `script` and `template` that aren't a public integration target yet. Mentioning them so you don't go looking:
 
@@ -1080,4 +1132,4 @@ For partner integrations today, `renderer: "script"` and `renderer: "template"` 
 
 ---
 
-**Fifteen sections.** If you needed more than that to integrate, the SDK has a DX problem — file a finding back at the Syncler team.
+**Sixteen sections.** If you needed more than that to integrate, the SDK has a DX problem — file a finding back at the Syncler team.
