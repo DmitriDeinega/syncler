@@ -1,0 +1,3 @@
+# Pin to the SDK + broker extras + dotenv loader.
+syncler[broker]
+python-dotenv>=1.0,<2

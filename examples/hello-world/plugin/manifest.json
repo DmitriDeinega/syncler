@@ -1,0 +1,24 @@
+{
+  "id": "app.syncler.examples.hello-world",
+  "name": "Hello World",
+  "version": "0.1.0",
+  "senderId": "REPLACE_WITH_YOUR_SENDER_ID",
+  "renderer": "template",
+  "dismissBehavior": "dismiss_local_only",
+  "minPlatformVersion": "1.0.0",
+  "declaredCapabilities": [],
+  "declaredEndpoints": [],
+  "bundleHash": "UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE",
+  "signature": "UNSIGNED-PLACEHOLDER-REPLACE-WITH-SIGN-BUNDLE",
+  "signed_bundle_url": "https://your-cdn.example/hello-world.bundle.js",
+  "template": {
+    "layout": "standard_card",
+    "fields": {
+      "title": { "path": "$.hostPreview.title" },
+      "subtitle": { "path": "$.hostPreview.subtitle" },
+      "body": { "path": "$.greeting" },
+      "footer": { "path": "$.sent_at" }
+    },
+    "actions": []
+  }
+}

@@ -4,8 +4,12 @@
 # Internal design history — local-only
 .triad/
 
-# Local example senders — not part of the published artifact
-examples/
+# Local example senders — not part of the published artifact.
+# Match only direct children so the negation below works (git
+# directory-excludes can't be negated for their contents).
+# `hello-world` IS published as the canonical onboarding example.
+examples/*
+!examples/hello-world
 
 # Python
 __pycache__/
