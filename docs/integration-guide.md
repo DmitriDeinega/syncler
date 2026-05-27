@@ -20,7 +20,7 @@ In every case you also need **backend code** that publishes the plugin once and 
 
 The Syncler inbox shows a *native* row for every message — sender name, title, subtitle, summary, arrival time — pulled from the `hostPreview` block you embed in your payload (§2). The detail view that opens on tap is what your script bundle's `render()` or your template manifest produces.
 
-**Pairing** — V1 has the user copy `user_id` + `pairing_key_hex` from the device into your sender's CLI by hand. V1.5 (the default going forward) replaces the copy step with an encrypted POST from the device to your sender's broker. The user only sees the fingerprint-confirm step; the rest is automatic. See §8.5 for setup.
+**Pairing** — your backend hosts a small broker URL; the user scans a QR your app generates, confirms the fingerprint on their phone, and the pairing key flows back to your service automatically. See §8.5 for the full flow. (A manual copy-paste fallback exists for cases where the broker is unreachable, but it's not the path you build against — see §8.5's fallback note.)
 
 ### What the host does for you
 
@@ -476,7 +476,10 @@ The revoke request is signed by the SDK. The `reason` value is included in the s
 ## 6. Sending a card (your backend, per event)
 
 ```python
-# After pairing — see SDK README for the pairing dance.
+# After pairing (see §8.5 for the full flow), your service has
+# persisted the (user_id, pairing_key) pair returned by
+# `client.wait_for_pairing(...)`. On the next process start,
+# reload it from your DB and tell the Client:
 client.set_pairing(user_id="...", pairing_key=b"...32-bytes...")
 
 result = client.send_to(
@@ -536,34 +539,32 @@ def action():
 
 ## 8. Testing it end-to-end
 
-> **Starting a new plugin from scratch?** Run `npm create @syncler/plugin <name>` first — it scaffolds `src/plugin.ts`, `manifest.json`, `build.sh`, `package.json`, `README.md`, and `.gitignore` for you, validated against the SDK rules. Pair it with the `examples/trading-bot/` directory for a complete sender + plugin round-trip you can copy from.
+> **Starting a new plugin from scratch?** Run `npm create @syncler/plugin <name>` first — it scaffolds `src/plugin.ts`, `manifest.json`, `build.sh`, `package.json`, `README.md`, and `.gitignore` for you, validated against the SDK rules. Pair it with `examples/hello-world/` for a minimal sender + plugin round-trip you can clone and `python bot.py` against.
 
 1. Install the Syncler Android app (`./gradlew :app:installDebug`).
 2. Sign up + log in. The app auto-enrolls this device with the server.
-3. From your backend, run a script that registers your sender and prints a pairing QR (see SDK README).
+3. From your backend, run a script that registers your sender, brings up the broker, and prints a pairing QR via `client.create_pairing_qr(sender_broker_url=...)` (see §8.5).
 4. Tap **Pair sender** -> **Scan QR** in the Syncler app. Confirm the fingerprint matches what your script prints.
-5. **Pairing handoff.** Two paths depending on how your sender is set up:
-   - **V1.5 automated (default going forward):** if your sender has registered a bootstrap key and supplied `sender_broker_url` at `create_pairing_qr(...)` time, the app POSTs an encrypted bootstrap envelope (containing `user_id` + `pairing_key`, sealed with the sender's X25519 bootstrap public key) to your broker after fingerprint confirmation; your sender's `Client.wait_for_pairing(...)` returns the decrypted pair. No copy step. See §8.5 for the broker setup.
-   - **V1 manual:** the app shows your `user_id` and a `pairing_key_hex`. Copy both and feed them into your backend's `client.set_pairing(user_id, pairing_key=bytes.fromhex(...))` so it can encrypt for you. This is also the fallback when the broker POST fails in the automated path.
+5. **Pairing completes automatically.** The app POSTs an HPKE-sealed bootstrap envelope (containing `user_id` + a freshly-generated 32-byte `pairing_key`) to your broker URL. Your backend's `client.wait_for_pairing(...)` returns the decrypted pair. **The user never sees a hex blob.** (If the broker POST fails — broker down, network glitch — the app falls back to showing `user_id` + `pairing_key_hex` for manual paste into `client.set_pairing(...)`. See §8.5's "Fallback" note.)
 6. Publish your plugin (`client.publish_plugin(...)`) — save the `plugin_row_id`.
 7. Run `client.send_to(...)` with a test payload.
 8. The server pushes an `inbox.changed` event over the SSE stream the open app is subscribed to (foreground); the phone refreshes its inbox, decrypts the message, fetches your bundle (or applies your template manifest), and shows the native row within ~1s. If the app is backgrounded, FCM wakes it and the inbox refresh happens on the next foreground.
 9. Tap the row to open the plugin-rendered detail view, then tap your action button.
 10. Confirm your `/api/action` endpoint received the POST.
 
-A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/trading-bot/` — `python bot.py register` → `pair` → `publish-plugin` → `ack-server` + `loop` produces a real card with a working Acknowledge round-trip. The example uses the automated V1.5 pairing flow with an in-process broker thread; `set-pairing` is preserved as a V1 manual fallback when the broker can't be reached.
+A complete `bot.py` + `plugin/` pair you can run as-is lives at `examples/hello-world/` — `python sender/bot.py` registers, prints a QR, waits for pairing, publishes the plugin, then loops sending a card every 30s. The minimum-viable starting point for any new partner.
 
-## 8.5 Automated pairing (V1.5)
+## 8.5 Pairing
 
-V1 pairing makes the user copy `user_id` + `pairing_key_hex` by hand into your sender's CLI. V1.5 replaces step 5 above with an encrypted POST: after the user confirms the fingerprint, the app silently delivers the pairing key to your sender's broker. The user never sees a hex blob.
+Pairing is the one-time handshake that links a specific Syncler user (`user_id`) with your sender (`sender_id`) and exchanges a fresh per-pairing 32-byte AES key. Each user pairs once per sender; subsequent message sends carry that pairing key in the V2 envelope.
 
 The protocol underneath (HPKE-style envelope, X25519 ECDH, AES-GCM with AAD-binding) is in `docs/crypto-spec.md §9`. This section is the integration walkthrough.
 
-### Why automated
+### Properties
 
-- One-step pairing for users.
-- Production senders don't need a manual-paste UX.
-- The substitution-attack guards (Ed25519 over the bootstrap key + AAD-binding on `sender_broker_url`) keep V1's trust model intact.
+- **One-step pairing for users.** They scan, confirm a fingerprint, and the rest is automatic.
+- **Production senders never deal with a manual-paste UX** on the happy path.
+- **Substitution-attack guards in place**: Ed25519 signature over the bootstrap key + AAD-binding on `sender_broker_url` prevent a hostile server from steering pairings to a different broker.
 
 ### Sender setup
 
@@ -643,6 +644,52 @@ You need to do four things, once:
    # `client.pairing_key` is now set; no further `set_pairing` call needed.
    ```
 
+### Multi-tenant: one sender, many users
+
+The same sender serves every user that pairs with it. The architecture is multi-tenant by design:
+
+| Item | Scope | Where it lives |
+|---|---|---|
+| Sender Ed25519 signing key | One per sender | Your backend (`private_key_path`) |
+| Sender X25519 bootstrap key | One per sender | Your broker process |
+| Plugin bundle + `plugin_row_id` | One per plugin version | Syncler server |
+| User account (`user_id`) | One per Syncler end-user | Syncler server, master-key wrapped on device |
+| `pairing_id` (the QR-tracking UUID) | One per pairing attempt | Your DB + briefly server-side `pending_pairings` |
+| `pairing_key` (32-byte AES) | One per `(sender_id, user_id)` pair | Generated on the user's phone, sealed back to your bootstrap key, returned via broker |
+| Device X25519 keypair | One per device under a user | Generated locally on each phone/tablet |
+
+When your service has 1,000 users, you'll have 1,000 distinct `pairing_key` values — **no key material shared between users**. Even within a single user, two devices have distinct X25519 keys (V2 envelope sealing happens per-device).
+
+### Per-user QR pattern
+
+Generate a fresh QR per user signing up on your app, bind the `pairing_id` to that user in your DB before showing the QR, and only honor pairings whose `pairing_id` you authorized:
+
+```python
+def on_signup(my_app_user):
+    path = client.create_pairing_qr(
+        ttl_seconds=300,
+        out_path=f"/tmp/{my_app_user.id}.png",
+        sender_broker_url="https://sender.example.com/syncler/bootstrap",
+    )
+    # client.pairing_id was just assigned; persist the binding
+    my_app_user.pending_syncler_pairing_id = client.pairing_id
+    my_app_user.save()
+    return path  # show this PNG only to my_app_user's authenticated session
+
+def poll_pairing_completion(my_app_user):
+    pairing = client.wait_for_pairing(timeout_seconds=120)
+    # On success: bind the resulting syncler user_id back to your DB
+    my_app_user.syncler_user_id = pairing.user_id
+    my_app_user.syncler_pairing_key = encrypt_at_rest(pairing.pairing_key)
+    my_app_user.save()
+```
+
+**Two security gotchas worth pinning in code review:**
+
+1. **The QR's `pairing_id` is claimable by whoever scans first.** If `user_A`'s QR somehow lands on `user_B`'s screen and `user_B` scans, your DB will end up mapping `user_A.syncler_user_id = userB.id`. Mitigation: only render the QR inside the authenticated session that owns the `pairing_id`; expire QRs short (`ttl_seconds=300` default is reasonable); never reuse a `pairing_id` across users.
+
+2. **The `pairing_key` is sensitive on your backend.** Treat it like an OAuth refresh token: at-rest encryption, restricted access, not in logs. Loss enables an attacker who already breached your DB to forge messages to that user; never put it in a frontend bundle or expose it via an API.
+
 ### Android user flow
 
 When the device fetches the preview and sees all four bootstrap fields, the pairing screen uses the automated path:
@@ -655,7 +702,20 @@ When the device fetches the preview and sees all four bootstrap fields, the pair
 6. Broker decrypts, writes to its storage, returns 201.
 7. `Client.wait_for_pairing` in your sender's send loop picks up the new pairing tuple.
 
-If step 5 fails (broker down, network glitch), the app **shows a fallback banner** with the same `user_id` + `pairing_key_hex` block as the V1 manual flow. The device-side pairing is already real (step 4 finalized it); only the sender catch-up needs the manual paste.
+### Fallback (manual paste)
+
+If step 5 above fails (broker down, network glitch), the app **shows a fallback banner** with the `user_id` + `pairing_key_hex` rendered as copyable text. The device-side pairing is already real (step 4 finalized it); only the sender catch-up needs the manual paste:
+
+```python
+# In your sender process — recover from a broker-side failure
+# by manually applying the values the user copied from their phone:
+client.set_pairing(
+    user_id="user-uuid-from-app",
+    pairing_key=bytes.fromhex("64-char-hex-from-app"),
+)
+```
+
+This is **the only situation** where a partner builds against the manual path. The happy-path integration never touches `pairing_key_hex` or `set_pairing`. Persist the recovered pairing in your DB; `client.set_pairing(...)` is also the same call your service makes on next process start to reload the pairing from your DB.
 
 ### Failure modes
 
