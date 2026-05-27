@@ -101,8 +101,14 @@ jobs:
         working-directory: examples/hello-world/plugin
         run: |
           if [ -f build.sh ]; then
+            # build.sh auto-generates the sender Ed25519 PEM via openssl
+            # if missing — runner has openssl pre-installed on ubuntu-latest.
+            npm install
             bash build.sh
-            test -f manifest.signed.json && echo "manifest signed OK" || (echo "no signed manifest" && exit 1)
+            # sign-bundle.ts writes to dist/manifest.signed.json (matches
+            # the path bot.py reads). Codex 163 caught an earlier check
+            # asserting the wrong path.
+            test -f dist/manifest.signed.json && echo "manifest signed OK" || (echo "no signed manifest" && exit 1)
           else
             echo "examples/hello-world not present yet — skipping"
           fi

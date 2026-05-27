@@ -35,18 +35,25 @@ echo "--- signing manifest ---"
 # Sign with the SDK's sign-bundle.ts tool. Uses the same Ed25519
 # private key your sender uses (sender-ed25519.pem) so the resulting
 # signature passes the server's publish-time verification.
-SENDER_KEY="${SENDER_KEY:-../../sender/sender-ed25519.pem}"
+#
+# The key gets generated here if missing — sign-bundle.ts must run
+# BEFORE the sender bot, so we can't depend on bot.py creating it on
+# first launch. The SDK's `load_private_key` loads PKCS8 Ed25519 PEMs,
+# which is exactly what `openssl genpkey -algorithm Ed25519` writes.
+SENDER_KEY="${SENDER_KEY:-../sender/sender-ed25519.pem}"
 if [ ! -f "$SENDER_KEY" ]; then
-    echo "Sender key not found at $SENDER_KEY"
-    echo "Run the sender's bot.py once first; it generates the key on first start."
-    exit 1
+    mkdir -p "$(dirname "$SENDER_KEY")"
+    echo "Generating sender key at $SENDER_KEY"
+    openssl genpkey -algorithm Ed25519 -out "$SENDER_KEY"
 fi
 
+# Positional args for sign-bundle.ts: <bundle> <private_key> <manifest> [output]
+# The tool writes the signed manifest directly to <output> — no stdout redirect.
 npx tsx node_modules/@syncler/plugin-sdk/tools/sign-bundle.ts \
-    manifest.json \
     dist/plugin.bundle.js \
     "$SENDER_KEY" \
-    > dist/manifest.signed.json
+    manifest.json \
+    dist/manifest.signed.json
 
 echo "--- done ---"
 echo "    dist/plugin.bundle.js    ($(wc -c < dist/plugin.bundle.js) bytes)"

@@ -32,6 +32,7 @@ from syncler.bootstrap import (
 )
 from syncler.broker import make_app
 from syncler.broker_storage import InMemoryBrokerStorage
+from syncler.crypto import compute_manifest_hash
 
 load_dotenv()
 
@@ -125,11 +126,17 @@ def main() -> None:
                 "Set SIGNED_BUNDLE_URL in .env to a publicly-reachable URL "
                 "where dist/plugin.bundle.js is served (any CDN works)."
             )
+        # The signed manifest contains `bundleHash` (hex) and `signature` (hex)
+        # written by sign-bundle.ts. `manifest_hash` is NOT a stored field —
+        # the server expects SHA-256 over the canonical manifest minus
+        # signature, which `compute_manifest_hash` produces from the same
+        # dict. Codex 163 caught the older bot.py reading a nonexistent
+        # manifest["manifest_hash"] which broke first-time partners.
         result = client.publish_plugin(
             plugin_identifier=manifest["id"],
             version=manifest["version"],
-            manifest_hash=bytes.fromhex(manifest["manifest_hash"]),
-            bundle_hash=bytes.fromhex(manifest["bundle_hash"]),
+            manifest_hash=compute_manifest_hash(manifest),
+            bundle_hash=bytes.fromhex(manifest["bundleHash"]),
             bundle_signature=bytes.fromhex(manifest["signature"]),
             signed_bundle_url=bundle_url,
             capabilities=manifest.get("declaredCapabilities", []),

@@ -6,6 +6,7 @@ The smallest runnable example: a Python sender that publishes a template-rendere
 
 - Python 3.11+
 - Node 20+
+- `openssl` on `PATH` (`build.sh` calls `openssl genpkey -algorithm Ed25519` to mint the sender key on first run — Linux/macOS ship it; on Windows install Git for Windows or use WSL)
 - `Syncler` Android app installed on a phone (the test APK or a Google Play release)
 - A reachable Syncler server URL (the test instance lives at https://63-181-3-204.sslip.io/)
 
@@ -29,10 +30,12 @@ npm install
 ```bash
 cd examples/hello-world/plugin
 bash build.sh
-# Produces dist/plugin.bundle.js + dist/manifest.signed.json + dist/bundle.sha256
+# Produces dist/plugin.bundle.js + dist/manifest.signed.json + dist/bundle.sha256.
+# First run also writes ../sender/sender-ed25519.pem (the sender's signing key
+# — keep this file out of git; .gitignore already excludes it).
 ```
 
-The `build.sh` script bundles `src/plugin.ts` via esbuild and runs `sign-bundle.ts` to produce a manifest with bundle hash + Ed25519 signature. Examine the script — it's the same toolchain you'll use for your real plugin.
+The `build.sh` script bundles `src/plugin.ts` via esbuild and runs `sign-bundle.ts` to produce a manifest with bundle hash + Ed25519 signature. On first run it mints a fresh Ed25519 key at `../sender/sender-ed25519.pem` via `openssl genpkey` — the same key the Python sender uses, so the manifest signature and the sender's wire signatures verify against the same registered public key. Examine the script — it's the same toolchain you'll use for your real plugin.
 
 ### 3. Run the sender
 

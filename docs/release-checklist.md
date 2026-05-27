@@ -60,10 +60,10 @@ compile.
 cd examples/hello-world/plugin
 npm ci
 bash build.sh
-test -f manifest.signed.json
+test -f dist/manifest.signed.json
 ```
 
-`manifest.signed.json` proving the bundle signing pipeline
+`dist/manifest.signed.json` proving the bundle signing pipeline
 works end-to-end is the most-trusted "the build harness is OK"
 signal we have. Partners run this exact script first.
 

@@ -38,6 +38,37 @@ def canonical_json(fields: dict[str, Any]) -> bytes:
     return json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def compute_manifest_hash(signed_manifest: dict[str, Any]) -> bytes:
+    """Return SHA-256 of the canonical manifest bytes the server expects.
+
+    Mirrors `server/app/crypto/signatures.py::canonical_manifest_for_signing`
+    and `sdk-plugin/tools/sign-bundle.ts::canonicalJson` byte-for-byte:
+
+      - drop the `signature` field (cannot self-include)
+      - canonical JSON: sort_keys=True, separators=(",",":"),
+        ensure_ascii=True (non-ASCII is escaped to `\\uXXXX`, matching
+        Android's KFunction-based verifier byte-for-byte)
+      - SHA-256 the result
+
+    Pass the parsed `manifest.signed.json` dict (with both `bundleHash`
+    and `signature` set); this returns the `manifest_hash` argument
+    `Client.publish_plugin` expects. Encoded this way so partners do
+    not have to learn the canonicalization rules — codex 163 flagged
+    the hello-world example as broken because bot.py was reading a
+    nonexistent `manifest_hash` key off the signed manifest.
+    """
+    import hashlib as _hashlib
+
+    without_signature = {k: v for k, v in signed_manifest.items() if k != "signature"}
+    canonical = json.dumps(
+        without_signature,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return _hashlib.sha256(canonical).digest()
+
+
 def assemble_aad(
     *,
     sender_id: str,
