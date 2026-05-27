@@ -236,9 +236,20 @@ class RedisBroadcastHub:
             await pubsub.subscribe(redis_channel)
             ready.set()  # Triad 148 FIX — unblock subscribe()
             while True:
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=None
-                )
+                # Same socket-timeout fix as in
+                # app/services/events.py: the shared Redis client
+                # has `socket_timeout=10`, so an idle pubsub read
+                # raises `TimeoutError` every 10s. For a fan-out
+                # lane that's supposed to wait indefinitely between
+                # frames, that's normal — catch + continue. Pre-fix
+                # the live channel reader died ~10s after every
+                # subscribe, silently breaking the V3 #14 lane.
+                try:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=None
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    continue
                 if msg is None or msg.get("type") != "message":
                     continue
                 raw = msg.get("data")

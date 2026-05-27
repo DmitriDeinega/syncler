@@ -338,9 +338,23 @@ class RedisEventBus:
             await pubsub.subscribe(_sse_user_channel(user_id))
             ready.set()  # Triad 148 FIX — unblock subscribe()
             while True:
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=None
-                )
+                # `socket_timeout=10` on the shared Redis client (see
+                # app/redis_client.py) makes the underlying socket
+                # read raise `TimeoutError` every 10s of idle pubsub
+                # traffic. For a notification fan-out lane that's
+                # supposed to wait indefinitely between events,
+                # that's expected, not fatal — catch + continue.
+                # Previous behavior: SSE died ~10s after every phone
+                # connected, which meant the inbox auto-refresh
+                # path was effectively broken (user had to pull-to-
+                # refresh manually). External-Claude review caught
+                # the symptom; this is the fix.
+                try:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=None
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    continue
                 if msg is None or msg.get("type") != "message":
                     continue
                 raw = msg.get("data")
@@ -384,9 +398,15 @@ class RedisEventBus:
             await pubsub.subscribe(_sse_device_close_channel())
             ready.set()
             while True:
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=None
-                )
+                # Same socket-timeout-eats-idle-pubsub-reader fix
+                # as `_reader_loop_user` above. See that comment for
+                # context.
+                try:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=None
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    continue
                 if msg is None or msg.get("type") != "message":
                     continue
                 raw = msg.get("data")
