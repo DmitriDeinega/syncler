@@ -50,98 +50,91 @@ fun SettingsScreen(
         modifier = modifier,
         topBar = { TopAppBar(title = { Text("Settings") }) },
     ) { innerPadding ->
-        Column(
+        // V4 #20 fix: the screen was a Column with a weight(1f)
+        // LazyColumn for devices, then a stack of cards beneath it
+        // that got pushed off-screen with no way to scroll. Now the
+        // whole screen IS the LazyColumn so every section
+        // participates in one scroll surface.
+        val activeDevices = state.devices.filter { it.revokedAt == null }
+        val hasOthers = activeDevices.any { it.id != state.currentDeviceId }
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Devices", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(8.dp))
-            state.error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error)
-                Spacer(Modifier.height(8.dp))
+            item {
+                Text("Devices", style = MaterialTheme.typography.titleLarge)
+            }
+            state.error?.let { errMsg ->
+                item { Text(errMsg, color = MaterialTheme.colorScheme.error) }
             }
             if (state.loading) {
-                Text("Loading…", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(8.dp))
+                item { Text("Loading…", style = MaterialTheme.typography.bodySmall) }
             }
-            // Hide revoked devices. They pile up across re-signups during
-            // dev (every fresh login enrolls a new device row server-side)
-            // and the user has no useful action to take on a revoked one.
-            // Server still records them; we just don't surface them.
-            val activeDevices = state.devices.filter { it.revokedAt == null }
-            val hasOthers = activeDevices.any { it.id != state.currentDeviceId }
             if (hasOthers && state.currentDeviceId != null) {
-                OutlinedButton(
-                    onClick = { devicesViewModel.revokeAllOthers() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Revoke all other devices") }
-                Spacer(Modifier.height(8.dp))
+                item {
+                    OutlinedButton(
+                        onClick = { devicesViewModel.revokeAllOthers() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Revoke all other devices") }
+                }
             }
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(activeDevices, key = { it.id }) { device ->
-                    val isCurrent = device.id == state.currentDeviceId
-                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
-                        Column(Modifier.padding(16.dp)) {
-                            Text(
-                                if (isCurrent) "${device.id} — This device" else device.id,
-                                style = MaterialTheme.typography.titleSmall,
-                            )
-                            Text(
-                                "Created: ${device.createdAt ?: "unknown"}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                "Last seen: ${device.lastSeen ?: "never"}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            if (!isCurrent) {
-                                Button(onClick = { devicesViewModel.revoke(device.id) }) {
-                                    Text("Revoke")
-                                }
+            items(activeDevices, key = { it.id }) { device ->
+                val isCurrent = device.id == state.currentDeviceId
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(
+                            if (isCurrent) "${device.id} — This device" else device.id,
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "Created: ${device.createdAt ?: "unknown"}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            "Last seen: ${device.lastSeen ?: "never"}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        if (!isCurrent) {
+                            Button(onClick = { devicesViewModel.revoke(device.id) }) {
+                                Text("Revoke")
                             }
                         }
                     }
                 }
             }
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
-            Text("Account", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(8.dp))
+            item {
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+                Text("Account", style = MaterialTheme.typography.titleLarge)
+            }
             // V4 #20 — SensitiveActionGate surface. "Show my user ID"
             // demonstrates the biometric prompt; "Lock sensitive
             // actions" clears the in-memory unlock without wiping the
             // persisted master key (that's the Sign out button below).
-            SecurityCard(modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            // Phase 8c — `password_rewrap` rotation. Lives in
-            // feature/settings so the Hilt ViewModel + RotationRepository
-            // dependency edge stays out of :app.
-            ChangePasswordCard(modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            // Phase 8e — root_hygiene + root_compromise. Compromise
-            // flow's onLogout callback wipes the local session after
-            // the server-side revoke completes.
-            RotateMasterKeyCard(
-                modifier = Modifier.fillMaxWidth(),
-                onLogout = onLogout,
-            )
-            Spacer(Modifier.height(12.dp))
-            // V2 closeout triad 142 #1 — per-plugin capability
-            // grant list with revoke + last-used hint + privacy
-            // tip on last-plugin OS perm revoke.
-            PluginPermissionsCard(modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = onLogout,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Log out") }
-            Spacer(Modifier.height(16.dp))
+            item { SecurityCard(modifier = Modifier.fillMaxWidth()) }
+            // Phase 8c — `password_rewrap` rotation.
+            item { ChangePasswordCard(modifier = Modifier.fillMaxWidth()) }
+            // Phase 8e — root_hygiene + root_compromise.
+            item {
+                RotateMasterKeyCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    onLogout = onLogout,
+                )
+            }
+            // V2 closeout triad 142 #1 — per-plugin capability list.
+            item { PluginPermissionsCard(modifier = Modifier.fillMaxWidth()) }
+            item {
+                Button(
+                    onClick = onLogout,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Log out") }
+                Spacer(Modifier.height(16.dp))
+            }
         }
     }
 }
