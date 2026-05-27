@@ -11,7 +11,6 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "app.syncler.android"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
@@ -21,10 +20,17 @@ android {
             ?: "http://10.0.2.2:8000/"
         buildConfigField("String", "SERVER_BASE_URL", "\"$baseUrl\"")
 
-        // Environment label. Override at build time:
+        // Environment label + applicationId. Override at build time:
         //   ./gradlew :app:assembleDebug -Psyncler.environment=PROD
-        // Anything other than "PROD" labels the app "Syncler DEV".
+        //   ./gradlew :app:assembleDebug -Psyncler.environment=TEST
+        // PROD installs as `app.syncler.android` ("Syncler"). Any other
+        // env appends a lowercase suffix so multiple variants can live
+        // side-by-side on the same device (TEST → `app.syncler.android.test`
+        // labelled "Syncler TEST", default DEV → `app.syncler.android.dev`
+        // labelled "Syncler DEV").
         val env = (project.findProperty("syncler.environment") as? String)?.uppercase() ?: "DEV"
+        applicationId = if (env == "PROD") "app.syncler.android"
+                        else "app.syncler.android.${env.lowercase()}"
         val appName = if (env == "PROD") "Syncler" else "Syncler $env"
         resValue("string", "app_name", appName)
         buildConfigField("String", "BUILD_ENVIRONMENT", "\"$env\"")
