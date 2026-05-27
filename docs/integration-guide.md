@@ -1092,13 +1092,37 @@ The server is content-blind by construction. There is no path to a "delivery rec
 
 ### What you can observe (partner-facing)
 
-Today, via `GET /v1/senders/me/*` endpoints (Ed25519-signed like every other admin call):
+Three Ed25519-signed GET endpoints under `/v1/senders/me/*`:
 
-- `/v1/senders/me/messages?limit=N` — last N messages your sender produced: row id, encrypted-body size, `created_at`, `expires_at`. No payload visibility.
-- `/v1/senders/me/cards?limit=N` — last N live cards: `card_key`, `sequence_number`, `updated_at`, `expires_at`.
-- `/v1/senders/me/stats` — totals: messages in window, paired users, live cards in flight.
+- `GET /v1/senders/me/messages?limit=N` — last N messages your sender produced: `id`, `user_id`, `plugin_id`, `encrypted_body_size`, `sent_at`, `expires_at`. No payload visibility.
+- `GET /v1/senders/me/cards?limit=N` — last N live cards: `id`, `user_id`, `plugin_id`, `card_key`, `sequence_number`, `created_at`, `updated_at`, `expires_at`.
+- `GET /v1/senders/me/stats` — counts: `messages_sent_last_24h`, `paired_users_active`, `live_cards_in_flight`.
 
 These tell you "did my send reach the server", "how many users have paired", "what's my recent throughput". Use them as the first stop when a partner integration appears unhealthy.
+
+**Python SDK** wraps all three — no canonical-string knowledge required:
+
+```python
+client.list_messages(limit=20)   # → list[dict]
+client.list_live_cards(limit=20) # → list[dict]
+client.get_stats()               # → {"messages_sent_last_24h": ..., ...}
+```
+
+**Non-Python clients** sign the canonical string yourself and send three headers:
+
+```
+X-Sender-Id:        <sender uuid>
+X-Sender-Timestamp: <unix seconds>
+X-Sender-Signature: <base64 ed25519 sig over canonical string>
+```
+
+Where the canonical string is ASCII:
+
+```
+syncler-v1-senders-me:<endpoint>:<sender_id>:<query>:<timestamp>
+```
+
+`<endpoint>` is one of `messages | cards | stats`. `<query>` is `limit=N` for the list endpoints and the empty string for stats. `<timestamp>` is integer unix seconds and MUST be within ±300s of server time (replay window). Invalid signature, stale timestamp, or unknown sender → 401/404/410.
 
 ### What you can observe (operator-facing, not partner-visible)
 
@@ -1115,7 +1139,7 @@ These are not exposed to partners; they're the operator's tool for diagnosing sy
 
 1. **`/v1/senders/me/stats`** first — did the message-count tick up after their `send_to`?
 2. **`/v1/senders/me/messages?limit=10`** — is their recent message ID present? `expires_at` reasonable?
-3. **Pairing check** — is the user paired (`/v1/senders/me/stats` reports `paired_users`)? If they re-paired, their `user_id` may have changed.
+3. **Pairing check** — is the user paired (`/v1/senders/me/stats` reports `paired_users_active`)? If they re-paired, their `user_id` may have changed.
 4. **Device-side** — is the user's Syncler app foregrounded (SSE active) or backgrounded (FCM dependent)? Network connectivity on the device?
 5. **Operator escalation** — if 1-4 look fine, the operator can grep the Caddy + uvicorn logs for the message ID's timestamp window.
 

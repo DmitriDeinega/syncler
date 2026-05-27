@@ -919,6 +919,77 @@ class Client:
         )
         resp.raise_for_status()
 
+    # ---------------------------- Observability (V3 Tier 2B) --------------
+    #
+    # Three thin wrappers around `GET /v1/senders/me/{messages,cards,stats}`.
+    # Header-signed Ed25519 over a canonical string — see the server side
+    # at `server/app/routers/senders.py::_authenticate_senders_me` and the
+    # integration guide §15 for the contract.
+    #
+    # The SDK shields callers from the canonical-string format entirely;
+    # they just call ``client.list_messages(limit=20)``.
+
+    def _senders_me_headers(self, *, endpoint: str, query: str) -> dict[str, str]:
+        import time as _time
+        self._require_sender_id()
+        ts = int(_time.time())
+        canonical = (
+            f"syncler-v1-senders-me:{endpoint}:"
+            f"{self._canonical_sender_id()}:{query}:{ts}"
+        ).encode("ascii")
+        signature = self.private_key.sign(canonical)
+        return {
+            "X-Sender-Id": self._canonical_sender_id(),
+            "X-Sender-Timestamp": str(ts),
+            "X-Sender-Signature": b64(signature),
+        }
+
+    def list_messages(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the last `limit` messages this sender produced.
+
+        Metadata only — never plaintext. Useful first stop when debugging
+        "did my last 10 sends reach the server?". Server contract:
+        ``docs/integration-guide.md §15``.
+        """
+        if not 1 <= limit <= 200:
+            raise SynclerError("limit must be between 1 and 200")
+        headers = self._senders_me_headers(endpoint="messages", query=f"limit={limit}")
+        resp = self.session.get(
+            f"{self.base_url}/v1/senders/me/messages",
+            params={"limit": limit},
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["items"]
+
+    def list_live_cards(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the last `limit` live cards this sender produced."""
+        if not 1 <= limit <= 200:
+            raise SynclerError("limit must be between 1 and 200")
+        headers = self._senders_me_headers(endpoint="cards", query=f"limit={limit}")
+        resp = self.session.get(
+            f"{self.base_url}/v1/senders/me/cards",
+            params={"limit": limit},
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["items"]
+
+    def get_stats(self) -> dict[str, int]:
+        """Counts only. Sized for partner debugging.
+
+        Returns ``{messages_sent_last_24h, paired_users_active,
+        live_cards_in_flight}``.
+        """
+        headers = self._senders_me_headers(endpoint="stats", query="")
+        resp = self.session.get(
+            f"{self.base_url}/v1/senders/me/stats", headers=headers, timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ---------------------------- Helpers ----------------------------------
 
     def _require_sender_id(self) -> None:
