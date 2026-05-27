@@ -1,0 +1,36 @@
+[Unit]
+# Brings up the Postgres + Redis containers Syncler depends on, before
+# uvicorn starts. The failure mode this unit exists to prevent: a
+# `docker container prune` (or a host reboot) wipes the containers, then
+# uvicorn starts on its next Restart= cycle and crash-loops against
+# 127.0.0.1:65432 / 127.0.0.1:65379 with "connection refused" — the
+# error sits in journalctl until somebody notices the deploy is dead.
+# Partner outage on 2026-05-26 was exactly this shape.
+#
+# Pair this with syncler.service which gets Requires=syncler-stack.service
+# + After=syncler-stack.service so the lifecycle is one ordered chain.
+#
+# Spec: docs/release-checklist.md §1 (deploy ops).
+
+Description=Syncler Postgres + Redis stack (docker compose)
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+User=ec2-user
+WorkingDirectory=/opt/syncler/server
+# `--env-file .env` so the COMPOSE_FILE pointer inside .env is read
+# (`docker compose` does NOT auto-source .env for COMPOSE_FILE — it
+# only sources for service-level interpolation, which is too late).
+ExecStart=/usr/bin/docker compose --env-file .env up -d
+ExecStop=/usr/bin/docker compose --env-file .env stop
+
+# Don't restart on failure — if compose itself errors out, we want a
+# human in the loop, not a tight retry loop hammering Docker.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

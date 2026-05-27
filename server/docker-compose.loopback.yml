@@ -1,0 +1,39 @@
+# Loopback-only port mapping override for production / test deployments.
+#
+# Use case: the host already terminates TLS (Caddy or similar) and uvicorn
+# runs on the same box behind a reverse proxy. Postgres + Redis must NOT
+# be reachable from the public internet — they bind to 127.0.0.1 only.
+#
+# Why "loopback" not "prod": this layout is what every deployment that
+# binds the SDK and uvicorn to localhost wants. The original ".prod.yml"
+# name caused exactly the outage it was supposed to prevent — a test
+# operator skipped what looked like a prod-only file, brought the stack
+# up on the base compose's dev ports (5433 / 6380), and uvicorn started
+# crash-looping against ports nothing was listening on.
+#
+# Canonical bring-up command (also baked into `COMPOSE_FILE` in .env):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.loopback.yml \
+#                  --env-file .env up -d
+#
+# Or with `COMPOSE_FILE=docker-compose.yml:docker-compose.loopback.yml`
+# in `.env`, just:
+#
+#   docker compose up -d
+#
+# Spec: matches `.env.example`'s `DATABASE_URL=...@127.0.0.1:65432/...`
+# and `REDIS_URL=redis://127.0.0.1:65379/0` so a bare-bones operator
+# can boot the stack with no manual port-mapping math.
+
+services:
+  postgres:
+    # `!override` replaces the base file's port list rather than
+    # appending to it — without this you'd end up with BOTH 5433 and
+    # 65432 mapped, and any cleanup that touched one container would
+    # silently leave the other behind.
+    ports: !override
+      - "127.0.0.1:65432:5432"
+
+  redis:
+    ports: !override
+      - "127.0.0.1:65379:6379"

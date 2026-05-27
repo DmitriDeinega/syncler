@@ -1,0 +1,37 @@
+[Unit]
+# uvicorn for the FastAPI server. Bound to the syncler-stack.service
+# (Postgres + Redis containers) so a fresh boot or container wipe brings
+# the database up FIRST, then uvicorn — preventing the crash-loop that
+# bit the AWS test box on 2026-05-26 when a stray `docker container
+# prune` removed the stack but uvicorn kept retrying on dead ports.
+#
+# Pair this with deploy/syncler-stack.service. The unit files live in
+# the repo at deploy/ and are installed on the box at
+# /etc/systemd/system/ — they are NOT auto-applied by any of the build
+# tooling.
+
+Description=Syncler FastAPI server (uvicorn)
+After=docker.service network-online.target syncler-stack.service
+Wants=docker.service network-online.target
+Requires=syncler-stack.service
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/syncler/server
+EnvironmentFile=/opt/syncler/server/.env
+ExecStart=/opt/syncler/server/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 63204 --workers 1 --proxy-headers --forwarded-allow-ips '*'
+Restart=on-failure
+RestartSec=3
+
+# Hardening. ProtectHome=yes is load-bearing — asyncpg auto-probes
+# $HOME/.postgresql/ for client SSL certs and a misconfigured probe
+# was the first signup-500 incident. With ProtectHome=yes the probe
+# fails cleanly (the directory isn't visible) and `?ssl=disable` in
+# DATABASE_URL skips the probe entirely. Spec: server/.env.example.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
