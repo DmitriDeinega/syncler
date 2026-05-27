@@ -848,6 +848,23 @@ class PluginPublishRequest(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def _require_icon_format_with_hash(self) -> "PluginPublishRequest":
+        # V4 #21 triad 170 codex fix: the schema docstring said
+        # `icon_content_hash` MUST also pass `icon_format`, but the
+        # constraint wasn't enforced. A publisher could send a hash
+        # without a format and the row would land with NULL format,
+        # breaking the asset GET later.
+        if self.icon_content_hash is not None and self.icon_format is None:
+            raise ValueError(
+                "icon_format is required when icon_content_hash is set"
+            )
+        if self.icon_format is not None and self.icon_content_hash is None:
+            raise ValueError(
+                "icon_content_hash is required when icon_format is set"
+            )
+        return self
+
     @field_validator("live_inbound_url")
     @classmethod
     def validate_live_inbound_url(cls, value: str | None) -> str | None:

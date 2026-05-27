@@ -160,7 +160,20 @@ async def push_card_event_to_user_devices(
         "card_key": card_key,
         "min_plugin_version": min_plugin_version or "",
     }
-    return [_deliver(app, device, payload) for device in devices]
+    # V4 #21 triad 170 codex finding #3: invalid FCM tokens were
+    # not being cleaned up on the card-event path. Mirror the
+    # message path: drop the token from the device row on
+    # invalid_token, then commit so retries don't keep hitting
+    # the dead token.
+    outcomes: list[FcmResult] = []
+    for device in devices:
+        outcome = _deliver(app, device, payload)
+        outcomes.append(outcome)
+        if not outcome.delivered and outcome.error == "invalid_token":
+            device.fcm_token = None
+    if any(o.error == "invalid_token" for o in outcomes):
+        await db.commit()
+    return outcomes
 
 
 async def push_dismiss_to_other_devices(

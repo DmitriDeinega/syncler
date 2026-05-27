@@ -218,7 +218,10 @@ async def upload_plugin_asset(
 async def get_plugin_asset(
     plugin_row_id: uuid.UUID,
     content_hash_b64url: str,
-    _: None = Depends(rate_limit("manifest_fetch")),
+    # Anonymous read; IP-based bucket because the path carries
+    # plugin_row_id (a UUID) not the sender_id that
+    # manifest_fetch's actor lookup expects.
+    _: None = Depends(rate_limit("message_send_ip")),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Public read for plugin asset bytes.
@@ -230,8 +233,12 @@ async def get_plugin_asset(
     to verify the plugin actually references this asset (a bare
     hash lookup would let anyone enumerate the asset table).
     """
+    # Compute the right amount of padding rather than always adding
+    # "==". Python's base64 decoder is strict about input length
+    # being a multiple of 4; over-padding throws.
+    padding = (-len(content_hash_b64url)) % 4
     try:
-        content_hash = base64.urlsafe_b64decode(content_hash_b64url + "==")
+        content_hash = base64.urlsafe_b64decode(content_hash_b64url + "=" * padding)
     except Exception as exc:
         raise HTTPException(status_code=400, detail="invalid content_hash") from exc
     if len(content_hash) != 32:

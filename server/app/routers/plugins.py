@@ -152,6 +152,34 @@ async def publish(
     request.state.sender_id = str(payload.sender_id)
     await check_rate_limit(db, request, RATE_LIMITS["plugin_publish"])
 
+    # V4 #21 triad 170 codex fix: verify the icon asset row exists
+    # BEFORE persisting the plugin row. Without this check, a
+    # publisher can sign a valid 32-byte hash that was never
+    # uploaded; the manifest then references a non-existent asset
+    # and every client load returns 404 forever.
+    icon_hash_bytes: bytes | None = None
+    if payload.icon_content_hash is not None:
+        icon_hash_bytes = base64.b64decode(payload.icon_content_hash, validate=True)
+        from app.models import PluginAsset
+        asset = await db.get(PluginAsset, icon_hash_bytes)
+        if asset is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "icon_content_hash references no uploaded asset; "
+                    "POST /v1/plugins/me/assets first, then publish "
+                    "with the returned hash"
+                ),
+            )
+        if asset.format != payload.icon_format:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"icon_format {payload.icon_format!r} does not match "
+                    f"uploaded asset format {asset.format!r}"
+                ),
+            )
+
     try:
         plugin = await publish_plugin(
             db,
@@ -175,10 +203,7 @@ async def publish(
             notif_message=payload.notif_message,
             notif_card_arrived=payload.notif_card_arrived,
             notif_card_updated=payload.notif_card_updated,
-            icon_content_hash=(
-                base64.b64decode(payload.icon_content_hash, validate=True)
-                if payload.icon_content_hash else None
-            ),
+            icon_content_hash=icon_hash_bytes,
             icon_format=payload.icon_format,
             icon_background_color=payload.icon_background_color,
             icon_visibility=payload.icon_visibility,

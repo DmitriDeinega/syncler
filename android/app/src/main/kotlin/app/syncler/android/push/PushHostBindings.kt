@@ -59,12 +59,20 @@ class HostPluginMessagePipeline @Inject constructor(
         // M7 closes the device-side verification gap.
         Timber.tag(TAG).i("I4: paired sender %s found for message %s", dto.senderId, messageId)
 
+        // V4 #21 triad 170 codex fix: look up the plugin's
+        // manifest identifier so the V4 #19 gate (mute / quiet
+        // hours) can match its per-plugin settings row by the
+        // identifier key. The FCM payload carries the plugin row
+        // UUID; the gate indexes by manifest identifier.
+        val pluginIdentifier = runCatching { api.getPluginById(pluginRowId = pluginId).pluginIdentifier }
+            .getOrNull()
         return PluginMessageOutcome(
             notification = PluginNotificationRequest(
                 title = paired.senderName,
                 body = "New message",
                 groupId = "${paired.senderId}::${dto.pluginId}",
             ),
+            pluginIdentifier = pluginIdentifier,
         )
     }
 
@@ -114,6 +122,12 @@ class HostPluginMessagePipeline @Inject constructor(
                 // notification bundle.
                 groupId = "${manifest.senderId}::${manifest.pluginIdentifier}",
             ),
+            // V4 #21 triad 170 codex fix: gate.shouldPost matches
+            // mute / quiet-hours settings by the plugin manifest
+            // identifier, not by the row UUID we already have. We
+            // fetched the manifest above; pass its identifier
+            // through.
+            pluginIdentifier = manifest.pluginIdentifier,
         )
     }
 

@@ -75,13 +75,19 @@ class PluginNotificationService : Service() {
                         )
                     }
                     outcome?.notification?.let { notification ->
-                        val decision = gate.shouldPost(pluginId)
+                        // Codex 170 fix: gate.shouldPost wants the
+                        // plugin manifest identifier; the pipeline
+                        // populates outcome.pluginIdentifier from
+                        // the manifest lookup. Falling back to the
+                        // UUID would silently ALLOW everything.
+                        val gateKey = outcome.pluginIdentifier ?: pluginId
+                        val decision = gate.shouldPost(gateKey)
                         if (decision == PluginNotificationGate.Decision.ALLOW) {
                             notifications.post(this@PluginNotificationService, notification)
                         } else {
                             Timber.tag(TAG).i(
                                 "card-event notification suppressed for plugin=%s reason=%s",
-                                pluginId, decision,
+                                gateKey, decision,
                             )
                         }
                     }
@@ -121,15 +127,21 @@ class PluginNotificationService : Service() {
                 } else {
                     outcome.notification?.let { notification ->
                         // V4 #19 — gate the post on per-plugin prefs.
-                        // pluginId here is the manifest identifier
-                        // (matches the PluginSettings map key).
-                        val decision = gate.shouldPost(pluginId)
+                        // V4 #21 triad 170 fix: gate.shouldPost wants
+                        // the plugin manifest identifier, not the row
+                        // UUID the FCM payload carries. The pipeline
+                        // populates outcome.pluginIdentifier when it
+                        // has the manifest in hand. Pre-V4-#21 this
+                        // call passed the UUID and silently ALLOWed
+                        // everything regardless of mute / quiet hours.
+                        val gateKey = outcome.pluginIdentifier ?: pluginId
+                        val decision = gate.shouldPost(gateKey)
                         if (decision == PluginNotificationGate.Decision.ALLOW) {
                             notifications.post(this@PluginNotificationService, notification)
                         } else {
                             Timber.tag(TAG).i(
                                 "notification suppressed for plugin=%s reason=%s",
-                                pluginId, decision,
+                                gateKey, decision,
                             )
                         }
                     }
@@ -274,6 +286,18 @@ data class PluginMessageOutcome(
     val notification: PluginNotificationRequest? = null,
     val requiresUpdate: Boolean = false,
     val requiredVersion: String? = null,
+    /**
+     * V4 #21 triad 170 codex fix: the V4 #19 quiet-hours / mute
+     * gate keys per-plugin settings by the plugin's manifest
+     * identifier (e.g. "com.oloia.workflow"), NOT the plugin row
+     * UUID. FCM payloads carry the UUID, so the pipeline must look
+     * up the identifier and pass it back here. If null, the
+     * service falls back to the UUID — which means no settings
+     * row matches, gate ALLOWs by default — and the gate
+     * effectively becomes a no-op. Pipeline implementations SHOULD
+     * populate this.
+     */
+    val pluginIdentifier: String? = null,
 )
 
 data class PluginNotificationRequest(
